@@ -229,6 +229,8 @@ pub(crate) struct SheetView {
     pub(crate) form: Option<Form>,
     /// The note of a link that was just made.
     pub(crate) made: Option<String>,
+    /// "Copy Link" of the link that was just made takes the focus, until it holds it.
+    pub(crate) focus_copy: bool,
     pub(crate) busy: bool,
     pub(crate) error: Option<String>,
     pub(crate) retry: bool,
@@ -253,13 +255,16 @@ fn link_rows(ui: &mut Ui, links: &[LinkRow], action: &mut Option<LinkAction>) {
             g.row(|ui| {
                 let copy = format!("Copy the link {}", link.title);
                 let revoke = format!("Revoke the link {}", link.title);
-                // The rightmost button first.
+                // The rightmost button first, and the first that takes the focus: Copy.
+                // Revoke never comes first, so a focus that the sheet moves to its first
+                // control (after the owner check, or when a focused button goes) never
+                // lands on it, and Return never revokes.
                 let mut buttons: Vec<(&str, &str, Style)> = Vec::new();
-                if link.can_revoke {
-                    buttons.push((REVOKE, revoke.as_str(), Style::Bordered));
-                }
                 if link.can_copy {
                     buttons.push((COPY, copy.as_str(), Style::Bordered));
+                }
+                if link.can_revoke {
+                    buttons.push((REVOKE, revoke.as_str(), Style::Bordered));
                 }
                 let title = rows::label_text(&link.title);
                 if let Some(index) =
@@ -320,7 +325,9 @@ fn form_rows(ui: &mut Ui, form: &mut Form) {
     });
 }
 
-/// The body of the sheet: the title, the Public Link part, and the buttons.
+/// The body of the sheet: the title, the Public Link part, and the buttons. With
+/// `view.focus_copy`, "Copy Link" takes the focus; once it holds the focus from the frame
+/// before, `view.focus_copy` turns off.
 pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction> {
     let mut action = None;
     kit::sheet_title(
@@ -344,9 +351,19 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
         }
         if let Some(made) = &view.made {
             ui.add_space(8.0);
-            let copy = kit::notice(ui, Tone::Good, READY, Some(made.as_str()), |ui| {
-                kit::small_button(ui, COPY_LINK, Style::Prominent).clicked()
+            let focus = view.focus_copy;
+            let (copy, held) = kit::notice(ui, Tone::Good, READY, Some(made.as_str()), |ui| {
+                let button = kit::small_button(ui, COPY_LINK, Style::Prominent);
+                // Return on the new link copies it.
+                let held = button.has_focus();
+                if focus && !held {
+                    button.request_focus();
+                }
+                (button.clicked(), held)
             });
+            if held {
+                view.focus_copy = false;
+            }
             if copy {
                 action = Some(LinkAction::CopyMade);
             }
@@ -540,6 +557,8 @@ struct Made {
     target: LinkTarget,
     note: String,
     link: Zeroizing<String>,
+    /// "Copy Link" still has to take the focus.
+    focus: bool,
 }
 
 /// The state of the sheet and of the Settings list.
@@ -680,6 +699,10 @@ pub(crate) fn sheet_view(app: &DesktopApp, target: &LinkTarget) -> SheetView {
             .as_ref()
             .filter(|made| &made.target == target)
             .map(|made| made.note.clone()),
+        focus_copy: links
+            .made
+            .as_ref()
+            .is_some_and(|made| &made.target == target && made.focus),
         busy: links.busy() || links.asked,
         error: links.error.clone(),
         retry: links.retry.is_some(),
@@ -714,6 +737,11 @@ pub(crate) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, target: LinkTarge
     });
     if view.form.is_some() {
         app.ui.connect.links.form = view.form.clone();
+    }
+    if !view.focus_copy
+        && let Some(made) = app.ui.connect.links.made.as_mut()
+    {
+        made.focus = false;
     }
     if let Some(action) = action {
         act(app, ctx, &target, action);
@@ -1006,6 +1034,7 @@ fn apply(app: &mut DesktopApp, outcome: Outcome) {
                             target,
                             note: ready_note(&row.addresses, row.expires_at),
                             link: created.link(),
+                            focus: true,
                         });
                     }
                     _ => links.error = Some(LinkError::Vault.to_string()),

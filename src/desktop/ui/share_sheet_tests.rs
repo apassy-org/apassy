@@ -32,6 +32,7 @@ fn view() -> SheetView {
         links: Vec::new(),
         form: None,
         made: None,
+        focus_copy: false,
         busy: false,
         error: None,
         retry: false,
@@ -340,4 +341,146 @@ fn the_form_checks_the_addresses_first() {
         ..Form::default()
     };
     assert_eq!(many.options(), Err(LinkError::AddressCount));
+}
+
+/// The spoken name of the control that has the keyboard focus after `frames` frames of
+/// `add` in keyboard mode, with `events` in the first frame; and what `add` returned in
+/// that frame (the frame of the events, so a key's action shows).
+fn focused_after<T>(
+    ctx: &egui::Context,
+    frames: usize,
+    events: Vec<egui::Event>,
+    mut add: impl FnMut(&egui::Context, &mut Ui) -> Option<T>,
+) -> (Option<String>, Option<T>) {
+    let mut focused = None;
+    let mut last = None;
+    let mut events = Some(events);
+    for frame in 0..frames {
+        let input_events = if frame == 0 {
+            events.take().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut returned = None;
+        let output = ctx.run_ui(input(frame as f64 * 0.1, input_events), |ui| {
+            let ctx = ui.ctx().clone();
+            super::kit::set_keyboard_mode(&ctx, true);
+            returned = add(&ctx, ui);
+        });
+        if let Some(update) = &output.platform_output.accesskit_update {
+            focused = update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == update.focus)
+                .and_then(|(_, node)| node.label().map(str::to_owned));
+        }
+        if frame == 0 || last.is_none() {
+            last = returned;
+        }
+        output.drop_without_applying_deltas();
+    }
+    (focused, last)
+}
+
+fn key(key: egui::Key) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
+/// A view of the sheet with one link of this account (Copy and Revoke) and, with `made`,
+/// the "Link ready" box of a link that was just made.
+fn made_view(made: bool) -> SheetView {
+    let rows = rows_of(
+        &[link("acc_k7m2q4x3ca", &[], false)],
+        None,
+        Some("acc_k7m2q4x3ca"),
+        &BTreeMap::new(),
+        false,
+        NOW,
+    );
+    let mut shown = view();
+    shown.links = rows;
+    if made {
+        shown.made = Some(ready_note(&[], NOW + 7 * 86_400));
+        shown.focus_copy = true;
+    }
+    shown
+}
+
+/// After "Create Link" the keyboard focus is on "Copy Link" of the "Link ready" box, also
+/// when the sheet is the top sheet again after the owner check (which moves the focus to
+/// its first control): Return copies the link and never revokes it. Without a new link,
+/// the focus that the sheet or a Tab moves first lands on Copy, never on Revoke, in the
+/// sheet and in Settings › Connect › Public Links.
+#[test]
+fn after_create_link_focus_is_on_copy_link() {
+    // The sheet comes back on top with the new link: Copy Link takes the focus and keeps
+    // it; the flag of the view turns off once it holds it.
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut shown = made_view(true);
+    let (focused, _) = focused_after(&ctx, 4, Vec::new(), |ctx, _| {
+        let mut action = None;
+        let _ = super::kit::sheet(ctx, "share-sheet", 460.0, |ui| {
+            action = draw_sheet(ui, &mut shown);
+        });
+        action
+    });
+    assert_eq!(focused.as_deref(), Some(COPY_LINK));
+    assert!(
+        !shown.focus_copy,
+        "the focus request ends once Copy Link holds it"
+    );
+    // Return copies.
+    let (focused, action) = focused_after(&ctx, 1, vec![key(egui::Key::Enter)], |ctx, _| {
+        let mut action = None;
+        let _ = super::kit::sheet(ctx, "share-sheet", 460.0, |ui| {
+            action = draw_sheet(ui, &mut shown);
+        });
+        action
+    });
+    assert_eq!(focused.as_deref(), Some(COPY_LINK));
+    assert_eq!(action, Some(LinkAction::CopyMade));
+
+    // No new link: the sheet moves the focus to its first control, Copy of the row.
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut shown = made_view(false);
+    let (focused, action) = focused_after(&ctx, 4, Vec::new(), |ctx, _| {
+        let mut action = None;
+        let _ = super::kit::sheet(ctx, "share-sheet", 460.0, |ui| {
+            action = draw_sheet(ui, &mut shown);
+        });
+        action
+    });
+    let focused = focused.unwrap_or_default();
+    assert!(focused.starts_with("Copy"), "{focused}");
+    assert!(!focused.contains(REVOKE), "{focused}");
+    assert_eq!(action, None);
+
+    // Settings › Connect › Public Links: the first Tab lands on Copy.
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let rows = rows_of(
+        &[link("acc_k7m2q4x3ca", &[], false)],
+        None,
+        Some("acc_k7m2q4x3ca"),
+        &BTreeMap::new(),
+        true,
+        NOW,
+    );
+    let (_, _) = focused_after(&ctx, 2, Vec::new(), |_, ui| {
+        draw_settings(ui, &rows, None, false)
+    });
+    let (focused, action) = focused_after(&ctx, 2, vec![key(egui::Key::Tab)], |_, ui| {
+        draw_settings(ui, &rows, None, false)
+    });
+    let focused = focused.unwrap_or_default();
+    assert!(focused.starts_with("Copy"), "{focused}");
+    assert_eq!(action, None);
 }
