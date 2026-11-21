@@ -22,7 +22,7 @@ use apassy::vault::{
 use tempfile::TempDir;
 
 const PASS: &str = "synthetic-migration-passphrase";
-const CURRENT_VERSION: i64 = 34;
+const CURRENT_VERSION: i64 = 35;
 /// The vault ID of the frozen version 13 file.
 const V13_VAULT_ID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab";
 
@@ -2397,6 +2397,7 @@ fn version_19_migration_moves_relay_device_and_is_atomic() {
     }
     // Schema 34 (the account key source), 32 (short-lived credentials), 29 (the host
     // of the bouncer brain), and 28 (the pinned trust of a membership) first.
+    conn.execute_batch(SCHEMA35_ONLY).expect("drop schema 35");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
@@ -2574,6 +2575,7 @@ fn build_schema27(path: &Path) {
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA35_ONLY).expect("drop schema 35");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
@@ -2758,6 +2760,7 @@ fn build_previous(path: &Path) -> u64 {
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA35_ONLY).expect("drop schema 35");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(SCHEMA29_ONLY).expect("drop schema 29");
@@ -2896,6 +2899,7 @@ fn build_before_32(path: &Path) -> u64 {
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA35_ONLY).expect("drop schema 35");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(SCHEMA32_ONLY).expect("drop schema 32");
     conn.execute_batch(&format!(
@@ -2970,6 +2974,23 @@ fn schema_32_adds_short_lived_and_member_key() {
     assert_eq!(raw_versions(&blocked), (CURRENT_VERSION, CURRENT_VERSION));
 }
 
+/// What a file of schema 35 has and a file of schema 34 has not (`src/vault/schema35.rs`):
+/// the public links, and several folders per credential. The way back keeps the first
+/// folder of each credential. The rebuilt `item_folder` has no triggers; the step to 35
+/// makes them again when the file migrates.
+const SCHEMA35_ONLY: &str = "
+DROP TABLE public_link;
+CREATE TABLE item_folder_v34 (item_id INTEGER PRIMARY KEY, folder_uuid TEXT NOT NULL);
+INSERT INTO item_folder_v34 (item_id, folder_uuid)
+    SELECT f.item_id, f.folder_uuid FROM item_folder f
+    WHERE NOT EXISTS (
+        SELECT 1 FROM item_folder g
+        WHERE g.item_id = f.item_id AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
+    );
+DROP TABLE item_folder;
+ALTER TABLE item_folder_v34 RENAME TO item_folder;
+";
+
 /// The schema before schema 34 in the migration chain (`src/vault/schema34.rs`,
 /// `PREVIOUS_SCHEMA_VERSION`). Change it with that constant when the step is renumbered.
 const BEFORE_34: i64 = 32;
@@ -3025,6 +3046,7 @@ fn build_before_34(path: &Path) {
     drop(vault);
     let conn = rusqlite::Connection::open(path).expect("open");
     conn.pragma_update(None, "key", PASS).expect("key");
+    conn.execute_batch(SCHEMA35_ONLY).expect("drop schema 35");
     conn.execute_batch(SCHEMA34_ONLY).expect("drop schema 34");
     conn.execute_batch(&format!(
         "UPDATE vault_meta SET schema_version = {BEFORE_34} WHERE id = 1;

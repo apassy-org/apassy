@@ -227,7 +227,10 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 34 (the account key source of relay memberships, `schema34.rs`) first.
+        // Schema 35 (several folders, `schema35.rs`) and 34 (the account key source of
+        // relay memberships, `schema34.rs`) first.
+        conn.execute_batch(&crate::vault::schema35::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&crate::vault::schema34::downgrade_sql())
             .unwrap();
         conn.execute_batch(&downgrade_sql()).unwrap();

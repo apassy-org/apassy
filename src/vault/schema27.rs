@@ -85,14 +85,15 @@ UPDATE vault_meta SET schema_version = 26 WHERE id = 1;
 PRAGMA user_version = 26;
 ";
 
-/// The way back from the current schema to schema 27: `schema34::downgrade_sql` (the
-/// account key source of relay memberships), `schema32::downgrade_sql` (short-lived
+/// The way back from the current schema to schema 27: `schema35::downgrade_sql`
+/// (several folders and public links), `schema34::downgrade_sql` (the account key source of relay memberships), `schema32::downgrade_sql` (short-lived
 /// credentials), `schema29::downgrade_sql` (the host of the bouncer brain), and then
 /// `schema28::downgrade_sql` (the pinned trust of a membership).
 #[cfg(test)]
 pub(super) fn downgrade_to_27_sql() -> String {
     format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
+        super::schema35::downgrade_sql(),
         super::schema34::downgrade_sql(),
         super::schema32::downgrade_sql(),
         super::schema29::downgrade_sql(),

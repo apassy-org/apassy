@@ -32,7 +32,7 @@
 
 use rusqlite::Transaction;
 
-use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
+use super::types::{VaultErrorKind, VaultResult, err};
 use super::verify_expected_columns_in;
 
 /// The schema version of the account key source of relay memberships.
@@ -40,7 +40,7 @@ pub(super) const ACCOUNT_KEY_SCHEMA_VERSION: i64 = 34;
 /// The newest schema before this one in the migration chain.
 pub(super) const PREVIOUS_SCHEMA_VERSION: i64 = super::schema32::SHORT_LIVED_SCHEMA_VERSION;
 
-const _: () = assert!(SCHEMA_VERSION == ACCOUNT_KEY_SCHEMA_VERSION);
+// Schema 35 (`schema35.rs`) follows this step.
 const _: () = assert!(PREVIOUS_SCHEMA_VERSION < ACCOUNT_KEY_SCHEMA_VERSION);
 
 /// The stored name of a row that keeps its own key.
@@ -99,6 +99,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
+    use crate::vault::types::SCHEMA_VERSION;
     use crate::vault::{
         MembershipPurpose, OPEN_EXISTING, RelayMembership, Vault, VaultErrorKind, apply_key,
         close_conn,
@@ -157,6 +158,9 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        // Schema 35 (several folders and public links, `schema35.rs`) first.
+        conn.execute_batch(&crate::vault::schema35::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&downgrade_sql()).unwrap();
         assert_eq!(version(&conn), PREVIOUS_SCHEMA_VERSION);
         assert!(
@@ -255,6 +259,8 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
+        conn.execute_batch(&crate::vault::schema35::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&downgrade_sql()).unwrap();
         let teams: Vec<String> = conn
             .prepare("SELECT team_id FROM relay_membership ORDER BY team_id")
@@ -308,13 +314,18 @@ mod tests {
     #[test]
     fn copies_of_the_previous_schema_still_merge_and_later_ones_do_not() {
         assert!(crate::vault::merge::LOCAL_TABLES.contains(&"relay_membership"));
-        for version in [16, PREVIOUS_SCHEMA_VERSION, ACCOUNT_KEY_SCHEMA_VERSION] {
+        for version in [
+            16,
+            PREVIOUS_SCHEMA_VERSION,
+            ACCOUNT_KEY_SCHEMA_VERSION,
+            SCHEMA_VERSION,
+        ] {
             assert!(
                 crate::vault::merge::is_mergeable_schema(version),
                 "{version}"
             );
         }
-        for version in [30, 31, 33, ACCOUNT_KEY_SCHEMA_VERSION + 1] {
+        for version in [30, 31, 33, SCHEMA_VERSION + 1] {
             assert!(
                 !crate::vault::merge::is_mergeable_schema(version),
                 "{version}"
