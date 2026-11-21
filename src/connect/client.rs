@@ -1016,18 +1016,36 @@ impl ConnectClient {
 
     // ---- Public links (connect-share-v1 sections 4.1 to 4.3, `super::link`). ----
 
-    /// `POST /v1/account/links` with the exact body of the pending link.
+    /// `POST /v1/account/links` with the exact body of the pending link, and whether the
+    /// answer carried the marker of the links routes (a `404` without it: a relay without
+    /// the routes).
     pub(super) fn create_link(
         &self,
         token: &str,
         body: &super::link::CreateBody,
-    ) -> Result<super::link::LinkView, ConnectError> {
-        self.post("/v1/account/links", Some(token), body)
+    ) -> (Result<super::link::LinkView, ConnectError>, bool) {
+        self.send_marked(json_request("POST", "/v1/account/links", Some(token), body))
     }
 
-    /// `GET /v1/account/links`.
-    pub(super) fn links(&self, token: &str) -> Result<super::link::LinkList, ConnectError> {
-        self.get("/v1/account/links", Some(token))
+    /// `GET /v1/account/links`, and whether the answer carried the marker of the links
+    /// routes.
+    pub(super) fn links(&self, token: &str) -> (Result<super::link::LinkList, ConnectError>, bool) {
+        self.send_marked(Request::new(
+            "GET",
+            "/v1/account/links".to_owned(),
+            Some(token),
+        ))
+    }
+
+    /// `request` on a links route: the result, and whether the answer carried
+    /// `x-apassy-links: 1`.
+    fn send_marked<T: DeserializeOwned>(
+        &self,
+        mut request: Request<'_>,
+    ) -> (Result<T, ConnectError>, bool) {
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        let (result, marked) = call_marked(&self.url, &request, super::link::LINKS_MARKER);
+        (result.map_err(connect_error), marked)
     }
 
     /// `DELETE /v1/account/links/{link_id}`, and whether the answer carried the marker
@@ -1046,15 +1064,12 @@ impl ConnectClient {
         {
             return (Err(ConnectError::Invalid), false);
         }
-        let mut request = json_request(
+        self.send_marked(json_request(
             "DELETE",
             &format!("/v1/account/links/{link_id}"),
             Some(token),
             &Empty {},
-        );
-        request.deadline = Some(Instant::now() + CALL_DEADLINE);
-        let (result, marked) = call_marked(&self.url, &request, super::link::LINKS_MARKER);
-        (result.map_err(connect_error), marked)
+        ))
     }
 
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {

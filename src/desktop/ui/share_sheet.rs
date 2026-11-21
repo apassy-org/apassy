@@ -12,8 +12,18 @@
 //! - **Revoke** writes the revoke only after Connect answered for the account that made
 //!   the link. A link that another account made (a shared vault) shows "Made by
 //!   <name>" and has no Revoke and no Copy.
-//! - Settings › Connect › Public Links lists every link of the vault, and the links that
-//!   Connect lists for the account but the vault does not hold, with Revoke.
+//! - Settings › Connect › Public Links lists every link of the vault. The links that
+//!   Connect lists for the account and the open vault does not hold are in one collapsed
+//!   group, "Links not in this vault (N)": the account belongs to the computer, which can
+//!   hold several vaults, so such a link is mostly a live link of another vault or another
+//!   device. Its Revoke asks first.
+//! - The list of Connect (`live`, `limit`, `mail`) is checked before the owner check:
+//!   "Create Link" is off at the limit, and "Only these e-mail addresses" on a relay that
+//!   sends no mail. A relay without the links routes says so, and the sheet stops asking
+//!   it until it opens again.
+//! - Connect's answer to a creation and the write of the row are one step of the worker,
+//!   which holds the account: when the row cannot be written (a lock or another vault
+//!   came between), that step revokes the new link at once.
 //!
 //! The People part of the sheet comes with release B.
 //!
@@ -28,9 +38,10 @@ use zeroize::Zeroizing;
 
 use super::devices::rows;
 use super::kit::{self, Font, Style, Tone};
+use crate::broker::SharedVault;
 use crate::connect::link::{
-    DEFAULT_EXPIRY, LinkCreated, LinkError, LinkList, LinkOptions, LinkRevoked, LinkTarget,
-    LinkView, PendingLink, parse_addresses,
+    DEFAULT_EXPIRY, LinkCreated, LinkError, LinkKept, LinkList, LinkOptions, LinkRevoked,
+    LinkTarget, LinkView, PendingLink, parse_addresses,
 };
 use crate::connect::{ConnectAccount, ConnectError};
 use crate::desktop::DesktopApp;
@@ -64,7 +75,11 @@ pub(crate) const NO_ACCOUNT: &str =
     "Public links need an Apassy Connect account. Create one in Settings › Connect.";
 pub(crate) const SIGNED_OUT: &str = "Sign in to Apassy Connect in Settings › Connect first.";
 pub(crate) const SETTINGS_GROUP: &str = "Public Links";
-pub(crate) const UNKNOWN_LINK: &str = "A link this vault does not hold";
+pub(crate) const UNKNOWN_LINK: &str = "Link not in this vault";
+pub(crate) const REVOKE_UNKNOWN: &str = "Revoke this link?";
+pub(crate) const REVOKE_UNKNOWN_NOTE: &str =
+    "It may belong to another vault or device. Someone may still use it.";
+pub(crate) const NO_EMAIL: &str = "This relay cannot send e-mail codes.";
 pub(crate) const OPENED_ONCE: &str = "Opened";
 pub(crate) const NOT_LISTED: &str = "Not at Connect";
 pub(crate) const ANOTHER_ACCOUNT: &str = "another account";
@@ -106,6 +121,9 @@ pub(crate) const TEXTS: &[&str] = &[
     SIGNED_OUT,
     SETTINGS_GROUP,
     UNKNOWN_LINK,
+    REVOKE_UNKNOWN,
+    REVOKE_UNKNOWN_NOTE,
+    NO_EMAIL,
     OPENED_ONCE,
     NOT_LISTED,
     ANOTHER_ACCOUNT,
@@ -119,6 +137,11 @@ pub(crate) fn made_by(name: &str) -> String {
 /// "Expires 28 Nov 2026".
 pub(crate) fn expires_on(at: u64) -> String {
     format!("Expires {}", super::connect::day(at))
+}
+
+/// "Links not in this vault (3)".
+pub(crate) fn not_in_vault(count: usize) -> String {
+    format!("Links not in this vault ({count})")
 }
 
 /// "Opened 3 times".
@@ -234,6 +257,11 @@ pub(crate) struct SheetView {
     pub(crate) busy: bool,
     pub(crate) error: Option<String>,
     pub(crate) retry: bool,
+    /// Why "Create Link" is off before any owner check: the relay has no links routes, or
+    /// the account has its most live links.
+    pub(crate) blocked: Option<String>,
+    /// The relay sends no code mail: "Only these e-mail addresses" is off.
+    pub(crate) no_email: bool,
 }
 
 /// What the owner pressed.
@@ -244,7 +272,13 @@ pub(crate) enum LinkAction {
     Submit,
     Copy(String),
     CopyMade,
-    Revoke { uuid: String, link_id: String },
+    Revoke {
+        uuid: String,
+        link_id: String,
+    },
+    /// Revoke of a link that the vault does not hold: it asks first.
+    AskRevoke(String),
+    CancelRevoke,
     Retry,
     Done,
 }
@@ -270,7 +304,9 @@ fn link_rows(ui: &mut Ui, links: &[LinkRow], action: &mut Option<LinkAction>) {
                 if let Some(index) =
                     rows::text_buttons_detailed(ui, title, Some(&link.detail), &buttons)
                 {
-                    *action = Some(if buttons[index].0 == REVOKE {
+                    *action = Some(if buttons[index].0 == REVOKE && link.uuid.is_empty() {
+                        LinkAction::AskRevoke(link.link_id.clone())
+                    } else if buttons[index].0 == REVOKE {
                         LinkAction::Revoke {
                             uuid: link.uuid.clone(),
                             link_id: link.link_id.clone(),
@@ -285,7 +321,10 @@ fn link_rows(ui: &mut Ui, links: &[LinkRow], action: &mut Option<LinkAction>) {
     });
 }
 
-fn form_rows(ui: &mut Ui, form: &mut Form) {
+fn form_rows(ui: &mut Ui, form: &mut Form, no_email: bool) {
+    if no_email {
+        form.emails = false;
+    }
     rows::group_box(ui, |g| {
         g.field(EXPIRES, |ui| {
             let options: Vec<(u64, String)> = EXPIRIES
@@ -309,12 +348,17 @@ fn form_rows(ui: &mut Ui, form: &mut Form) {
         g.row(|ui| {
             ui.label(rows::label_text(WHO));
             ui.add_space(4.0);
-            kit::segmented(
-                ui,
-                "link-who",
-                &mut form.emails,
-                &[(false, ANYONE), (true, EMAILS)],
-            );
+            ui.add_enabled_ui(!no_email, |ui| {
+                kit::segmented(
+                    ui,
+                    "link-who",
+                    &mut form.emails,
+                    &[(false, ANYONE), (true, EMAILS)],
+                );
+            });
+            if no_email {
+                ui.add(egui::Label::new(rows::note(NO_EMAIL)).wrap());
+            }
         });
         if form.emails {
             g.row(|ui| {
@@ -341,9 +385,15 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
         Ready::SignedOut => rows::footnote(ui, SIGNED_OUT),
         Ready::Yes => {}
     }
+    if let Some(blocked) = &view.blocked
+        && view.ready == Ready::Yes
+    {
+        rows::footnote(ui, blocked.as_str());
+    }
+    let no_email = view.no_email;
     ui.add_enabled_ui(!view.busy, |ui| {
         if view.links.is_empty() && view.form.is_none() && view.made.is_none() {
-            if view.ready == Ready::Yes {
+            if view.ready == Ready::Yes && view.blocked.is_none() {
                 rows::footnote(ui, NONE_YET);
             }
         } else if !view.links.is_empty() {
@@ -370,7 +420,7 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
         }
         if let Some(form) = view.form.as_mut() {
             ui.add_space(8.0);
-            form_rows(ui, form);
+            form_rows(ui, form, no_email);
         }
     });
     if let Some(error) = &view.error {
@@ -396,7 +446,7 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
             }
         },
         |ui| {
-            let enabled = !view.busy && view.ready == Ready::Yes;
+            let enabled = !view.busy && view.ready == Ready::Yes && view.blocked.is_none();
             if view.form.is_some() {
                 if ui
                     .add_enabled_ui(enabled, |ui| kit::button(ui, CREATE_GO, Style::Prominent))
@@ -427,26 +477,68 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
     action.or(leading).or(trailing)
 }
 
-/// The Public Links group of Settings › Connect. `None` while the vault holds no link
-/// and Connect lists none.
-pub(crate) fn draw_settings(
-    ui: &mut Ui,
-    links: &[LinkRow],
-    error: Option<&str>,
-    busy: bool,
-) -> Option<LinkAction> {
-    if links.is_empty() && error.is_none() {
+/// What Settings › Connect › Public Links shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SettingsView {
+    /// The links of the open vault.
+    pub(crate) links: Vec<LinkRow>,
+    /// The links that Connect lists for the account and the vault does not hold.
+    pub(crate) unknown: Vec<LinkRow>,
+    /// The group of [`Self::unknown`] is open.
+    pub(crate) open: bool,
+    /// The link id whose Revoke waits for its confirmation.
+    pub(crate) confirm: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) busy: bool,
+}
+
+/// The Public Links group of Settings › Connect. Nothing while the vault holds no link
+/// and Connect lists none. The links that the vault does not hold are in one group,
+/// collapsed until the owner opens it (`view.open` flips); their Revoke asks first.
+pub(crate) fn draw_settings(ui: &mut Ui, view: &mut SettingsView) -> Option<LinkAction> {
+    if view.links.is_empty() && view.unknown.is_empty() && view.error.is_none() {
         return None;
     }
     let mut action = None;
     rows::group_label(ui, SETTINGS_GROUP);
-    if let Some(error) = error {
-        rows::footnote_colored(ui, error, Tone::Critical.text());
+    if let Some(error) = &view.error {
+        rows::footnote_colored(ui, error.as_str(), Tone::Critical.text());
     }
-    ui.add_enabled_ui(!busy, |ui| {
-        if !links.is_empty() {
-            link_rows(ui, links, &mut action);
+    ui.add_enabled_ui(!view.busy, |ui| {
+        if !view.links.is_empty() {
+            link_rows(ui, &view.links, &mut action);
         }
+        if view.unknown.is_empty() {
+            return;
+        }
+        ui.add_space(6.0);
+        kit::disclosure(ui, &mut view.open, &not_in_vault(view.unknown.len()));
+        if !view.open {
+            return;
+        }
+        if let Some(link_id) = view.confirm.clone() {
+            ui.add_space(4.0);
+            kit::notice(
+                ui,
+                Tone::Warning,
+                REVOKE_UNKNOWN,
+                Some(REVOKE_UNKNOWN_NOTE),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        if kit::small_button(ui, CANCEL, Style::Bordered).clicked() {
+                            action = Some(LinkAction::CancelRevoke);
+                        }
+                        if kit::small_button(ui, REVOKE, Style::DestructiveProminent).clicked() {
+                            action = Some(LinkAction::Revoke {
+                                uuid: String::new(),
+                                link_id,
+                            });
+                        }
+                    });
+                },
+            );
+        }
+        link_rows(ui, &view.unknown, &mut action);
     });
     action
 }
@@ -477,12 +569,22 @@ pub(crate) fn rows_of(
                 parts.push(audience(&link.addresses));
             }
             parts.push(expires_on(link.expires_at));
+            // A link that the list of Connect does not hold (it speaks only for the links
+            // made before it was asked), and a one-time link that was opened, open no
+            // more: no Copy.
+            let mut gone = false;
             if mine && let Some(list) = list {
                 match listed.get(link.link_id.as_str()) {
-                    Some(view) if view.state == "opened" => parts.push(OPENED_ONCE.to_owned()),
+                    Some(view) if view.state == "opened" => {
+                        parts.push(OPENED_ONCE.to_owned());
+                        gone = true;
+                    }
                     Some(view) => parts.push(opened(view.opens)),
-                    None if !list.links.is_empty() || list.live == 0 => {
+                    None if link.created_at < list.asked_at
+                        && (!list.links.is_empty() || list.live == 0) =>
+                    {
                         parts.push(NOT_LISTED.to_owned());
+                        gone = true;
                     }
                     None => {}
                 }
@@ -505,14 +607,16 @@ pub(crate) fn rows_of(
                     audience(&link.addresses)
                 },
                 detail: parts.join(" · "),
-                can_copy: mine && link.key().is_some(),
+                can_copy: mine && !gone && link.key().is_some(),
                 can_revoke: mine,
             }
         })
         .collect()
 }
 
-/// The links that Connect lists for the account and the vault rows do not hold.
+/// The links that Connect lists for the account and the rows of the open vault do not
+/// hold: links of another vault or device of the account, or one whose row was never
+/// written. Revoke asks first; nothing copies them.
 pub(crate) fn unknown_rows(links: &[PublicLink], list: Option<&LinkList>) -> Vec<LinkRow> {
     let Some(list) = list else {
         return Vec::new();
@@ -533,9 +637,9 @@ pub(crate) fn unknown_rows(links: &[PublicLink], list: Option<&LinkList>) -> Vec
 
 // ---- The state. ----
 
-/// The answer of a creation: the receipt, or the error with the pending link when a
-/// repeat of the exact body may work.
-type CreateResult = Result<LinkCreated, (LinkError, Option<Box<PendingLink>>)>;
+/// The answer of a creation with its row written: the row and the link text, or the
+/// error with the pending link when a repeat of the exact body may work.
+type CreateResult = Result<LinkKept, (LinkError, Option<Box<PendingLink>>)>;
 
 /// What a worker step came to.
 pub(crate) enum Outcome {
@@ -578,6 +682,13 @@ pub(crate) struct LinksUi {
     retry: Option<Retry>,
     /// The target of the open sheet, so a new sheet starts clean.
     target: Option<LinkTarget>,
+    /// The relay answered the list without the links routes: no link here, and no new
+    /// list until a sheet opens.
+    no_links: bool,
+    /// Settings › Connect: the group of the links not in this vault is open.
+    unknown_open: bool,
+    /// Settings › Connect: the link id whose Revoke waits for its confirmation.
+    confirm: Option<String>,
 }
 
 impl LinksUi {
@@ -615,6 +726,24 @@ fn spawn(
             (None, Ok(())) => Outcome::Listed(Err(LinkError::Connect(ConnectError::Local))),
         }
     }));
+}
+
+/// Why a new link cannot be made now, before any owner check: a relay without the links
+/// routes, or the most live links of the account (from the list of Connect).
+fn blocked(links: &LinksUi) -> Option<String> {
+    if links.no_links {
+        return Some(LinkError::NoLinks.to_string());
+    }
+    links
+        .list
+        .as_ref()
+        .filter(|list| list.at_limit())
+        .map(|list| error_text(&LinkError::LinkLimit, list.limit))
+}
+
+/// The relay of the account sends no code mail (from the list of Connect).
+fn no_email(links: &LinksUi) -> bool {
+    links.list.as_ref().is_some_and(|list| !list.mail)
 }
 
 fn ready(app: &DesktopApp) -> Ready {
@@ -706,17 +835,33 @@ pub(crate) fn sheet_view(app: &DesktopApp, target: &LinkTarget) -> SheetView {
         busy: links.busy() || links.asked,
         error: links.error.clone(),
         retry: links.retry.is_some(),
+        blocked: blocked(links),
+        no_email: no_email(links),
     }
 }
 
-/// The rows of Settings › Connect › Public Links.
-pub(crate) fn settings_rows(app: &DesktopApp) -> Vec<LinkRow> {
+/// The view of Settings › Connect › Public Links.
+pub(crate) fn settings_view(app: &DesktopApp) -> SettingsView {
     let links = vault_links(app);
     let own = app.ui.connect.live.account_id();
-    let list = app.ui.connect.links.list.as_ref();
-    let mut out = rows_of(&links, list, own.as_deref(), &names(app), true, now());
-    out.extend(unknown_rows(&links, list));
-    out
+    let state = &app.ui.connect.links;
+    let list = state.list.as_ref();
+    let unknown = unknown_rows(&links, list);
+    SettingsView {
+        links: rows_of(&links, list, own.as_deref(), &names(app), true, now()),
+        open: state.unknown_open,
+        confirm: state
+            .confirm
+            .clone()
+            .filter(|id| unknown.iter().any(|row| &row.link_id == id)),
+        unknown,
+        error: state
+            .target
+            .is_none()
+            .then(|| state.error.clone())
+            .flatten(),
+        busy: state.busy(),
+    }
 }
 
 /// The sheet of `target`. Returns true on Escape.
@@ -727,7 +872,9 @@ pub(crate) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, target: LinkTarge
         links.error = None;
         links.retry = None;
         links.target = Some(target.clone());
+        // A new sheet asks Connect again, also a relay that had no links routes.
         links.listed_at = None;
+        links.no_links = false;
     }
     step(app, ctx);
     let mut view = sheet_view(app, &target);
@@ -768,14 +915,10 @@ fn close(app: &mut DesktopApp, ctx: &egui::Context) {
 pub(crate) fn settings_section(app: &mut DesktopApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     step(app, &ctx);
-    let rows = settings_rows(app);
-    let links = &app.ui.connect.links;
-    let error = links
-        .target
-        .is_none()
-        .then(|| links.error.clone())
-        .flatten();
-    if let Some(action) = draw_settings(ui, &rows, error.as_deref(), links.busy()) {
+    let mut view = settings_view(app);
+    let action = draw_settings(ui, &mut view);
+    app.ui.connect.links.unknown_open = view.open;
+    if let Some(action) = action {
         let target = LinkTarget::Folder(String::new());
         act(app, &ctx, &target, action);
     }
@@ -815,7 +958,12 @@ fn act(app: &mut DesktopApp, ctx: &egui::Context, target: &LinkTarget, action: L
                 copy(app, text);
             }
         }
-        LinkAction::Revoke { uuid, link_id } => revoke(app, ctx, uuid, link_id),
+        LinkAction::Revoke { uuid, link_id } => {
+            app.ui.connect.links.confirm = None;
+            revoke(app, ctx, uuid, link_id);
+        }
+        LinkAction::AskRevoke(link_id) => app.ui.connect.links.confirm = Some(link_id),
+        LinkAction::CancelRevoke => app.ui.connect.links.confirm = None,
         LinkAction::Retry => match app.ui.connect.links.retry.take() {
             Some(Retry::Create) => resend(app, ctx),
             Some(Retry::Revoke { uuid, link_id }) => revoke(app, ctx, uuid, link_id),
@@ -846,6 +994,16 @@ fn submit(app: &mut DesktopApp, ctx: &egui::Context, target: &LinkTarget) {
     let fail = |app: &mut DesktopApp, error: LinkError| {
         app.ui.connect.links.error = Some(error_text(&error, limit));
     };
+    // What the list of Connect says, before the owner check (ADR 0047 section 6).
+    if links.no_links {
+        return fail(app, LinkError::NoLinks);
+    }
+    if links.list.as_ref().is_some_and(LinkList::at_limit) {
+        return fail(app, LinkError::LinkLimit);
+    }
+    if form.emails && no_email(links) {
+        return fail(app, LinkError::MailUnavailable);
+    }
     let options = match form.options() {
         Ok(options) => options,
         Err(error) => return fail(app, error),
@@ -900,13 +1058,49 @@ fn request_of(pending: &PendingLink) -> OwnerRequest {
 }
 
 fn resend(app: &mut DesktopApp, ctx: &egui::Context) {
+    let Some(epoch) = app.owner_ui.session.epoch() else {
+        return;
+    };
     let Some(pending) = app.ui.connect.links.pending.take() else {
         return;
     };
     app.ui.connect.links.error = None;
+    let vault = app.owner_ui.session.shared_vault();
     spawn(app, ctx, move |account| {
-        Outcome::Created(Box::new(account.send_public_link(pending)))
+        let sent = account.send_public_link(pending);
+        Outcome::Created(Box::new(keep(account, sent, &vault, &epoch)))
     });
+}
+
+/// Write the row of a link that Connect took, on the step that holds the account; when
+/// it cannot be written, the link is revoked at once
+/// ([`ConnectAccount::keep_or_revoke`]).
+fn keep(
+    account: &mut ConnectAccount,
+    created: Result<LinkCreated, (LinkError, Option<Box<PendingLink>>)>,
+    vault: &SharedVault,
+    epoch: &[u8; 32],
+) -> CreateResult {
+    let created = created?;
+    account
+        .keep_or_revoke(created, |created| write_row(vault, epoch, created))
+        .map_err(|error| (error, None))
+}
+
+/// The row of `created` in the vault of the session `epoch`: refused when that vault is
+/// locked or another one is open now.
+pub(crate) fn write_row(
+    vault: &SharedVault,
+    epoch: &[u8; 32],
+    created: &LinkCreated,
+) -> Result<crate::vault::PublicLink, LinkError> {
+    let mut slot = vault
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match slot.as_mut() {
+        Some(open) if !open.is_locked() && open.epoch() == *epoch => created.apply(open),
+        _ => Err(LinkError::Vault),
+    }
 }
 
 fn revoke(app: &mut DesktopApp, ctx: &egui::Context, uuid: String, link_id: String) {
@@ -955,9 +1149,10 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(250));
         return;
     }
-    let due = links
-        .listed_at
-        .is_none_or(|at| at.elapsed() >= Duration::from_secs(30));
+    let due = !links.no_links
+        && links
+            .listed_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(30));
     if due && app.connect_session().is_open() && app.owner_ui.session.epoch().is_some() {
         app.ui.connect.links.listed_at = Some(Instant::now());
         spawn(app, ctx, |account| Outcome::Listed(account.public_links()));
@@ -982,8 +1177,10 @@ fn guarded(app: &mut DesktopApp, ctx: &egui::Context) {
     let (Some(pending), Some(epoch)) = (links.pending.take(), app.owner_ui.session.epoch()) else {
         return;
     };
+    let vault = app.owner_ui.session.shared_vault();
     spawn(app, ctx, move |account| {
-        Outcome::Created(Box::new(account.create_public_link(pending, proof, &epoch)))
+        let created = account.create_public_link(pending, proof, &epoch);
+        Outcome::Created(Box::new(keep(account, created, &vault, &epoch)))
     });
 }
 
@@ -1009,39 +1206,59 @@ fn apply(app: &mut DesktopApp, outcome: Outcome) {
         .as_ref()
         .and_then(|list| list.limit);
     match outcome {
-        Outcome::Listed(Ok(list)) => app.ui.connect.links.list = Some(list),
+        Outcome::Listed(Ok(list)) => {
+            let links = &mut app.ui.connect.links;
+            links.list = Some(list);
+            links.no_links = false;
+        }
+        Outcome::Listed(Err(LinkError::NoLinks)) => {
+            // An older or a self-hosted relay: no link here, and no new list until a
+            // sheet opens.
+            let links = &mut app.ui.connect.links;
+            links.no_links = true;
+            links.list = None;
+        }
         Outcome::Listed(Err(error)) => {
             // A failed read keeps the last list; the sheet says so only for a link step.
             tracing::debug!(error = %error, "public links not listed");
         }
         Outcome::Created(result) => match *result {
-            Ok(created) => {
-                let written = app
-                    .owner_ui
-                    .session
-                    .with_vault(|vault| created.apply(vault));
+            Ok(kept) => {
+                // The worker wrote the row already.
                 let links = &mut app.ui.connect.links;
                 links.form = None;
                 links.retry = None;
                 links.listed_at = None;
-                match written {
-                    Some(Ok(row)) => {
-                        let target = links
-                            .target
-                            .clone()
-                            .unwrap_or(LinkTarget::Folder(String::new()));
-                        links.made = Some(Made {
-                            target,
-                            note: ready_note(&row.addresses, row.expires_at),
-                            link: created.link(),
-                            focus: true,
-                        });
-                    }
-                    _ => links.error = Some(LinkError::Vault.to_string()),
+                if let Some(list) = links.list.as_mut()
+                    && !list
+                        .links
+                        .iter()
+                        .any(|view| view.link_id == kept.view.link_id)
+                {
+                    list.links.insert(0, kept.view.clone());
+                    list.live += 1;
                 }
+                let target = links
+                    .target
+                    .clone()
+                    .unwrap_or(LinkTarget::Folder(String::new()));
+                links.made = Some(Made {
+                    target,
+                    note: ready_note(&kept.row.addresses, kept.row.expires_at),
+                    link: kept.link(),
+                    focus: true,
+                });
             }
             Err((error, pending)) => {
                 let links = &mut app.ui.connect.links;
+                if error == LinkError::NoLinks {
+                    links.no_links = true;
+                    links.form = None;
+                }
+                if matches!(error, LinkError::NotSaved { .. }) {
+                    links.form = None;
+                    links.listed_at = None;
+                }
                 links.error = Some(error_text(&error, limit));
                 links.retry = pending.is_some().then_some(Retry::Create);
                 links.pending = pending.map(|pending| *pending);

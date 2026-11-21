@@ -24,10 +24,18 @@
 //! `deleted_at`, so the delete reaches the other Macs.
 //!
 //! Two Macs can make a state that this API refuses: a credential or a folder in a folder
-//! that the other Mac deleted, or a cycle of two moves. The reads resolve it: a parent
-//! that is gone counts as the top level, and a cycle is cut at the folder with the
-//! smallest UUID. Moving a credential changes nothing else. Deleting a folder never
-//! deletes a credential: each membership of that folder moves to its parent (it goes
+//! that the other Mac deleted, or a cycle of two moves. The reads resolve it: a deleted
+//! parent counts as its nearest live ancestor, a parent that is not here as the top
+//! level, and a cycle is cut at the folder with the smallest UUID. A membership of a
+//! deleted folder counts in its nearest live ancestor (the parent that the deleted row
+//! names, then that one's, and so on), or at the top level when none is live: so a
+//! credential that one device added to a folder while another deleted it ends where the
+//! delete put the others, on every device, from the same rows. The next change of that
+//! credential's folders writes the membership there and ends the one of the deleted
+//! folder. The rows stay as they merged, so the content hash (`merge::Record`) is the
+//! same on every device, and that of a credential in no folder or one folder is still
+//! the hash of schema 34. Moving a credential changes nothing else. Deleting a folder
+//! never deletes a credential: each membership of that folder moves to its parent (it goes
 //! when the folder was at the top level), and the other folders of the credential stay.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,44 +131,60 @@ pub enum FolderChange {
 /// documentation).
 struct Tree {
     folders: BTreeMap<String, Folder>,
+    /// The deleted folders, each with the parent its row names.
+    gone: BTreeMap<String, Option<String>>,
 }
 
 impl Tree {
     fn load(conn: &Connection) -> VaultResult<Self> {
         let storage = |_| err(VaultErrorKind::Storage);
         let mut stmt = conn
-            .prepare(
-                "SELECT uuid, parent_uuid, name, position FROM folder
-                 WHERE deleted_at IS NULL",
-            )
+            .prepare("SELECT uuid, parent_uuid, name, position, deleted_at IS NOT NULL FROM folder")
             .map_err(storage)?;
         let rows = stmt
             .query_map([], |row| {
-                Ok(Folder {
-                    uuid: row.get(0)?,
-                    parent: row.get(1)?,
-                    name: row.get(2)?,
-                    position: row.get(3)?,
-                })
+                Ok((
+                    Folder {
+                        uuid: row.get(0)?,
+                        parent: row.get(1)?,
+                        name: row.get(2)?,
+                        position: row.get(3)?,
+                    },
+                    row.get::<_, bool>(4)?,
+                ))
             })
             .map_err(storage)?;
         let mut folders = BTreeMap::new();
+        let mut gone = BTreeMap::new();
         for row in rows {
-            let folder = row.map_err(storage)?;
-            folders.insert(folder.uuid.clone(), folder);
-        }
-        // A parent that is gone counts as the top level.
-        let live: BTreeSet<String> = folders.keys().cloned().collect();
-        for folder in folders.values_mut() {
-            if folder
-                .parent
-                .as_ref()
-                .is_some_and(|parent| !live.contains(parent) || *parent == folder.uuid)
-            {
-                folder.parent = None;
+            let (folder, deleted) = row.map_err(storage)?;
+            if deleted {
+                gone.insert(folder.uuid, folder.parent);
+            } else {
+                folders.insert(folder.uuid.clone(), folder);
             }
         }
-        let mut tree = Self { folders };
+        let mut tree = Self { folders, gone };
+        // A deleted parent counts as its nearest live ancestor, as a membership of a
+        // deleted folder does; a parent that is not here counts as the top level.
+        let parents: Vec<(String, Option<String>)> = tree
+            .folders
+            .values()
+            .map(|folder| {
+                let parent = folder
+                    .parent
+                    .as_deref()
+                    .and_then(|parent| tree.place(parent))
+                    .filter(|parent| *parent != folder.uuid)
+                    .map(str::to_owned);
+                (folder.uuid.clone(), parent)
+            })
+            .collect();
+        for (uuid, parent) in parents {
+            if let Some(folder) = tree.folders.get_mut(&uuid) {
+                folder.parent = parent;
+            }
+        }
         tree.cut_cycles();
         Ok(tree)
     }
@@ -279,10 +303,56 @@ impl Tree {
             .map_or(0, |last| last.saturating_add(1))
     }
 
-    /// The folders of a credential from its stored rows, in their order: without the
-    /// folders that are gone.
+    /// Whether this device has the row of `uuid`, live or deleted.
+    fn knows(&self, uuid: &str) -> bool {
+        self.folders.contains_key(uuid) || self.gone.contains_key(uuid)
+    }
+
+    /// Where a membership of `uuid` counts: `uuid` itself when it is live; for a deleted
+    /// folder its nearest live ancestor, or `None` (the top level) when it has none.
+    /// `None` too for a folder that is not here at all.
+    fn place<'a>(&'a self, uuid: &'a str) -> Option<&'a str> {
+        let mut at = uuid;
+        // A chain of deleted rows ends at a live folder, at no parent, or after every
+        // deleted row once (a cycle of deleted rows counts as the top level).
+        for _ in 0..=self.gone.len() {
+            if self.folders.contains_key(at) {
+                return Some(at);
+            }
+            at = self.gone.get(at)?.as_deref()?;
+        }
+        None
+    }
+
+    /// The memberships of a credential from its stored rows, each where it counts
+    /// ([`Tree::place`]): a deleted folder's in its nearest live ancestor, or none at the
+    /// top level. A folder that is not here stays as it is: it can arrive with the next
+    /// sync. A folder that two rows give counts once, with the earlier `added_at`. In the
+    /// order of `added_at`, then UUID.
+    fn normalize(&self, stored: Vec<(String, i64)>) -> Vec<(String, i64)> {
+        let mut out: Vec<(String, i64)> = Vec::new();
+        for (uuid, added_at) in stored {
+            let folder = if self.knows(&uuid) {
+                match self.place(&uuid) {
+                    Some(live) => live.to_owned(),
+                    None => continue,
+                }
+            } else {
+                uuid
+            };
+            match out.iter_mut().find(|(seen, _)| *seen == folder) {
+                Some((_, at)) => *at = (*at).min(added_at),
+                None => out.push((folder, added_at)),
+            }
+        }
+        out.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        out
+    }
+
+    /// The folders of a credential from its stored rows, in their order: each membership
+    /// where it counts ([`Tree::normalize`]), without the folders that are not here.
     fn resolve(&self, stored: Vec<(String, i64)>) -> Vec<(String, i64)> {
-        stored
+        self.normalize(stored)
             .into_iter()
             .filter(|(uuid, _)| self.folders.contains_key(uuid))
             .collect()
@@ -387,7 +457,9 @@ fn set_folders(
     let at = |last: i64| now.max(last.saturating_add(1));
     let wanted = |uuid: &str| folders.iter().any(|(folder, _)| folder == uuid);
     for (folder, last, removed) in &rows {
-        if !removed && !wanted(folder) && tree.folders.contains_key(folder) {
+        // A row of a deleted folder ends too: the caller gave its place instead
+        // ([`Tree::normalize`]).
+        if !removed && !wanted(folder) && tree.knows(folder) {
             let at = at(*last);
             tx.execute(
                 "UPDATE item_folder SET removed_at = ?1, updated_at = ?1, updated_by = ?2
@@ -680,7 +752,7 @@ impl Vault {
                 .map_err(storage)?
         };
         for item in &items {
-            let current = stored_folders(&tx, *item)?;
+            let current = tree.normalize(stored_folders(&tx, *item)?);
             let mut next: Vec<(String, i64)> = Vec::new();
             for (folder, added_at) in &current {
                 if folder != uuid {
@@ -736,20 +808,29 @@ impl Vault {
         let tree = Tree::load(conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT item_id, folder_uuid FROM item_folder WHERE removed_at IS NULL
+                "SELECT item_id, folder_uuid, added_at FROM item_folder WHERE removed_at IS NULL
                  ORDER BY item_id, added_at, folder_uuid",
             )
             .map_err(storage)?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })
             .map_err(storage)?;
-        let mut items: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        let mut stored: BTreeMap<i64, Vec<(String, i64)>> = BTreeMap::new();
         for row in rows {
-            let (id, folder) = row.map_err(storage)?;
-            if tree.folders.contains_key(&folder) {
-                items.entry(to_public_id(id)?).or_default().push(folder);
+            let (id, folder, added_at) = row.map_err(storage)?;
+            stored.entry(id).or_default().push((folder, added_at));
+        }
+        let mut items: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for (id, rows) in stored {
+            let folders = uuids(&tree.resolve(rows));
+            if !folders.is_empty() {
+                items.insert(to_public_id(id)?, folders);
             }
         }
         let paths = tree
@@ -815,7 +896,7 @@ impl Vault {
         tree.get(folder)?;
         // The rows of folders that are not here (yet) stay: a folder of another Mac can
         // arrive with the next sync.
-        let mut current = stored_folders(&tx, item)?;
+        let mut current = tree.normalize(stored_folders(&tx, item)?);
         if current.iter().any(|(uuid, _)| uuid == folder) {
             return Ok(());
         }
@@ -837,7 +918,7 @@ impl Vault {
         agents::require_item(&tx, item)?;
         let tree = Tree::load(&tx)?;
         tree.get(folder)?;
-        let current = stored_folders(&tx, item)?;
+        let current = tree.normalize(stored_folders(&tx, item)?);
         if !current.iter().any(|(uuid, _)| uuid == folder) {
             return Ok(());
         }
@@ -878,7 +959,7 @@ impl Vault {
         if let Some(to) = to {
             tree.get(to)?;
         }
-        let current = stored_folders(&tx, item)?;
+        let current = tree.normalize(stored_folders(&tx, item)?);
         let Some(added_at) = current
             .iter()
             .find(|(uuid, _)| uuid == from)
@@ -960,7 +1041,7 @@ impl Vault {
             }
             agents::require_item(&tx, item)?;
             // The rows of folders that are not here (yet) stay, as in the one-item calls.
-            let stored = stored_folders(&tx, item)?;
+            let stored = tree.normalize(stored_folders(&tx, item)?);
             let from_all = tree.resolve(stored.clone());
             if let Some(next) = next_folders(&tree, change, stored, &from_all)? {
                 planned.push((*item_id, from_all, next));
@@ -1070,10 +1151,11 @@ impl Vault {
             if placed.last().is_none_or(|(last, _)| *last != id) {
                 placed.push((id, Vec::new()));
             }
-            if let Some(uuid) = stored.filter(|uuid| tree.folders.contains_key(uuid))
+            // A membership of a deleted folder counts in its nearest live ancestor.
+            if let Some(uuid) = stored.as_deref().and_then(|uuid| tree.place(uuid))
                 && let Some((_, folders)) = placed.last_mut()
             {
-                folders.push(uuid);
+                folders.push(uuid.to_owned());
             }
         }
         let mut items = Vec::new();

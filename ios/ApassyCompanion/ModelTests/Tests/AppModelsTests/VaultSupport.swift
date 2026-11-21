@@ -491,6 +491,10 @@ actor SpyVaultService: VaultService {
         try requireOrganize("hold folders")
         try await inner.setItemFolder(id: id, folder: folder)
     }
+    func moveItem(id: UInt64, from: String, to: String?) async throws {
+        try requireOrganize("hold folders")
+        try await inner.moveItem(id: id, from: from, to: to)
+    }
     func addItemToFolder(id: UInt64, folder: String) async throws {
         try requireOrganize("hold folders")
         try await inner.addItemToFolder(id: id, folder: folder)

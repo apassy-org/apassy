@@ -20,13 +20,19 @@
 //!    gave no answer. A `409 conflict` reads the list: a link that is listed was made;
 //!    one that is not was not ([`LinkError::NotMade`]), and a new try is a new `K`.
 //! 4. The answer is a [`LinkCreated`] receipt; [`LinkCreated::apply`] writes the vault
-//!    row (with `K` and the account) and the history. Only a receipt writes a row.
+//!    row (with `K` and the account) and the history. Only a receipt writes a row. The app
+//!    writes it with [`ConnectAccount::keep_or_revoke`] on the step that made the link:
+//!    when the row cannot be written (a lock, another vault), that step revokes the new
+//!    link at Connect at once, so no live link is left that no device can copy.
 //! 5. [`ConnectAccount::revoke_public_link`] deletes the link at Connect for the account
 //!    that made it. A `200`, or a `404` for its own link that carries the marker of the
 //!    links routes ([`LINKS_MARKER`]), is a [`LinkRevoked`] receipt; only
 //!    [`LinkRevoked::apply`] writes the revoke. A `404` without the marker (a relay
 //!    without the routes, such as an older image after a rollback), any other answer,
 //!    and no answer write nothing ([`LinkError::NotConfirmed`], "Try Again").
+//! 6. A relay without the links routes (an older or a self-hosted image) answers
+//!    `GET /v1/account/links` and `POST /v1/account/links` with a `404` without the
+//!    marker: that is [`LinkError::NoLinks`], and the app offers no link there.
 //!
 //! `K` is erased on drop, never in a `Debug` text or a log, and leaves this module only
 //! in the link text ([`link_text`]).
@@ -128,8 +134,14 @@ pub enum LinkError {
     BadAddress(String),
     /// `403 link_limit`: the account has its most live links.
     LinkLimit,
-    /// `503 mail_unavailable`: this Connect cannot send the code mails now.
+    /// `503 mail_unavailable`: this relay has no mail sender for the code mails.
     MailUnavailable,
+    /// The relay has no links routes: a `404` without [`LINKS_MARKER`].
+    NoLinks,
+    /// Connect took the link, and the vault row could not be written (the vault locked
+    /// or another vault opened meanwhile). `revoked`: the link was revoked at Connect at
+    /// once; else it is still live there, without a row.
+    NotSaved { revoked: bool },
     /// A retry met `409 conflict` and Connect does not list the link: it was not made.
     NotMade,
     /// The link was made by another account; only that account revokes it.
@@ -150,7 +162,9 @@ impl fmt::Display for LinkError {
             Self::Origin => f.write_str("Links work only with a Connect that uses HTTPS."),
             Self::Empty => f.write_str("This folder has no secret to share."),
             Self::Archived => f.write_str("An archived secret cannot be shared."),
-            Self::Received => f.write_str("A secret that someone shared with you cannot be shared further."),
+            Self::Received => {
+                f.write_str("A secret that someone shared with you cannot be shared further.")
+            }
             Self::NotFound => f.write_str("This secret or folder is gone."),
             Self::TooLarge { fit, total } => write!(
                 f,
@@ -158,12 +172,31 @@ impl fmt::Display for LinkError {
             ),
             Self::Expiry => f.write_str("A link lasts 10 minutes to 30 days."),
             Self::AddressCount => f.write_str("Add 1 to 20 e-mail addresses."),
-            Self::BadAddress(text) => write!(f, "\u{201c}{}\u{201d} is not an e-mail address.", short(text)),
-            Self::LinkLimit => f.write_str("This account has its most live links. Revoke one first."),
-            Self::MailUnavailable => f.write_str("Connect cannot send e-mail codes now. Choose \u{201c}Anyone with the link\u{201d}, or try later."),
+            Self::BadAddress(text) => write!(
+                f,
+                "\u{201c}{}\u{201d} is not an e-mail address.",
+                short(text)
+            ),
+            Self::LinkLimit => {
+                f.write_str("This account has its most live links. Revoke one first.")
+            }
+            Self::MailUnavailable => f.write_str(
+                "This relay cannot send e-mail codes. Choose \u{201c}Anyone with the link\u{201d}.",
+            ),
+            Self::NoLinks => f.write_str("This relay does not offer links."),
+            Self::NotSaved { revoked: true } => {
+                f.write_str("The link was not saved in the vault, so Apassy revoked it.")
+            }
+            Self::NotSaved { revoked: false } => f.write_str(
+                "The link was not saved in the vault. Revoke it under Links not in this vault.",
+            ),
             Self::NotMade => f.write_str("The link was not made. Create it again."),
-            Self::NotMaker => f.write_str("Another account made this link. Only that account can revoke it."),
-            Self::NotConfirmed => f.write_str("Connect did not confirm the revoke. The link may still open. Try again."),
+            Self::NotMaker => {
+                f.write_str("Another account made this link. Only that account can revoke it.")
+            }
+            Self::NotConfirmed => f.write_str(
+                "Connect did not confirm the revoke. The link may still open. Try again.",
+            ),
             Self::Connect(error) => error.fmt(f),
             Self::Vault => f.write_str("Apassy could not read or write the vault."),
         }
@@ -745,6 +778,17 @@ pub struct LinkList {
     pub live: u64,
     pub limit: Option<u64>,
     pub mail: bool,
+    /// When this device asked for the list (Unix seconds; not on the wire): it speaks
+    /// only for the links made before.
+    #[serde(skip)]
+    pub asked_at: u64,
+}
+
+impl LinkList {
+    /// The account has its most live links: a new one is refused (`403 link_limit`).
+    pub fn at_limit(&self) -> bool {
+        self.limit.is_some_and(|limit| self.live >= limit)
+    }
 }
 
 /// `DELETE /v1/account/links/{link_id}`.
@@ -919,6 +963,17 @@ impl PendingLink {
     }
 }
 
+/// `Ok(None)` for a `404` without [`LINKS_MARKER`] (a relay without the links routes),
+/// else the result as it is.
+fn unmarked_404<T>(
+    (result, marked): (Result<T, ConnectError>, bool),
+) -> Result<Option<T>, ConnectError> {
+    match result {
+        Err(ConnectError::NotFound) if !marked => Ok(None),
+        other => other.map(Some),
+    }
+}
+
 /// What a `DELETE` of a link came to.
 enum Deleted {
     /// `200`.
@@ -944,6 +999,10 @@ impl LinkCreated {
         &self.pending.name
     }
 
+    pub fn link_id(&self) -> &str {
+        &self.pending.body.link_id
+    }
+
     /// Write the row of the link and `link_created` in the history of its secrets.
     pub fn apply(&self, vault: &mut Vault) -> Result<PublicLink, LinkError> {
         let pending = &self.pending;
@@ -962,6 +1021,30 @@ impl LinkCreated {
                 items: &pending.items,
             })
             .map_err(vault_error)
+    }
+}
+
+/// A link that Connect took and whose row the vault holds
+/// ([`ConnectAccount::keep_or_revoke`]): the row and the link text to copy.
+pub struct LinkKept {
+    pub row: PublicLink,
+    /// The link as Connect took it.
+    pub view: LinkView,
+    link: Zeroizing<String>,
+}
+
+impl fmt::Debug for LinkKept {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkKept")
+            .field("link_id", &self.row.link_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LinkKept {
+    /// The link text to copy.
+    pub fn link(&self) -> Zeroizing<String> {
+        self.link.clone()
     }
 }
 
@@ -1032,26 +1115,26 @@ impl ConnectAccount {
         if let Err(error) = self.check_link_origin(&pending.origin, &pending.account_id) {
             return Err((error, None));
         }
-        let sent = self.with_token(|client, token| client.create_link(token, &pending.body));
+        let sent =
+            self.with_token(|client, token| unmarked_404(client.create_link(token, &pending.body)));
         let view = match sent {
-            Ok(view) => view,
-            Err(ConnectError::Conflict) => {
-                match self.with_token(|client, token| client.links(token)) {
-                    Ok(list) => match list
-                        .links
-                        .into_iter()
-                        .find(|v| v.link_id == pending.body.link_id)
-                    {
-                        Some(view) => view,
-                        None => return Err((LinkError::NotMade, None)),
-                    },
-                    Err(error) => {
-                        let error = LinkError::from(error);
-                        let keep = error.can_retry().then(|| Box::new(pending));
-                        return Err((error, keep));
-                    }
+            Ok(Some(view)) => view,
+            // A relay without the routes kept nothing.
+            Ok(None) => return Err((LinkError::NoLinks, None)),
+            Err(ConnectError::Conflict) => match self.public_links() {
+                Ok(list) => match list
+                    .links
+                    .into_iter()
+                    .find(|v| v.link_id == pending.body.link_id)
+                {
+                    Some(view) => view,
+                    None => return Err((LinkError::NotMade, None)),
+                },
+                Err(error) => {
+                    let keep = error.can_retry().then(|| Box::new(pending));
+                    return Err((error, keep));
                 }
-            }
+            },
             Err(error) => {
                 let error = LinkError::from(error);
                 let keep = error.can_retry().then(|| Box::new(pending));
@@ -1068,10 +1151,46 @@ impl ConnectAccount {
         Ok(LinkCreated { view, pending })
     }
 
-    /// `GET /v1/account/links`: the links of this account at Connect.
+    /// `GET /v1/account/links`: the links of this account at Connect. A `404` without
+    /// [`LINKS_MARKER`] is [`LinkError::NoLinks`]: this relay has no links routes.
     pub fn public_links(&mut self) -> Result<LinkList, LinkError> {
-        self.with_token(|client, token| client.links(token))
-            .map_err(LinkError::from)
+        let asked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let mut list = self
+            .with_token(|client, token| unmarked_404(client.links(token)))
+            .map_err(LinkError::from)?
+            .ok_or(LinkError::NoLinks)?;
+        list.asked_at = asked_at;
+        Ok(list)
+    }
+
+    /// Write the row of `created` with `write` while this step still holds the account,
+    /// and give the row and the link text. When the row cannot be written (the vault was
+    /// locked, or another vault opened, between Connect's answer and the write), revoke
+    /// the new link at Connect at once with the account token, which needs no vault: a
+    /// link that no row holds can never be copied, and it counts toward the limit. `K`
+    /// stays only in memory, in `created`, and goes with it after the revoke. A revoke
+    /// that fails leaves the link at Connect; Settings › Connect lists it among the links
+    /// not in this vault.
+    pub fn keep_or_revoke(
+        &mut self,
+        created: LinkCreated,
+        write: impl FnOnce(&LinkCreated) -> Result<PublicLink, LinkError>,
+    ) -> Result<LinkKept, LinkError> {
+        match write(&created) {
+            Ok(row) => Ok(LinkKept {
+                link: created.link(),
+                view: created.view.clone(),
+                row,
+            }),
+            Err(error) => {
+                tracing::debug!(error = %error, "public link row not written; revoking");
+                let revoked = self.revoke_unknown_link(created.link_id()).is_ok();
+                drop(created);
+                Err(LinkError::NotSaved { revoked })
+            }
+        }
     }
 
     /// Revoke `link` at Connect. Only the account that made it may: a link of another

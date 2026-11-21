@@ -34,8 +34,9 @@ enum VaultSheet: Identifiable {
     /// "New Credential" (ADR 0026 §4): paste, then Add, into the folder on the screen (nil at the
     /// root and in "All credentials").
     case newCredential(folder: String?)
-    /// "Move to Folder" for a credential: it leaves its other folders.
-    case moveItem(ItemRow)
+    /// "Move to Folder" for a credential, from the folder of the list (nil: "All credentials" or
+    /// "No folder", where it leaves every folder). Its other folders stay.
+    case moveItem(ItemRow, from: String?)
     /// "Add to Folder" for a credential: it stays in its other folders.
     case addItemToFolder(ItemRow)
     /// "Move" for a folder.
@@ -51,7 +52,7 @@ enum VaultSheet: Identifiable {
         case .generator: "generator"
         case .exchange: "exchange"
         case .newCredential(let folder): "new-credential-\(folder ?? "")"
-        case .moveItem(let item): "move-item-\(item.id)"
+        case .moveItem(let item, let from): "move-item-\(item.id)-\(from ?? "")"
         case .addItemToFolder(let item): "add-item-folder-\(item.id)"
         case .moveFolder(let folder): "move-folder-\(folder.uuid)"
         }
@@ -327,7 +328,7 @@ struct ItemListRow: View {
                 Button("Open \(VaultText.host(site))", systemImage: "safari") { openURL(url) }
             }
             if vault.hasFolders, !item.archived {
-                Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(item) }
+                Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(item, from: folder) }
                 if !vault.folderTree.folders.isEmpty {
                     Button("Add to Folder…", systemImage: "folder.badge.plus") { ui.sheet = .addItemToFolder(item) }
                 }

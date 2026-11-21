@@ -873,3 +873,88 @@ fn a_credential_is_in_two_folders_and_leaves_one() {
         "invalid_input"
     );
 }
+
+/// ADR 0047 §2: "Move to Folder…" (`item_folder_move`) replaces only the folder of the
+/// list the owner is in, as on the Mac; from "All credentials" or "No folder" (no
+/// `from`) it replaces every folder.
+#[test]
+fn move_to_folder_replaces_only_the_folder_of_the_list() {
+    let root = TempDir::new().unwrap();
+    let (phone, _) = phone(&root);
+    let folder = |name: &str, parent: Option<&str>| {
+        call(
+            &phone,
+            json!({"op": "folder_create", "name": name, "parent": parent}),
+        )["folder"]["uuid"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let work = folder("Work", None);
+    let home = folder("Home", None);
+    let bills = folder("Bills", None);
+    let old = folder("Old", Some(&work));
+    let id = call(
+        &phone,
+        json!({"op": "add_pasted", "folder": work,
+               "text": format!("STRIPE_SECRET_KEY={}", fake("sk_live_", 24))}),
+    )["items"][0]["id"]
+        .as_u64()
+        .unwrap();
+    call(
+        &phone,
+        json!({"op": "item_folder_add", "id": id, "folder": home}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([work, home]));
+
+    // In the list of "Work": "Work" goes, "Bills" takes its place, "Home" stays.
+    call(
+        &phone,
+        json!({"op": "item_folder_move", "id": id, "from": work, "to": bills}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([bills, home]));
+    // To the top level from the list of "Home": only "Home" goes.
+    call(
+        &phone,
+        json!({"op": "item_folder_move", "id": id, "from": home}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([bills]));
+    // In the list of "Work", which shows its subfolders: the folder below it moves.
+    call(
+        &phone,
+        json!({"op": "item_folder_add", "id": id, "folder": old}),
+    );
+    call(
+        &phone,
+        json!({"op": "item_folder_move", "id": id, "from": work, "to": home}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([bills, home]));
+    // A list that does not hold it any more (another device moved it) changes nothing.
+    assert_eq!(
+        fails(
+            &phone,
+            json!({"op": "item_folder_move", "id": id, "from": work, "to": old}),
+        ),
+        "conflict"
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([bills, home]));
+    // From "All credentials" or "No folder": every folder is replaced, as
+    // `item_folder_set` does.
+    call(
+        &phone,
+        json!({"op": "item_folder_move", "id": id, "to": work}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([work]));
+    call(
+        &phone,
+        json!({"op": "item_folder_move", "id": id, "from": "", "to": ""}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([]));
+    for request in [
+        json!({"op": "item_folder_move", "id": id, "to": "no-such-folder"}),
+        json!({"op": "item_folder_move", "id": id, "from": "no-such-folder"}),
+        json!({"op": "item_folder_move", "id": 9999, "to": home}),
+    ] {
+        assert_eq!(fails(&phone, request), "not_found");
+    }
+}

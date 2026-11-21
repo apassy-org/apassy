@@ -209,6 +209,29 @@ struct CredentialOptionsTests {
         #expect(model.folderPlaces == [FolderPlace(folder: nil, title: "No folder")])
     }
 
+    @Test("Move to Folder… in a folder list replaces only that folder (ADR 0047 §2)")
+    func moveFromTheListFolder() async {
+        let vault = await unlockedVault()
+        let billing = PreviewOrganize.FolderID.billing
+        let personal = PreviewOrganize.FolderID.personal
+        let acme = PreviewOrganize.FolderID.acme
+        #expect(await vault.moveItem(102, to: billing))
+        #expect(await vault.addToFolder(102, folder: personal))
+        // In the list of "Personal": "Personal" goes, "Acme" takes its place, "Billing" stays.
+        #expect(await vault.moveItem(102, from: personal, to: acme))
+        #expect(vault.item(102)?.folders == [billing, acme])
+        // In the list of "Acme", which holds "Billing" below it: "Acme" itself is replaced.
+        #expect(await vault.moveItem(102, from: acme, to: nil))
+        #expect(vault.item(102)?.folders == [billing])
+        // A list that does not hold it any more changes nothing.
+        #expect(!(await vault.moveItem(102, from: personal, to: acme)))
+        #expect(vault.item(102)?.folders == [billing])
+        // "All credentials": every folder is replaced.
+        #expect(await vault.addToFolder(102, folder: personal))
+        #expect(await vault.moveItem(102, to: acme))
+        #expect(vault.item(102)?.folders == [acme])
+    }
+
     // MARK: ItemDetailModel
 
     private func detailModel(

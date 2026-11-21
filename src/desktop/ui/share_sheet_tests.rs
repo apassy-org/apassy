@@ -36,6 +36,8 @@ fn view() -> SheetView {
         busy: false,
         error: None,
         retry: false,
+        blocked: None,
+        no_email: false,
     }
 }
 
@@ -136,6 +138,7 @@ fn a_link_shows_copy_revoke_and_its_opens() {
         live: 1,
         limit: Some(25),
         mail: true,
+        asked_at: NOW,
     };
     let rows = rows_of(
         &[link("acc_k7m2q4x3ca", &[], false)],
@@ -187,7 +190,7 @@ fn a_link_of_another_account_has_no_revoke() {
     );
     assert!(rows[0].detail.contains(SHOW_ONCE), "{}", rows[0].detail);
     let text = painted(|ui| {
-        let _ = draw_settings(ui, &rows, None, false);
+        let _ = draw_settings(ui, &mut settings(rows.clone(), Vec::new()));
     });
     assert!(text.contains(SETTINGS_GROUP), "{text}");
     assert!(text.contains("Made by Ola"), "{text}");
@@ -234,11 +237,194 @@ fn an_expired_link_leaves_the_lists_and_an_unknown_one_can_be_revoked() {
         live: 1,
         limit: None,
         mail: false,
+        asked_at: NOW,
     };
     let unknown = unknown_rows(&[old], Some(&list));
     assert_eq!(unknown.len(), 1);
     assert!(unknown[0].can_revoke && !unknown[0].can_copy);
     assert_eq!(unknown[0].title, UNKNOWN_LINK);
+}
+
+fn settings(links: Vec<LinkRow>, unknown: Vec<LinkRow>) -> SettingsView {
+    SettingsView {
+        links,
+        unknown,
+        ..SettingsView::default()
+    }
+}
+
+fn listed(link_id: &str, state: &str) -> LinkView {
+    LinkView {
+        link_id: link_id.to_owned(),
+        created_at: NOW - 60,
+        expires_at: NOW + 600,
+        one_time: state == "opened",
+        access: "anyone".to_owned(),
+        addresses: 0,
+        state: state.to_owned(),
+        opens: u64::from(state == "opened"),
+        last_opened_at: None,
+    }
+}
+
+/// The account belongs to the computer, which holds several vaults: the links that
+/// Connect lists and the open vault does not hold are no rows to clean up. They are in
+/// one collapsed group, "Links not in this vault (N)", and their Revoke asks first, with
+/// the warning that someone may still use the link.
+#[test]
+fn links_not_in_this_vault_are_one_collapsed_group_and_revoke_asks_first() {
+    let mine = link("acc_k7m2q4x3ca", &[], false);
+    let list = LinkList {
+        links: vec![
+            listed(&mine.link_id, "live"),
+            listed(&"a".repeat(32), "live"),
+            listed(&"b".repeat(32), "live"),
+        ],
+        live: 3,
+        limit: Some(25),
+        mail: true,
+        asked_at: NOW,
+    };
+    let unknown = unknown_rows(std::slice::from_ref(&mine), Some(&list));
+    assert_eq!(unknown.len(), 2);
+    let rows = rows_of(
+        std::slice::from_ref(&mine),
+        Some(&list),
+        Some("acc_k7m2q4x3ca"),
+        &BTreeMap::new(),
+        true,
+        NOW,
+    );
+    assert_eq!(rows.len(), 1);
+    // Collapsed: the group names its count, and shows no row and no Revoke of them.
+    let mut view = settings(rows.clone(), unknown.clone());
+    let text = painted(|ui| {
+        let _ = draw_settings(ui, &mut view.clone());
+    });
+    assert!(text.contains(&not_in_vault(2)), "{text}");
+    assert!(!text.contains(UNKNOWN_LINK), "{text}");
+    // Open: the rows, each with Revoke and without Copy.
+    view.open = true;
+    let text = painted(|ui| {
+        let _ = draw_settings(ui, &mut view.clone());
+    });
+    assert!(text.contains(UNKNOWN_LINK), "{text}");
+    assert!(unknown.iter().all(|row| row.can_revoke && !row.can_copy));
+    // Its Revoke asks first: the warning and a second Revoke.
+    view.confirm = Some("a".repeat(32));
+    let text = painted(|ui| {
+        let _ = draw_settings(ui, &mut view.clone());
+    });
+    assert!(text.contains(REVOKE_UNKNOWN), "{text}");
+    assert!(text.contains(REVOKE_UNKNOWN_NOTE), "{text}");
+    assert!(text.contains(CANCEL), "{text}");
+    // Nothing to show: no group.
+    let text = painted(|ui| {
+        let _ = draw_settings(ui, &mut SettingsView::default());
+    });
+    assert!(!text.contains(SETTINGS_GROUP), "{text}");
+}
+
+/// Copy is off for a link that the fresh list of Connect does not hold, and for a
+/// one-time link that was opened. A link made after the list was asked keeps Copy.
+#[test]
+fn copy_is_off_for_a_link_that_does_not_open_any_more() {
+    let own = Some("acc_k7m2q4x3ca");
+    let names = BTreeMap::new();
+    let mine = link("acc_k7m2q4x3ca", &[], false);
+    let other = "c".repeat(32);
+    let list = |views: Vec<LinkView>, asked_at: u64| LinkList {
+        live: views.len() as u64,
+        links: views,
+        limit: Some(25),
+        mail: true,
+        asked_at,
+    };
+    let row = |list: &LinkList| {
+        rows_of(
+            std::slice::from_ref(&mine),
+            Some(list),
+            own,
+            &names,
+            true,
+            NOW,
+        )
+        .remove(0)
+    };
+    // Listed and live: Copy.
+    assert!(row(&list(vec![listed(&mine.link_id, "live")], NOW)).can_copy);
+    // Not listed by a list asked after the link was made: no Copy, "Not at Connect".
+    let gone = row(&list(vec![listed(&other, "live")], NOW));
+    assert!(!gone.can_copy && gone.can_revoke);
+    assert!(gone.detail.contains(NOT_LISTED), "{}", gone.detail);
+    // A list asked before the link was made does not speak for it.
+    assert!(row(&list(vec![listed(&other, "live")], mine.created_at - 1)).can_copy);
+    // A one-time link that was opened: no Copy.
+    let opened = row(&list(vec![listed(&mine.link_id, "opened")], NOW));
+    assert!(!opened.can_copy);
+    assert!(opened.detail.contains(OPENED_ONCE), "{}", opened.detail);
+    // No list yet: Copy.
+    assert!(rows_of(std::slice::from_ref(&mine), None, own, &names, true, NOW)[0].can_copy);
+}
+
+/// Before the owner check: at the limit "Create Link" is off with the limit; a relay
+/// without mail turns "Only these e-mail addresses" off with its reason; a relay without
+/// the links routes says so.
+#[test]
+fn the_list_of_connect_is_checked_before_the_owner_check() {
+    let mut links = LinksUi::default();
+    assert_eq!(blocked(&links), None);
+    assert!(!no_email(&links));
+    links.list = Some(LinkList {
+        links: Vec::new(),
+        live: 25,
+        limit: Some(25),
+        mail: false,
+        asked_at: NOW,
+    });
+    assert_eq!(
+        blocked(&links).as_deref(),
+        Some("This account has 25 live links, the most it can have. Revoke one first.")
+    );
+    assert!(no_email(&links));
+    // No limit (a relay of your own): never blocked.
+    links.list.as_mut().unwrap().limit = None;
+    assert_eq!(blocked(&links), None);
+    links.no_links = true;
+    assert_eq!(
+        blocked(&links).as_deref(),
+        Some("This relay does not offer links.")
+    );
+
+    // The sheet: the reason, and "Create Link…" off (no form opens on a click).
+    let mut shown = view();
+    shown.blocked = blocked(&links);
+    let text = painted(|ui| {
+        let mut shown = shown.clone();
+        let _ = draw_sheet(ui, &mut shown);
+    });
+    assert!(text.contains("This relay does not offer links."), "{text}");
+    assert!(!text.contains(NONE_YET), "{text}");
+    // The form on a relay without mail: the reason, and the choice stays "Anyone".
+    let mut shown = view();
+    shown.no_email = true;
+    shown.form = Some(Form {
+        emails: true,
+        ..Form::default()
+    });
+    let mut after = shown.clone();
+    let text = painted(|ui| {
+        after = shown.clone();
+        let _ = draw_sheet(ui, &mut after);
+    });
+    assert!(text.contains(NO_EMAIL), "{text}");
+    assert!(!text.contains(EMAILS_NOTE), "{text}");
+    assert_eq!(after.form.map(|form| form.emails), Some(false));
+    // The texts of these errors say no "try later" where nothing will change.
+    for error in [LinkError::MailUnavailable, LinkError::NoLinks] {
+        let text = error.to_string();
+        assert!(!text.contains("later") && !text.contains(" now"), "{text}");
+    }
 }
 
 #[test]
@@ -475,10 +661,10 @@ fn after_create_link_focus_is_on_copy_link() {
         NOW,
     );
     let (_, _) = focused_after(&ctx, 2, Vec::new(), |_, ui| {
-        draw_settings(ui, &rows, None, false)
+        draw_settings(ui, &mut settings(rows.clone(), Vec::new()))
     });
     let (focused, action) = focused_after(&ctx, 2, vec![key(egui::Key::Tab)], |_, ui| {
-        draw_settings(ui, &rows, None, false)
+        draw_settings(ui, &mut settings(rows.clone(), Vec::new()))
     });
     let focused = focused.unwrap_or_default();
     assert!(focused.starts_with("Copy"), "{focused}");

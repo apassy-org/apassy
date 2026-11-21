@@ -152,6 +152,18 @@ struct ItemFolderOne {
     folder: String,
 }
 
+/// "Move to Folder…": `item_folder_move`. `from` is the folder of the list the owner is
+/// in (absent or empty: "All credentials" or "No folder"); `to` the new folder (absent
+/// or empty: the top level).
+#[derive(Deserialize)]
+struct ItemFolderMoveIn {
+    id: u64,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct Paste {
     text: Secret,
@@ -232,6 +244,42 @@ fn require_folder(vault: &Vault, uuid: &str) -> CoreResult<()> {
 /// An empty folder parameter is the top level.
 fn place(folder: Option<String>) -> Option<String> {
     folder.filter(|uuid| !uuid.trim().is_empty())
+}
+
+fn list_out_of_date() -> CoreError {
+    CoreError::new(
+        "conflict",
+        "The credential is not in this folder any more. Another device may have moved it.",
+    )
+}
+
+/// The folder through which the credential `id` is in the list of `list`: `list` itself,
+/// else its first folder below `list` (the Mac's `FolderTree::list_folder`). `None`: it is
+/// not in that list.
+fn list_folder(vault: &Vault, id: u64, list: &str) -> CoreResult<Option<String>> {
+    let folders = vault.item_folders(id)?;
+    if folders.iter().any(|folder| folder == list) {
+        return Ok(Some(list.to_owned()));
+    }
+    let tree = vault.folders()?;
+    let mut below = BTreeSet::from([list.to_owned()]);
+    // The folders are depth first, so one pass per level finds every subfolder.
+    loop {
+        let before = below.len();
+        for folder in &tree {
+            if folder
+                .parent
+                .as_ref()
+                .is_some_and(|parent| below.contains(parent))
+            {
+                below.insert(folder.uuid.clone());
+            }
+        }
+        if below.len() == before {
+            break;
+        }
+    }
+    Ok(folders.into_iter().find(|folder| below.contains(folder)))
 }
 
 // ---- Folders ----
@@ -555,6 +603,33 @@ impl Core {
                     vault
                         .set_item_folder(id, folder.as_deref())
                         .map_err(|error| folder_error(error, bad_name))?;
+                    Ok(ok(&Empty {}))
+                })
+            }
+            // ADR 0047 §2: "Move to Folder…" replaces the folder of the list the owner is in;
+            // the other folders stay. From "All credentials" or "No folder" it replaces
+            // every folder, as on the Mac (`move_items` with `list_folder`).
+            "item_folder_move" => {
+                let ItemFolderMoveIn { id, from, to } = params(request)?;
+                let (from, to) = (place(from), place(to));
+                self.with_vault_mut(|vault| {
+                    vault.details(id)?;
+                    if let Some(to) = &to {
+                        require_folder(vault, to)?;
+                    }
+                    let through = match &from {
+                        Some(list) => {
+                            require_folder(vault, list)?;
+                            Some(list_folder(vault, id, list)?.ok_or_else(list_out_of_date)?)
+                        }
+                        None => None,
+                    };
+                    vault
+                        .move_item(id, through.as_deref(), to.as_deref())
+                        .map_err(|error| match error.kind() {
+                            VaultErrorKind::Conflict => list_out_of_date(),
+                            _ => folder_error(error, bad_name),
+                        })?;
                     Ok(ok(&Empty {}))
                 })
             }
