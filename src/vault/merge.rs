@@ -3670,6 +3670,98 @@ mod tests {
         );
     }
 
+    /// ADR 0047 §2: Mac A deletes "Bills" (in "Personal") while Mac B adds "Power" to
+    /// it. After the merge "Power" is in "Personal" on both, as the delete put the other
+    /// credential of "Bills" there, also when "Personal" is deleted after it, and the
+    /// content hashes agree. The next change of its folders writes the membership there.
+    #[test]
+    fn a_credential_added_to_a_folder_deleted_on_the_other_device_ends_in_its_parent() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Personal"]);
+        let personal = &folders[0];
+        let bills = a.create_folder(Some(personal), "Bills").unwrap().uuid;
+        let power = a.add(draft("Power", "SYNTH-power")).unwrap().id;
+        a.add_item_to_folder(mail, &bills).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        let b_power = b
+            .search("")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.title == "Power")
+            .unwrap()
+            .id;
+        tick();
+        a.delete_folder(&bills).unwrap();
+        b.add_item_to_folder(b_power, &bills).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty());
+        assert_eq!(local_hashes(&a), local_hashes(&b));
+        for (vault, mail, power) in [(&a, mail, power), (&b, b_mail, b_power)] {
+            assert_eq!(
+                vault.item_folders(mail).unwrap(),
+                std::slice::from_ref(personal)
+            );
+            assert_eq!(
+                vault.item_folders(power).unwrap(),
+                std::slice::from_ref(personal),
+                "not under No folder"
+            );
+            assert_eq!(
+                sorted_ids(vault.items_in_folder(Some(personal), false).unwrap()),
+                sorted_ids(vec![mail, power])
+            );
+            assert!(!vault.items_in_folder(None, false).unwrap().contains(&power));
+            let index = vault.folder_index().unwrap();
+            assert_eq!(index.folders(power), std::slice::from_ref(personal));
+        }
+        // A later change of its folders on Mac B ends the row of the deleted folder.
+        tick();
+        let home = b.create_folder(None, "Home").unwrap().uuid;
+        b.add_item_to_folder(b_power, &home).unwrap();
+        b.remove_item_from_folder(b_power, personal).unwrap();
+        assert_eq!(
+            b.item_folders(b_power).unwrap(),
+            std::slice::from_ref(&home)
+        );
+        exchange(&dir, &mut a, &mut b);
+        assert_eq!(a.item_folders(power).unwrap(), std::slice::from_ref(&home));
+        // A chain of deleted folders: "Old" in "Personal" in "Archive". Mac A deletes
+        // "Old", then "Personal", while Mac B adds "Power" to "Old" and makes "New" in
+        // "Personal". Both end in "Archive", the nearest live folder.
+        tick();
+        let archive = a.create_folder(None, "Archive").unwrap().uuid;
+        a.move_folder(personal, Some(&archive)).unwrap();
+        let old = a.create_folder(Some(personal), "Old").unwrap().uuid;
+        exchange(&dir, &mut a, &mut b);
+        tick();
+        a.delete_folder(&old).unwrap();
+        a.delete_folder(personal).unwrap();
+        b.add_item_to_folder(b_power, &old).unwrap();
+        let new = b.create_folder(Some(personal), "New").unwrap().uuid;
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty());
+        assert_eq!(local_hashes(&a), local_hashes(&b));
+        let in_archive = sorted(vec![home.clone(), archive.clone()]);
+        for (vault, mail, power) in [(&a, mail, power), (&b, b_mail, b_power)] {
+            assert_eq!(
+                vault.item_folders(mail).unwrap(),
+                std::slice::from_ref(&archive)
+            );
+            assert_eq!(sorted(vault.item_folders(power).unwrap()), in_archive);
+            let parent = vault
+                .folders()
+                .unwrap()
+                .into_iter()
+                .find(|folder| folder.uuid == new)
+                .map(|folder| folder.parent);
+            assert_eq!(parent, Some(Some(archive.clone())));
+        }
+    }
+
+    fn sorted_ids(mut ids: Vec<u64>) -> Vec<u64> {
+        ids.sort_unstable();
+        ids
+    }
+
     #[test]
     fn the_first_folder_agrees_across_devices() {
         let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);

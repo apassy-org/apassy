@@ -13,6 +13,8 @@
 //!   that says revoked is a link that no longer opens.
 //! - The history of each credential of the link gets `link_created` and `link_revoked`
 //!   with the name of the link, never its key. They stay on the device that wrote them.
+//!   `link_revoked` goes to the credentials of the snapshot, never to those that the
+//!   folder holds at the revoke.
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -293,17 +295,35 @@ fn load(
     Ok(links)
 }
 
-/// The credentials that a link shows now: the one credential, or each credential of the
-/// folder and its subfolders. A root that is gone shows none.
-fn items_of(vault: &Vault, root: &LinkRoot) -> VaultResult<Vec<u64>> {
-    match root {
-        LinkRoot::Item(uuid) => Ok(vault.item_by_uuid(uuid)?.into_iter().collect()),
-        LinkRoot::Folder(uuid) => match vault.items_in_folder(Some(uuid), true) {
-            Ok(items) => Ok(items),
-            Err(error) if error.kind() == VaultErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error),
-        },
-    }
+/// How far in seconds a `link_created` event of a link may be from the version of its
+/// row: both are written in one transaction ([`Vault::add_public_link`]).
+const CREATED_EVENT_WINDOW: i64 = 5;
+
+/// The credentials of the snapshot of a folder link `name` whose row has the version
+/// `version` (Unix milliseconds of its write): those whose history got its
+/// `link_created` here, in the transaction of the row. Not the credentials that the
+/// folder holds now: one added later was never in the link, and one moved out was. The
+/// events stay on the device that made the link, so another device finds none.
+fn snapshot_items(conn: &Connection, name: &str, version: i64) -> VaultResult<Vec<i64>> {
+    let at = version.div_euclid(1000);
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT item_id FROM item_event
+             WHERE kind = ?1 AND detail = ?2 AND at BETWEEN ?3 AND ?4 ORDER BY item_id",
+        )
+        .map_err(storage)?;
+    stmt.query_map(
+        rusqlite::params![
+            ItemEventKind::LinkCreated.as_str(),
+            name,
+            at - CREATED_EVENT_WINDOW,
+            at + CREATED_EVENT_WINDOW
+        ],
+        |row| row.get(0),
+    )
+    .map_err(storage)?
+    .collect::<Result<_, _>>()
+    .map_err(storage)
 }
 
 impl Vault {
@@ -420,8 +440,11 @@ impl Vault {
 
     /// Mark the link `uuid` revoked after Connect deleted it for `account_id`: the row
     /// keeps its id with `deleted_at`, loses its key and its addresses, and each
-    /// credential that it shows gets `link_revoked`. The revoke reaches every device and
-    /// wins over any later edit. Returns whether a live row was revoked.
+    /// credential of its snapshot gets `link_revoked`: the credential of an item link, and
+    /// for a folder link those that got its `link_created` on this device
+    /// ([`snapshot_items`]; another device writes none for a folder link: only the link
+    /// and the device that made it know what the snapshot held). The revoke reaches every
+    /// device and wins over any later edit. Returns whether a live row was revoked.
     ///
     /// `InvalidInput`: the row was made by another account, which alone may revoke it.
     pub(crate) fn mark_public_link_revoked(
@@ -438,7 +461,10 @@ impl Vault {
         if link.account_id != account_id {
             return Err(err(VaultErrorKind::InvalidInput));
         }
-        let items = items_of(self, &link.root)?;
+        let item = match &link.root {
+            LinkRoot::Item(uuid) => self.item_by_uuid(uuid)?.map(to_sql_id).transpose()?,
+            LinkRoot::Folder(_) => None,
+        };
         let conn = self.conn_mut()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -454,6 +480,13 @@ impl Vault {
         let Some(previous) = previous else {
             return Ok(false);
         };
+        let items = match item {
+            Some(item) => vec![item],
+            None if matches!(link.root, LinkRoot::Folder(_)) => {
+                snapshot_items(&tx, &link.name, previous)?
+            }
+            None => Vec::new(),
+        };
         let (at, by) = next_version(&tx, Some(previous))?;
         tx.execute(
             "UPDATE public_link SET deleted_at = ?1, key = X'', addresses = '',
@@ -463,7 +496,6 @@ impl Vault {
         )
         .map_err(storage)?;
         for item in items {
-            let item = to_sql_id(item)?;
             if super::agents::require_item(&tx, item).is_ok() {
                 history::record(&tx, item, ItemEventKind::LinkRevoked, &link.name)?;
             }

@@ -697,12 +697,18 @@ final class VaultModel {
         await change("Delete the folder") { try await service.deleteFolder(uuid: folder.uuid) }
     }
 
-    /// Put a credential in `folder` alone (nil: the top level): it leaves its other folders.
-    /// Sharing, rules, and history stay.
+    /// "Move to Folder…" (ADR 0047 §2). In the list of the folder `from`, `folder` (nil: the top
+    /// level) replaces the folder of that list, and the other folders stay, as on the Mac. From
+    /// "All credentials" or "No folder" (`from` nil) the credential is in `folder` alone. Sharing,
+    /// rules, and history stay.
     @discardableResult
-    func moveItem(_ id: UInt64, to folder: String?) async -> Bool {
-        guard (item(id)?.folders ?? []) != (folder.map { [$0] } ?? []) else { return true }
-        return await change("Move the item") { try await service.setItemFolder(id: id, folder: folder) } != nil
+    func moveItem(_ id: UInt64, from: String? = nil, to folder: String?) async -> Bool {
+        guard let from else {
+            guard (item(id)?.folders ?? []) != (folder.map { [$0] } ?? []) else { return true }
+            return await change("Move the item") { try await service.setItemFolder(id: id, folder: folder) } != nil
+        }
+        guard from != folder else { return true }
+        return await change("Move the item") { try await service.moveItem(id: id, from: from, to: folder) } != nil
     }
 
     /// "Add to Folder…": the credential is also in `folder` and stays in its other folders.

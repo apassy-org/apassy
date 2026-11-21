@@ -710,8 +710,8 @@ impl Core {
             | "passkey_remove" => self.passkey_call(&op, request),
             // 5.11 Folders, adding by paste, and the options of a credential.
             "folders" | "folder_create" | "folder_rename" | "folder_move" | "folder_delete"
-            | "item_folder_set" | "item_folder_add" | "item_folder_remove" | "detect"
-            | "add_pasted" | "item_options_set" => self.organize_call(&op, request),
+            | "item_folder_set" | "item_folder_move" | "item_folder_add" | "item_folder_remove"
+            | "detect" | "add_pasted" | "item_options_set" => self.organize_call(&op, request),
             "access_requests_list"
             | "access_requests_history"
             | "access_request_prepare"

@@ -1081,3 +1081,167 @@ fn links_are_made_only_for_https_origins() {
         assert_eq!(link::link_origin(bad), Err(LinkError::Origin), "{bad}");
     }
 }
+
+/// Prepare and confirm a link of `item` and send it: the receipt, its row not written.
+fn created(
+    computer: &Computer,
+    account: &mut ConnectAccount,
+    item: u64,
+) -> apassy::connect::link::LinkCreated {
+    let origin = account.client().origin().to_owned();
+    let account_id = account.state().account_id.clone();
+    let pending = computer
+        .vault(|vault| {
+            PendingLink::prepare(
+                vault,
+                &LinkTarget::Item(item),
+                &origin,
+                &account_id,
+                &LinkOptions::default(),
+                now(),
+            )
+        })
+        .expect("prepare");
+    let (proof, epoch) = computer.proof(pending.action());
+    account
+        .create_public_link(pending, proof, &epoch)
+        .map_err(|(error, _)| error)
+        .expect("created")
+}
+
+/// A row that cannot be written after Connect took the link (the vault locked, or
+/// another vault opened, between the answer and the write) revokes the link at Connect
+/// on the same step, so no live link is left that no device can copy. A revoke that
+/// fails leaves the link live, and Connect lists it for the account (Settings shows it
+/// among the links not in this vault).
+#[test]
+fn a_link_whose_row_is_not_written_is_revoked_at_once() {
+    let connect = FakeConnect::start();
+    let computer = Computer::new();
+    let mut account = create(&connect, &computer, "Ada");
+    let item = computer.vault(|vault| api_key(vault, "Deploy", "synthetic-deploy-token"));
+    let made = created(&computer, &mut account, item);
+    assert!(connect.link_bodies().contains_key(made.link_id()));
+    let refused = account
+        .keep_or_revoke(made, |_| Err(LinkError::Vault))
+        .expect_err("not saved");
+    assert_eq!(refused, LinkError::NotSaved { revoked: true });
+    assert!(connect.link_bodies().is_empty(), "revoked at Connect");
+    assert!(
+        computer
+            .vault(|vault| vault.public_links().unwrap())
+            .is_empty()
+    );
+    assert!(refused.to_string().contains("revoked"), "{refused}");
+    // The revoke fails: the link stays live at Connect, where the list shows it.
+    let made = created(&computer, &mut account, item);
+    let link_id = made.link_id().to_owned();
+    connect.answer_route_error("DELETE /v1/account/links", 500, "internal");
+    let refused = account
+        .keep_or_revoke(made, |_| Err(LinkError::Vault))
+        .expect_err("not saved");
+    assert_eq!(refused, LinkError::NotSaved { revoked: false });
+    connect.clear_route_errors();
+    let list = account.public_links().expect("list");
+    assert!(list.links.iter().any(|view| view.link_id == link_id));
+    assert!(account.revoke_unknown_link(&link_id).is_ok());
+    // A row that is written keeps the link, with its text.
+    let made = created(&computer, &mut account, item);
+    let kept = account
+        .keep_or_revoke(made, |made| computer.vault(|vault| made.apply(vault)))
+        .expect("kept");
+    let rows = computer.vault(|vault| vault.public_links().unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].link_id, kept.row.link_id);
+    let key = rows[0].key().expect("key");
+    assert_eq!(
+        kept.link().as_str(),
+        link::link_text(&rows[0].origin, key).as_str()
+    );
+    assert!(connect.link_bodies().contains_key(&kept.row.link_id));
+}
+
+/// A relay without the links routes (an older or a self-hosted image: a `404` without
+/// `x-apassy-links: 1`) is `NoLinks`, "This relay does not offer links.", for the list
+/// and for a creation, which keeps nothing to repeat.
+#[test]
+fn a_relay_without_the_links_routes_offers_no_links() {
+    let connect = FakeConnect::start();
+    let computer = Computer::new();
+    let mut account = create(&connect, &computer, "Ada");
+    let item = computer.vault(|vault| api_key(vault, "Deploy", "synthetic-deploy-token"));
+    connect.set_links_marker(false);
+    connect.answer_route_error("GET /v1/account/links", 404, "not_found");
+    connect.answer_route_error("POST /v1/account/links", 404, "not_found");
+    assert_eq!(account.public_links(), Err(LinkError::NoLinks));
+    assert_eq!(
+        LinkError::NoLinks.to_string(),
+        "This relay does not offer links."
+    );
+    assert!(!LinkError::NoLinks.can_retry());
+    let origin = account.client().origin().to_owned();
+    let account_id = account.state().account_id.clone();
+    let pending = computer
+        .vault(|vault| {
+            PendingLink::prepare(
+                vault,
+                &LinkTarget::Item(item),
+                &origin,
+                &account_id,
+                &LinkOptions::default(),
+                now(),
+            )
+        })
+        .expect("prepare");
+    let (proof, epoch) = computer.proof(pending.action());
+    let (error, kept) = account
+        .create_public_link(pending, proof, &epoch)
+        .expect_err("no routes");
+    assert_eq!(error, LinkError::NoLinks);
+    assert!(kept.is_none());
+    // The relay with the routes again: the list answers.
+    connect.clear_route_errors();
+    connect.set_links_marker(true);
+    assert!(account.public_links().is_ok());
+}
+
+/// "Public link revoked" goes to the credentials of the link's snapshot: not to one that
+/// joined the folder after the link was made, and also to one that left it.
+#[test]
+fn a_revoke_writes_the_history_of_the_snapshot() {
+    let connect = FakeConnect::start();
+    let computer = Computer::new();
+    let mut account = create(&connect, &computer, "Ada");
+    let (folder, inside, moved_out) = computer.vault(|vault| {
+        let folder = vault.create_folder(None, "Deploys").unwrap().uuid;
+        let inside = api_key(vault, "Inside", "synthetic-inside-token");
+        let moved_out = api_key(vault, "Moved out", "synthetic-out-token");
+        vault.set_item_folder(inside, Some(&folder)).unwrap();
+        vault.set_item_folder(moved_out, Some(&folder)).unwrap();
+        (folder, inside, moved_out)
+    });
+    let (_, row) = make_link(
+        &computer,
+        &mut account,
+        &LinkTarget::Folder(folder.clone()),
+        &LinkOptions::default(),
+    );
+    let later = computer.vault(|vault| {
+        let later = api_key(vault, "Later", "synthetic-later-token");
+        vault.set_item_folder(later, Some(&folder)).unwrap();
+        vault.set_item_folder(moved_out, None).unwrap();
+        later
+    });
+    let receipt = account.revoke_public_link(&row).expect("revoked");
+    assert!(computer.vault(|vault| receipt.apply(vault)).unwrap());
+    let revoked = |id: u64| {
+        computer
+            .vault(|vault| vault.item_events(id, 20).unwrap())
+            .iter()
+            .filter(|event| event.kind == ItemEventKind::LinkRevoked)
+            .count()
+    };
+    assert_eq!(revoked(inside), 1);
+    assert_eq!(revoked(moved_out), 1);
+    assert_eq!(revoked(later), 0, "never in the link");
+}

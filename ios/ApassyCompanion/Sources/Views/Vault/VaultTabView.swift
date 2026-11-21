@@ -61,12 +61,12 @@ struct VaultTabView: View {
                     }
                 case .newCredential(let folder):
                     NewCredentialView(folder: folder, onSaved: showSaved)
-                case .moveItem(let item):
+                case .moveItem(let item, let from):
                     FolderPicker(
                         title: "Move “\(item.title)”", selected: Set(vault.folderTree.places(of: item).map(\.folder)),
                         choices: vault.folderTree.choices()
                     ) { folder in
-                        await vault.moveItem(item.id, to: folder)
+                        await vault.moveItem(item.id, from: from, to: folder)
                     }
                 case .addItemToFolder(let item):
                     FolderAddPicker(item: item.id, choices: vault.folderTree.choices())

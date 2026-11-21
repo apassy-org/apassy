@@ -212,7 +212,7 @@ struct ItemDetailView: View {
     /// Folder…, and Remove from This Folder. Moving changes nothing else.
     private func folderRow(_ place: FolderPlace, of row: ItemRow) -> some View {
         Menu {
-            Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(row) }
+            Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(row, from: place.folder) }
             if !vault.folderTree.folders.isEmpty {
                 Button("Add to Folder…", systemImage: "folder.badge.plus") { ui.sheet = .addItemToFolder(row) }
             }

@@ -35,6 +35,10 @@ extension CoreVaultService {
         try await call("item_folder_set", ["id": id, "folder": Self.nullable(folder)])
     }
 
+    public func moveItem(id: UInt64, from: String, to: String?) async throws {
+        try await call("item_folder_move", ["id": id, "from": from, "to": Self.nullable(to)])
+    }
+
     public func addItemToFolder(id: UInt64, folder: String) async throws {
         try await call("item_folder_add", ["id": id, "folder": folder])
     }

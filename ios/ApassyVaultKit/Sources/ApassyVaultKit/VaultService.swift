@@ -248,6 +248,10 @@ public protocol VaultService: Sendable {
     func deleteFolder(uuid: String) async throws -> Int
     /// Put a credential in `folder` alone (nil: the top level). It leaves its other folders.
     func setItemFolder(id: UInt64, folder: String?) async throws
+    /// "Move to Folder…" in the list of the folder `from`: the folder through which the
+    /// credential is in that list (`from` or one below it) is replaced by `to` (nil: it only
+    /// leaves it). Its other folders stay. `conflict` when the list does not hold it any more.
+    func moveItem(id: UInt64, from: String, to: String?) async throws
     /// Also put a credential in `folder`, after its other folders. A folder that it is in already
     /// changes nothing.
     func addItemToFolder(id: UInt64, folder: String) async throws
@@ -375,6 +379,10 @@ public extension VaultService {
 
     func setItemFolder(id: UInt64, folder: String?) async throws {
         throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func moveItem(id: UInt64, from: String, to: String?) async throws {
+        throw VaultError(.notAllowed, "This vault keeps a credential in one folder. Update Apassy.")
     }
 
     func addItemToFolder(id: UInt64, folder: String) async throws {

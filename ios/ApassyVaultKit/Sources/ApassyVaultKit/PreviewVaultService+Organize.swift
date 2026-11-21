@@ -218,6 +218,25 @@ extension PreviewVaultService {
         placeItem(id, in: folder.map { [$0] } ?? [])
     }
 
+    public func moveItem(id: UInt64, from: String, to: String?) async throws {
+        let item = try stored(id)
+        try requireFolder(from)
+        if let to { try requireFolder(to) }
+        // The folder through which the credential is in the list of `from`: `from`, or one below it.
+        let below = subtree(from)
+        let through = item.row.folders.contains(from) ? from : item.row.folders.first(where: below.contains)
+        guard let through else {
+            throw VaultError(
+                .conflict, "The credential is not in this folder any more. Another device may have moved it.")
+        }
+        guard through != to else { return }
+        var folders = item.row.folders
+        let index = folders.firstIndex(of: through) ?? folders.endIndex
+        folders.remove(at: index)
+        if let to, !folders.contains(to) { folders.insert(to, at: index) }
+        placeItem(id, in: folders)
+    }
+
     public func addItemToFolder(id: UInt64, folder: String) async throws {
         let item = try stored(id)
         try requireFolder(folder)
