@@ -28,6 +28,7 @@ fn painted(mut add: impl FnMut(&mut Ui)) -> String {
 fn view() -> SheetView {
     SheetView {
         name: "Staging database".to_owned(),
+        secrets: None,
         ready: Ready::Yes,
         links: Vec::new(),
         form: None,
@@ -242,7 +243,21 @@ fn an_expired_link_leaves_the_lists_and_an_unknown_one_can_be_revoked() {
     let unknown = unknown_rows(&[old], Some(&list));
     assert_eq!(unknown.len(), 1);
     assert!(unknown[0].can_revoke && !unknown[0].can_copy);
-    assert_eq!(unknown[0].title, UNKNOWN_LINK);
+    // Connect knows no name: the row says who opens it, and when it was made, ends, and
+    // opened, so two such links differ.
+    assert_eq!(unknown[0].title, ANYONE);
+    for part in [
+        made_on(NOW - 60),
+        expires_on(NOW + 600),
+        opened(0),
+        SHOW_ONCE.to_owned(),
+    ] {
+        assert!(
+            unknown[0].detail.contains(&part),
+            "{part}: {}",
+            unknown[0].detail
+        );
+    }
 }
 
 fn settings(links: Vec<LinkRow>, unknown: Vec<LinkRow>) -> SettingsView {
@@ -302,22 +317,35 @@ fn links_not_in_this_vault_are_one_collapsed_group_and_revoke_asks_first() {
         let _ = draw_settings(ui, &mut view.clone());
     });
     assert!(text.contains(&not_in_vault(2)), "{text}");
-    assert!(!text.contains(UNKNOWN_LINK), "{text}");
+    assert!(!text.contains(&made_on(NOW - 60)), "{text}");
     // Open: the rows, each with Revoke and without Copy.
     view.open = true;
     let text = painted(|ui| {
         let _ = draw_settings(ui, &mut view.clone());
     });
-    assert!(text.contains(UNKNOWN_LINK), "{text}");
+    assert_eq!(text.matches(&made_on(NOW - 60)).count(), 2, "{text}");
     assert!(unknown.iter().all(|row| row.can_revoke && !row.can_copy));
-    // Its Revoke asks first: the warning and a second Revoke.
+    let revokes = text.matches(REVOKE).count();
+    // Its Revoke asks first, in its own row: the question, Cancel, and a second Revoke
+    // in place of the first; every row stays.
     view.confirm = Some("a".repeat(32));
     let text = painted(|ui| {
         let _ = draw_settings(ui, &mut view.clone());
     });
     assert!(text.contains(REVOKE_UNKNOWN), "{text}");
-    assert!(text.contains(REVOKE_UNKNOWN_NOTE), "{text}");
     assert!(text.contains(CANCEL), "{text}");
+    assert_eq!(text.matches(&made_on(NOW - 60)).count(), 2, "{text}");
+    // The question names "Revoke" once more; the row's own Revoke button is gone.
+    assert_eq!(text.matches(REVOKE).count(), revokes + 1, "{text}");
+    let question = text.find(REVOKE_UNKNOWN).expect("question");
+    let rows_at: Vec<usize> = text
+        .match_indices(&made_on(NOW - 60))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(
+        rows_at[0] < question && question < rows_at[1],
+        "the question is in the first row: {text}"
+    );
     // Nothing to show: no group.
     let text = painted(|ui| {
         let _ = draw_settings(ui, &mut SettingsView::default());
@@ -384,7 +412,9 @@ fn the_list_of_connect_is_checked_before_the_owner_check() {
     });
     assert_eq!(
         blocked(&links).as_deref(),
-        Some("This account has 25 live links, the most it can have. Revoke one first.")
+        Some(
+            "This account has 25 live links, the most it can have. Revoke one in Settings › Connect › Public Links."
+        )
     );
     assert!(no_email(&links));
     // No limit (a relay of your own): never blocked.
@@ -396,15 +426,38 @@ fn the_list_of_connect_is_checked_before_the_owner_check() {
         Some("This relay does not offer links.")
     );
 
-    // The sheet: the reason, and "Create Link…" off (no form opens on a click).
+    // The sheet: the reason once, also when the last step failed with it, and "Create
+    // Link…" off (no form opens on a click).
     let mut shown = view();
     shown.blocked = blocked(&links);
+    shown.error = blocked(&links);
     let text = painted(|ui| {
         let mut shown = shown.clone();
         let _ = draw_sheet(ui, &mut shown);
     });
-    assert!(text.contains("This relay does not offer links."), "{text}");
+    assert_eq!(
+        text.matches("This relay does not offer links.").count(),
+        1,
+        "{text}"
+    );
     assert!(!text.contains(NONE_YET), "{text}");
+    // Such a relay can neither copy nor revoke: the row of a link shows no button.
+    let mut rows = rows_of(
+        &[link("acc_k7m2q4x3ca", &[], false)],
+        None,
+        Some("acc_k7m2q4x3ca"),
+        &BTreeMap::new(),
+        false,
+        NOW,
+    );
+    no_buttons(&mut rows);
+    shown.links = rows;
+    let text = painted(|ui| {
+        let mut shown = shown.clone();
+        let _ = draw_sheet(ui, &mut shown);
+    });
+    assert!(text.contains(ANYONE), "{text}");
+    assert!(!text.contains(REVOKE) && !text.contains(COPY), "{text}");
     // The form on a relay without mail: the reason, and the choice stays "Anyone".
     let mut shown = view();
     shown.no_email = true;
@@ -419,6 +472,8 @@ fn the_list_of_connect_is_checked_before_the_owner_check() {
     });
     assert!(text.contains(NO_EMAIL), "{text}");
     assert!(!text.contains(EMAILS_NOTE), "{text}");
+    // Both choices show; "Anyone with the link" stays the chosen one.
+    assert!(text.contains(ANYONE) && text.contains(EMAILS), "{text}");
     assert_eq!(after.form.map(|form| form.emails), Some(false));
     // The texts of these errors say no "try later" where nothing will change.
     for error in [LinkError::MailUnavailable, LinkError::NoLinks] {
@@ -429,11 +484,15 @@ fn the_list_of_connect_is_checked_before_the_owner_check() {
 
 #[test]
 fn the_link_errors_are_clear() {
+    // The limit counts the whole account and says where to revoke.
     assert_eq!(
         error_text(&LinkError::LinkLimit, Some(25)),
-        "This account has 25 live links, the most it can have. Revoke one first."
+        "This account has 25 live links, the most it can have. Revoke one in Settings › Connect › Public Links."
     );
-    assert!(error_text(&LinkError::LinkLimit, None).contains("Revoke one first"));
+    assert!(
+        error_text(&LinkError::LinkLimit, None)
+            .contains("Revoke one in Settings › Connect › Public Links.")
+    );
     assert!(LinkError::MailUnavailable.to_string().contains(ANYONE));
     // The daily budget of new links is its own refusal, with no retry before the day ends
     // (connect-share-v1 section 7), not "wait N seconds".
@@ -472,8 +531,9 @@ fn the_texts_are_short_and_name_no_platform() {
         opened(0),
         opened(1),
         opened(3),
-        ready_note(&[], NOW),
-        ready_note(&["ada@example.com".to_owned()], NOW),
+        made_on(NOW),
+        lead(Some(1)),
+        lead(Some(5)),
     ];
     for text in TEXTS.iter().copied().chain(made.iter().map(String::as_str)) {
         assert!(text.chars().count() <= 90, "{text}");
@@ -497,6 +557,11 @@ fn the_texts_are_short_and_name_no_platform() {
         );
     }
     assert_eq!(opened(1), "Opened once");
+    // The sheet of a folder says how many secrets a link holds.
+    assert!(lead(Some(5)).contains("5 secrets"), "{}", lead(Some(5)));
+    assert!(lead(Some(1)).contains("1 secret "), "{}", lead(Some(1)));
+    assert_eq!(lead(None), LEAD);
+    assert_eq!(lead(Some(0)), LEAD);
     assert_eq!(audience(&[]), ANYONE);
     assert_eq!(
         audience(&["a@example.com".to_owned(), "b@example.com".to_owned()]),
@@ -608,10 +673,26 @@ fn made_view(made: bool) -> SheetView {
     let mut shown = view();
     shown.links = rows;
     if made {
-        shown.made = Some(ready_note(&[], NOW + 7 * 86_400));
+        shown.made = Some(shown.links[0].uuid.clone());
         shown.focus_copy = true;
     }
     shown
+}
+
+/// A link that was just made shows its row once and one copy button: "Copy Link" of the
+/// "Link ready" box, which is the one prominent button.
+#[test]
+fn a_new_link_shows_once_with_one_copy_button() {
+    let text = painted(|ui| {
+        let mut shown = made_view(true);
+        let _ = draw_sheet(ui, &mut shown);
+    });
+    assert!(text.contains(READY), "{text}");
+    assert_eq!(text.matches(COPY).count(), 1, "only Copy Link: {text}");
+    assert!(text.contains(COPY_LINK), "{text}");
+    assert_eq!(text.matches(ANYONE).count(), 1, "{text}");
+    assert_eq!(text.matches("Expires").count(), 1, "{text}");
+    assert!(text.contains(REVOKE), "{text}");
 }
 
 /// After "Create Link" the keyboard focus is on "Copy Link" of the "Link ready" box, also

@@ -309,10 +309,16 @@ pub fn setup(name: &str) -> Option<Scene> {
             let mut alex = this_account(connect, &data, "Alex", "Linux desktop");
             let account_id = alex.state().account_id.clone();
             // Two live links of the account that another vault of this computer holds:
-            // Settings lists them under "Links not in this vault (2)".
+            // Settings lists them under "Links not in this vault (2)". The second shows
+            // once and lasts a day, so the two rows differ.
             let other = Owner::new();
             let origin = alex.client().origin().to_owned();
-            for title in ["Old router", "Lab VPN"] {
+            let once = LinkOptions {
+                expires_in: 86_400,
+                one_time: true,
+                ..LinkOptions::default()
+            };
+            for (title, options) in [("Old router", LinkOptions::default()), ("Lab VPN", once)] {
                 let pending = {
                     let mut guard = other.shared.lock().expect("vault");
                     let vault = guard.as_mut().expect("vault");
@@ -322,7 +328,7 @@ pub fn setup(name: &str) -> Option<Scene> {
                         &LinkTarget::Item(id),
                         &origin,
                         &account_id,
-                        &LinkOptions::default(),
+                        &options,
                         now(),
                     )
                     .expect("link")
