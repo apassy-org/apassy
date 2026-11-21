@@ -153,6 +153,9 @@ pub mod codes {
     // Public links (docs/contracts/connect-share-v1.md).
     /// A new public link over the live links of the account's plan.
     pub const LINK_LIMIT: &str = "link_limit";
+    /// A new public link over the links that the account may make in one UTC day.
+    /// `Retry-After` says when the day ends.
+    pub const LINK_CREATE_LIMIT: &str = "link_create_limit";
     /// An open with a code that is not the live code of the link and the address.
     pub const CODE_INVALID: &str = "code_invalid";
     /// A link for e-mail addresses or a code request on a relay without a mail sender, or
@@ -210,7 +213,7 @@ pub fn status_of(code: &str) -> u16 {
         TEAM_VAULTS_RETIRED | FREE_CONNECT_ENDED | HOSTED_RETIRED => 410,
         PRECONDITION_FAILED => 412,
         PAYLOAD_TOO_LARGE => 413,
-        RATE_LIMITED | TUNNEL_LIMIT => 429,
+        RATE_LIMITED | TUNNEL_LIMIT | LINK_CREATE_LIMIT => 429,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
         BUSY | TUNNEL_OFFLINE | MAIL_UNAVAILABLE => 503,
@@ -325,6 +328,7 @@ mod tests {
         assert_eq!(RelayError::new(codes::RATE_LIMITED, "x").status(), 429);
         assert_eq!(RelayError::new(codes::NODE_UNKNOWN, "x").status(), 404);
         assert_eq!(RelayError::new(codes::TUNNEL_LIMIT, "x").status(), 429);
+        assert_eq!(RelayError::new(codes::LINK_CREATE_LIMIT, "x").status(), 429);
         assert_eq!(RelayError::new(codes::TUNNEL_OFFLINE, "x").status(), 503);
         for code in [
             codes::TEAM_VAULTS_RETIRED,

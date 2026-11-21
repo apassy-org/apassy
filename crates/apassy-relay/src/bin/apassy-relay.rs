@@ -34,6 +34,7 @@ const USAGE: &str = "Usage:
   apassy-relay snapshot-check
   apassy-relay backup
   apassy-relay purge-links
+  apassy-relay mail-test <address>
   apassy-relay connect-cutover [--dry-run | --confirm-delete-teams <plan>] [--backup <folder>]
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin node-code [--minutes <n>]
@@ -90,6 +91,10 @@ is the one of a running relay.
 `purge-links` runs with the relay stopped: every public link in links.db goes, with its
 codes, counts, and the mails of the outbox; the ids of all links ever made stay, so a
 revoked link never opens again (docs/OPERATIONS.md 30.5).
+`mail-test <address>` sends one test mail (no code, no link) to the address with the mail
+settings of the environment (APASSY_CONNECT_SMTP_*), beside a running relay or without
+one, and exits 1 with the failed step when the SMTP server does not take it
+(docs/OPERATIONS.md 30.2).
 `connect-cutover` runs with the relay stopped and the master key, once, at the end of the
 hosted relay (docs/operations/connect.md): it checks the newest stopped backup (or
 --backup <folder>), keeps relay.db and the vault stores of the accounts as plain files,
@@ -126,6 +131,9 @@ enum Command {
     SnapshotCheck,
     Backup,
     PurgeLinks,
+    MailTest {
+        address: String,
+    },
     ConnectCutover {
         confirm: Option<String>,
         backup: Option<PathBuf>,
@@ -371,6 +379,10 @@ fn parse(args: &[String]) -> Result<Command, String> {
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "backup" if args.len() == 1 => Ok(Command::Backup),
         "purge-links" if args.len() == 1 => Ok(Command::PurgeLinks),
+        "mail-test" if args.len() == 2 => Ok(Command::MailTest {
+            address: args[1].clone(),
+        }),
+        "mail-test" => Err("mail-test needs one address.".to_string()),
         "connect-cutover" => parse_cutover(&args[1..]),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -682,6 +694,18 @@ fn main() -> ExitCode {
             }
             Err(error) => fail(&error.message),
         },
+        Command::MailTest { address } => {
+            match apassy_relay::server::mail::mail_test(&config, &address) {
+                Ok(normal) => {
+                    println!("{}", serde_json::json!({"sent": true}));
+                    eprintln!(
+                        "apassy-relay: the SMTP server took the test mail to {normal}. Check that it arrived, and its SPF, DKIM, and DMARC results."
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => fail(&error.message),
+            }
+        }
         Command::ConnectCutover { confirm, backup } => {
             let options = apassy_relay::server::cutover::Options {
                 confirm,

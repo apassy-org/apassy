@@ -1310,6 +1310,7 @@ function everyLimiter(success: boolean) {
       TUNNEL_NODE_LIMITER: limiter("node"),
       LINK_LIMITER: limiter("link"),
       LINK_CODE_LIMITER: limiter("link-code"),
+      LINK_WRITE_LIMITER: limiter("link-write"),
     },
   };
 }
@@ -1905,22 +1906,61 @@ describe("public link rate limit", () => {
     assert.deepEqual(allowed.used, ["link:unknown"]);
   });
 
-  it("passes when the limiters are missing or fail, and leaves the account link routes alone", async () => {
+  it("passes when the limiters are missing or fail, and leaves the list and other methods alone", async () => {
     for (const env of [{}, { LINK_LIMITER: { limit: async () => { throw new Error("down"); } } }]) {
       const response = await call(OPEN, { method: "POST", body }, env);
       assert.equal(response.status, 201);
     }
     const refused = everyLimiter(false);
     for (const [method, path] of [
-      ["POST", "/v1/account/links"],
       ["GET", "/v1/account/links"],
-      ["DELETE", `/v1/account/links/${ID}`],
+      ["GET", `/v1/account/links/${ID}`],
+      ["POST", `/v1/account/links/${ID}`],
+      ["DELETE", "/v1/account/links"],
       ["GET", OPEN],
     ]) {
       const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
       assert.equal(response.status, 201, `${method} ${path}`);
     }
     assert.deepEqual(refused.used, []);
+  });
+
+  it("uses LINK_WRITE_LIMITER for the creates and revokes of links, keyed by the address or the /64", async () => {
+    for (const [method, path] of [
+      ["POST", "/v1/account/links"],
+      ["DELETE", `/v1/account/links/${ID}`],
+      // A made-up id is limited too.
+      ["DELETE", "/v1/account/links/not-an-id"],
+    ]) {
+      for (const [address, key] of [
+        ["198.51.100.7", "198.51.100.7"],
+        ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+      ]) {
+        const refused = everyLimiter(false);
+        const response = await call(path!, {
+          method,
+          ...(method === "POST" ? { body: "{}" } : {}),
+          headers: { "cf-connecting-ip": address!, authorization: "Bearer synthetic" },
+        }, { ...refused.env, RELAY: vpc() });
+        assert.equal(response.status, 429, `${method} ${path} ${address}`);
+        assert.equal(response.headers.get("retry-after"), "60");
+        assert.equal((await envelope(response)).error.code, "rate_limited");
+        assert.deepEqual(refused.used, [`link-write:${key}`], `${method} ${path} ${address}`);
+        assert.equal(seen.length, 0);
+        assert.equal(vpcTargets.length, 0);
+      }
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call("/v1/account/links", { method: "POST", body: "{}" }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.deepEqual(allowed.used, ["link-write:unknown"]);
+    // A missing or failing binding lets the write pass: the relay counts the creates too.
+    for (const env of [{}, { LINK_WRITE_LIMITER: { limit: async () => { throw new Error("down"); } } }]) {
+      for (const [method, path] of [["POST", "/v1/account/links"], ["DELETE", `/v1/account/links/${ID}`]]) {
+        const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, env);
+        assert.equal(response.status, 201, `${method} ${path}`);
+      }
+    }
   });
 
   it("caps the body of the public link routes at 4 KiB, before the limiter and the relay", async () => {

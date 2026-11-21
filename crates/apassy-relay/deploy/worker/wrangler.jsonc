@@ -39,7 +39,11 @@
     // requests (POST /v1/links/{id}/code), 5 a minute. The relay also counts the code
     // requests of each link and address hash, each link, each account, and the relay.
     { "name": "LINK_LIMITER", "namespace_id": "1009", "simple": { "limit": 30, "period": 60 } },
-    { "name": "LINK_CODE_LIMITER", "namespace_id": "1010", "simple": { "limit": 5, "period": 60 } }
+    { "name": "LINK_CODE_LIMITER", "namespace_id": "1010", "simple": { "limit": 5, "period": 60 } },
+    // The creates and revokes of public links (POST /v1/account/links, DELETE
+    // /v1/account/links/{id}), the same key, 20 a minute. The relay also limits the creates
+    // of each account in a UTC day (APASSY_CONNECT_LINK_CREATES).
+    { "name": "LINK_WRITE_LIMITER", "namespace_id": "1011", "simple": { "limit": 20, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
   // /s explicitly fetches /share.html (the viewer of public links, connect-share-v1 section 5);

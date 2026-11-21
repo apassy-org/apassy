@@ -1,6 +1,6 @@
 # Connect share contract v1
 
-Date: 2026-11-21, revised on 2026-11-21 before any code (review of PR #165: codes of 8 digits and a life budget of wrong tries, mail caps of each account, service workers and the agent proxy, a tombstone of each link id, `https:` origins, the uniform code answer, the size check and the retry of a creation, the address normal form with the Rust implementation as its reference). Status: frozen for implementation of release A of [ADR 0047](../adr/0047-shared-folders-links-and-people.md) (public links); not built. Release B (shares with a person) adds its sections later; section 12 reserves their names.
+Date: 2026-11-21, revised on 2026-11-21 before any code (review of PR #165: codes of 8 digits and a life budget of wrong tries, mail caps of each account, service workers and the agent proxy, a tombstone of each link id, `https:` origins, the uniform code answer, the size check and the retry of a creation, the address normal form with the Rust implementation as its reference). Revised on 2026-11-21 after the review of the relay (a daily cap of each recipient, the share of accounts without a plan, a budget of new links, the check of the mail session). Status: release A of [ADR 0047](../adr/0047-shared-folders-links-and-people.md) (public links); it ships in the release that carries vault schema 35 and the relay link routes (the relay and its edge Worker go out before the apps). Release B (shares with a person) adds its sections later; section 12 reserves their names.
 Fixtures: [`tests/fixtures/connect-share-v1/`](../../tests/fixtures/connect-share-v1/), made by `generate_vectors.mjs` with WebCrypto and checked with `ring` by `contracts::connect_share_v1_*` in `tests/contracts.rs`, and by the viewer test `crates/apassy-relay/deploy/worker/test/share.test.ts`.
 Decision: [ADR 0047](../adr/0047-shared-folders-links-and-people.md) sections 4 and 6; [ADR 0037](../adr/0037-own-relay-open-source.md) section 1, D2, D3; [plans](../product/plans.md) section 3.
 
@@ -91,6 +91,7 @@ The public routes refuse an `Authorization` header with `400 invalid_request`. E
 - `expires_at` is at least 540 and at most 2592060 seconds after Connect's clock (10 minutes to 30 days, with 60 seconds for the clocks). Else `400 invalid_request`.
 - `access` `anyone` has `address_hashes` `[]`. `access` `emails` has 1 to 20 distinct address hashes. Else `400 invalid_request`. A relay without a mail sender (section 10) refuses `emails` with `503 mail_unavailable`.
 - Over the live links of the account (section 7) the answer is `403 link_limit`, and nothing is kept. An opened one-time link does not count.
+- Over the new links of the account in the UTC day (section 7) the answer is `429 link_create_limit` with `Retry-After` until the day ends, and nothing is kept. Connect checks it before any write; every creation that is not a retry counts, also one that is refused. A client shows that the account made as many links as it may today, and tries no automatic retry before `Retry-After`.
 - **A link id is used once.** Connect keeps a tombstone of every link id that it ever stored (`link_id_used` in `links.db`: the id only, no account, no time, never deleted). A creation with a used id is `409 conflict`, also after the link expired or was revoked. The public routes answer `404 not_found` for it.
 - **Retry.** The device that sends a creation keeps the exact body (the same `K`, the same sealed form) until it gets an answer. The same `link_id` with the same body from the same account, while the link lives, answers the stored view again, so a lost answer can be sent again. Any other body with a used id is `409 conflict`. A device that gets `409 conflict` for its own retry reads `GET /v1/account/links`: a link that is listed was made; one that is not was not, and the device makes a new `K` for another try.
 - The answer is the view of the link (section 4.2).
@@ -104,7 +105,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 ```
 
 - The links of the account that did not expire and were not revoked, the newest first. `addresses` is the count of address hashes. `opens` counts the answers with a sealed form (section 4.4). `last_opened_at` is `null` before the first.
-- `live` is the count of section 7, `limit` its limit (`null` for no limit), and `mail` whether this relay can send the code mail (section 10).
+- `live` is the count of section 7, `limit` its limit (`null` for no limit), and `mail` whether this relay can send the code mail now (section 10): `false` without a mail sender, and while the relay's check of its mail session fails.
 
 ### 4.3 `DELETE /v1/account/links/{link_id}`
 
@@ -147,8 +148,8 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 {"email":"ada.lovelace@example.com","address_key":"<b64u>"}
 ```
 
-- **The answer comes before any look at the addresses.** Connect checks, in this order and only these: the form of the body; that `email` has a normal form (section 6; else `400 invalid_request`) and `address_key` is 32 bytes; that the link is live and has the access `emails` (else `404 not_found`); that the relay has a mail sender and that neither the daily mail cap of the sharing account nor the one of the relay is reached (else `503 mail_unavailable`); and the code requests of the link (section 7; else `429 rate_limited`). None of these depends on the address. It then answers `{"expires_in":900}` and hands the normal form, the address key, and the link id in memory to the mail thread.
-- **The mail thread** makes the address hash and compares it with the hashes of the link. When it is one of them, and the pair of link and address has codes left for the UTC day and wrong tries left over the life of the link (section 7), it makes a code, ends the code before for that pair, writes the code row and the outbox row (section 10) in one transaction, and counts the mail for the account and the relay. Otherwise it writes nothing and sends nothing. The request has its answer before any of this, so both paths are the same on the wire and in time.
+- **The answer comes before any look at the addresses.** Connect checks, in this order and only these: the form of the body; that `email` has a normal form (section 6; else `400 invalid_request`) and `address_key` is 32 bytes; that the link is live and has the access `emails` (else `404 not_found`); that the relay has a mail sender whose session passes its check (section 10) and that neither the daily mail cap of the sharing account, nor the share of the accounts without a plan (for an account without one), nor the cap of the relay is reached (else `503 mail_unavailable`); and the code requests of the link (section 7; else `429 rate_limited`). None of these depends on the address. It then answers `{"expires_in":900}` and hands the normal form, the address key, and the link id in memory to the mail thread.
+- **The mail thread** makes the address hash and compares it with the hashes of the link. When it is one of them, the pair of link and address has codes left for the UTC day and wrong tries left over the life of the link, and the recipient has mails left for the UTC day across all links and accounts (section 7), it makes a code, ends the code before for that pair, writes the code row and the outbox row (section 10) in one transaction, and counts the mail for the account and the relay. Otherwise it writes nothing and sends nothing. The request has its answer before any of this, so both paths are the same on the wire and in time.
 - **Accepted.** Two signals can tell a holder of `K` whether the mail thread made a mail for an address they asked for: a relay near its daily cap answers the next request with `503 mail_unavailable` or not; and the transaction of the mail thread, which runs the same statements on both paths, writes rows only when it makes a code, so its lock of `links.db` and its commit take a little longer then, which a request at the same moment may see. A holder of `K` learns from either only whether an address they guessed is on the link, and that reader gets a mail. Without `K` neither signal says anything about an address.
 - Only the person who reads the mail learns that the address may open the link.
 - Above a mail cap, every code request of that link gets `503 mail_unavailable`, whatever the address, until the UTC day ends.
@@ -209,8 +210,12 @@ A text without a normal form is not an address: the app does not take it, and Co
 | Codes of a link and address | 5 each UTC day, counted by the mail thread; above it no mail, and the answer stays the same |
 | Code requests of a link | 20 an hour, every request counted, before any look at the address; then `429 rate_limited` |
 | Code mails of a sharing account, each UTC day | 50 for an account without a plan, on Connect Personal, or on Connect Family; 200 for a Connect Team member; a setting of the operator on a relay with open plans. Counted before the cap of the relay; above it `503 mail_unavailable` for every code request of the account's links |
+| Code mails of all accounts without a plan together, each UTC day | a share of the relay's cap (default 500 of 2000), so the accounts on a plan keep the rest; above it `503 mail_unavailable` for every code request of their links until the day ends |
 | Code mails of a relay, each UTC day | a cap of the operator (default 2000); above it `503 mail_unavailable` until the day ends |
-| Worker, for each IPv4 address or IPv6 /64 | `LINK_LIMITER`: 30 opens a minute; `LINK_CODE_LIMITER`: 5 code requests a minute; then `429 rate_limited` with `Retry-After: 60` |
+| Code mails to one address, each UTC day | 10, across all links and accounts, counted by the mail thread under the normal form without a `+tag` of the local part, and for `gmail.com` and `googlemail.com` without its dots (one inbox, one count; the mail goes to the address as typed); above it no mail, and the answer stays the same. So a sharer who requests the codes of an address on their own links can use up its mails for the day: another sharer's code mail to it waits for the next day |
+| New links of an account, each UTC day | 100; 400 for a Connect Team member; none on a relay with open plans. Then `429 link_create_limit` |
+| A mail lost to the relay's own settings | A mail that fails before its recipient is named (the connection, TLS, AUTH, `MAIL FROM`) counts for no cap of the account, the address, or the pair of link and address; a refused recipient counts. Only a `5xx` at AUTH or `MAIL FROM` (or a server without AUTH) stops the mail until the next check passes; a `4xx` there is a busy server, and the mail waits for its next try |
+| Worker, for each IPv4 address or IPv6 /64 | `LINK_LIMITER`: 30 opens a minute; `LINK_CODE_LIMITER`: 5 code requests a minute; `LINK_WRITE_LIMITER`: 20 creations and revokes a minute; then `429 rate_limited` with `Retry-After: 60` |
 
 The plan limits are Connect's settings with these defaults. The live links of an account count in the transaction that adds one. When a plan ends, the links stay until their expiry; a new link counts against the new limit.
 
@@ -221,10 +226,11 @@ The codes of relay-sync-v1 and connect-account-v1 section 4 keep their meaning: 
 | Status | Code | When |
 | --- | --- | --- |
 | 403 | `link_limit` | `POST /v1/account/links` over the live links of the account (section 7) |
+| 429 | `link_create_limit` | `POST /v1/account/links` over the new links of the account in the UTC day (section 7), with `Retry-After` |
 | 403 | `code_invalid` | `POST /v1/links/{link_id}/open` with a code that is not the live code of this link and address, also for an address that is not on the link and a code that ended |
-| 503 | `mail_unavailable` | A link of `emails` or a code request on a relay without a mail sender; a code request above the daily mail cap of the sharing account or of the relay, the same for every address |
+| 503 | `mail_unavailable` | A link of `emails` or a code request on a relay without a mail sender, or while its mail session fails its check; a code request above the daily mail cap of the sharing account, of the accounts without a plan, or of the relay, the same for every address |
 
-A `403 link_limit` names the limit and never a price or a purchase hint: the iPhone shows no plan change (connect-billing-v1 section 10).
+A `403 link_limit` and a `429 link_create_limit` name the limit and never a price or a purchase hint: the iPhone shows no plan change (connect-billing-v1 section 10).
 
 ## 9. Test vectors
 
@@ -253,6 +259,7 @@ Connect sends one kind of mail in this release: the code of section 4.5.
 
 - The mail thread of section 4.5 writes the mail to an outbox in `links.db`, and a sender hands it to the SMTP server of the operator (submission with TLS). A sent mail leaves the outbox at once; a mail that cannot be sent within one hour is deleted. The address is in the outbox only, never in a log.
 - A relay without a mail sender has no `emails` links (section 4.1).
+- **The check of the session.** A relay with a mail sender checks its session at start and then every few minutes (hosted: 5): the connection, TLS, EHLO, AUTH, and the sender, with no recipient and no mail. While that check fails, and after a mail fails at AUTH or at the sender until a check passes, the relay sends no code mail: `mail` is `false` (section 4.2), and a link of `emails` and a code request answer `503 mail_unavailable`.
 
 ## 11. What Connect stores
 
@@ -263,9 +270,11 @@ Connect sends one kind of mail in this release: the code of section 4.5.
 | `links.db`, codes | A hash of each code with the link id, the address hash, its expiry, and its tries | 15 minutes, or the fifth wrong try, or its use |
 | `links.db`, pairs | For each link and address hash that got a code: the wrong tries over the life of the link, and the codes of the UTC day | With the link |
 | `links.db`, used ids | Every link id that Connect ever stored, alone | Never deleted |
-| `links.db`, mail counts | The code mails of each account and of the relay for the UTC day | Until the day ends |
+| `links.db`, mail counts | The code mails of each account, of all accounts without a plan together, and of the relay for the UTC day | Until the day ends |
+| `links.db`, recipient counts | The code mails of each recipient for the UTC day, under an HMAC-SHA256 of the normal form of its address keyed by a random secret of the relay (kept in `links.db`, made at its first open); never the address. Whoever reads `links.db` can test a guessed address against the hashes of that day | One day: the rows of a past day are deleted |
+| `links.db`, new links | The count of new links of each account for the UTC day | Until the day ends |
 | `links.db`, outbox | The address and the text of a code mail | Until it is sent, at most 1 hour |
-| Memory | The other counts of section 7; the address key and the normal form of a code request, until the mail thread has handled it | Their window |
+| Memory | The other counts of section 7; the address key and the normal form of a code request, until the mail thread has handled it; for each mail in the outbox, what it counted (so a mail lost to the relay's own settings gives it back) | Their window; with the mail |
 
 `links.db` is not in the backups of the relay. Connect never stores `K`, the seal key, an address key, or a client address with a link id.
 

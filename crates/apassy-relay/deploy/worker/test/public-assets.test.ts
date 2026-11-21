@@ -13,7 +13,18 @@ const execute = promisify(execFile);
 const script = fileURLToPath(new URL('../scripts/check-public-assets.py', import.meta.url));
 const commit = 'a'.repeat(40);
 
-async function fixture(t: TestContext, mode: string) {
+// The viewer headers of connect-share-v1 section 5.
+const viewerHeaders: Record<string, string> = {
+  'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
+  'cache-control': 'no-store',
+  'referrer-policy': 'no-referrer',
+  'x-robots-tag': 'noindex, nofollow',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'cross-origin-opener-policy': 'same-origin',
+};
+
+async function fixture(t: TestContext, mode: string, extra: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'relay-public-assets-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const publicDir = join(dir, 'public');
@@ -56,6 +67,8 @@ async function fixture(t: TestContext, mode: string) {
   for (const [path, blob] of files) {
     writeFileSync(join(publicDir, path === '/guide' ? 'guide.html' : path.slice(1)), blob);
   }
+  const viewer = Buffer.from('<!doctype html><title>viewer</title>');
+  writeFileSync(join(publicDir, 'share.html'), viewer);
   const requests: { path: string; ua: string; method: string }[] = [];
   let firstRequests = 0;
   const server = createServer((req, res) => {
@@ -90,6 +103,22 @@ async function fixture(t: TestContext, mode: string) {
         return;
       }
     }
+    if (path === '/s') {
+      const headers = { ...viewerHeaders, 'content-type': 'text/html; charset=utf-8' };
+      if (mode === 'links-headers') delete (headers as Record<string, string>)['content-security-policy'];
+      res.writeHead(200, headers);
+      res.end(viewer);
+      return;
+    }
+    if (req.method === 'POST' && /^\/v1\/links\/[0-9a-f]{32}\/open$/.test(path)) {
+      const headers: Record<string, string> = { 'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' };
+      // An image without the link routes answers 404 without the marker.
+      if (mode !== 'links-unmarked') headers['x-apassy-links'] = '1';
+      req.resume();
+      res.writeHead(404, headers);
+      res.end(JSON.stringify({ ok: false, error: { code: 'not_found', message: 'This link does not open.' } }));
+      return;
+    }
     if (!files.has(path)) { res.writeHead(404); res.end(); return; }
     res.end(files.get(path));
   });
@@ -100,7 +129,7 @@ async function fixture(t: TestContext, mode: string) {
   const base = `http://127.0.0.1:${address.port}`;
   const evidence = join(dir, 'evidence');
   const args = [script, '--base-url', base, '--public-dir', publicDir, '--version', '0.5.8',
-    '--commit', commit, '--evidence-dir', evidence, '--attempts', '3', '--backoff', '0'];
+    '--commit', commit, '--evidence-dir', evidence, '--attempts', '3', '--backoff', '0', ...extra];
   return { base, evidence, requests, run: () => execute('python3', args) };
 }
 
@@ -154,3 +183,27 @@ for (const mode of ['challenge', 'wrong-bytes', 'redirect']) {
     assert.equal(last.accepted, false);
   });
 }
+
+test('with --links reads back the viewer and the marked 404 of an unknown link', async t => {
+  const f = await fixture(t, 'links', ['--links']);
+  const result = await f.run();
+  assert.match(result.stdout, /PASS public links: the viewer and the marked 404/);
+  assert.match(result.stdout, /PASS public delivery: 0.5.8/);
+  const opens = f.requests.filter(r => r.method === 'POST');
+  assert.equal(opens.length, 1);
+  assert.match(opens[0]!.path, /^\/v1\/links\/[0-9a-f]{32}\/open$/);
+  assert.ok(f.requests.some(r => r.path === '/s' && r.method === 'GET'));
+});
+
+for (const mode of ['links-unmarked', 'links-headers']) {
+  test(`with --links fails on ${mode}`, async t => {
+    const f = await fixture(t, mode, ['--links']);
+    await assert.rejects(f.run(), mode === 'links-unmarked' ? /x-apassy-links/ : /content-security-policy/);
+  });
+}
+
+test('without --links asks for no link route', async t => {
+  const f = await fixture(t, 'links');
+  await f.run();
+  assert.ok(!f.requests.some(r => r.path === '/s' || r.method === 'POST'));
+});

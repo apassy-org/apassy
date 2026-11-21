@@ -49,6 +49,33 @@ fn start_with_mail(
     })
 }
 
+/// Waits until the mail thread ended `count` checks of its session (at most 15 s).
+fn wait_for_probes(links: &apassy_relay::server::links::Links, count: u64) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while links.probes() < count && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(links.probes() >= count, "the session was not checked");
+}
+
+/// Waits until `check` holds (at most 15 s).
+fn wait_until(what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !check() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// One count of `links.db`, or 0 without its row.
+fn count_of(c: &Connect, sql: &str) -> i64 {
+    links_db(c)
+        .query_row(sql, [], |row| row.get::<_, Option<i64>>(0))
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
 /// A one-time link of the vector `one_time_emails` (Ada and Grace may open it).
 fn one_time_email_link(c: &Connect, dev: &Dev) -> (String, String) {
     let body = vector_body("one_time_emails", 3600);
@@ -650,18 +677,36 @@ fn the_client_sends_nothing_without_a_checked_tls_session() {
 fn a_permanent_refusal_drops_the_mail() {
     let smtp = fake_smtp::start_with(false, fake_smtp::Mode::Permanent, fake_smtp::HOST);
     let c = start_with_mail(&smtp, |_| {});
+    let links = c.relay.hub().links().unwrap().clone();
+    // The check of the session at start is a session of its own, with no recipient.
+    wait_for_probes(&links, 1);
+    let checked = smtp.sessions.load(std::sync::atomic::Ordering::SeqCst);
     let a = c.account("Ada");
     let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
     assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
-    let links = c.relay.hub().links().unwrap().clone();
     let deadline = Instant::now() + Duration::from_secs(15);
-    while smtp.sessions.load(std::sync::atomic::Ordering::SeqCst) == 0 && Instant::now() < deadline
+    while smtp.sessions.load(std::sync::atomic::Ordering::SeqCst) == checked
+        && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(outbox_after_send(&links), 0);
     std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(smtp.sessions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        smtp.sessions.load(std::sync::atomic::Ordering::SeqCst),
+        checked + 1
+    );
+    // A refused recipient is not the relay's own: the mail keeps its counts, and the
+    // mail stays on.
+    assert!(links.mail_on());
+    assert_eq!(
+        count_of(
+            &c,
+            "SELECT sum(mails) FROM mail_count WHERE account_id LIKE 'acc_%'"
+        ),
+        1
+    );
+    assert_eq!(count_of(&c, "SELECT sum(mails) FROM mail_recipient"), 1);
 }
 
 /// The daily mail counts are in links.db: a restart keeps the caps.
@@ -792,12 +837,15 @@ fn a_refused_mail_waits_and_goes_after_an_hour() {
     let smtp = fake_smtp::start(false);
     smtp.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
     let c = start_with_mail(&smtp, |_| {});
+    let links = c.relay.hub().links().unwrap().clone();
+    wait_for_probes(&links, 1);
+    let checked = smtp.sessions.load(std::sync::atomic::Ordering::SeqCst);
     let a = c.account("Ada");
     let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
     assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
-    let links = c.relay.hub().links().unwrap().clone();
     let deadline = Instant::now() + Duration::from_secs(15);
-    while smtp.sessions.load(std::sync::atomic::Ordering::SeqCst) == 0 && Instant::now() < deadline
+    while smtp.sessions.load(std::sync::atomic::Ordering::SeqCst) == checked
+        && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -924,9 +972,45 @@ fn the_mail_settings_are_checked_at_start() {
             ("APASSY_CONNECT_SMTP_PORT", "0"),
         ],
         vec![("APASSY_CONNECT_MAIL_PER_LINK", "0")],
+        vec![("APASSY_CONNECT_MAIL_PER_RECIPIENT", "0")],
+        vec![("APASSY_CONNECT_SMTP_PROBE_SECS", "29")],
+        vec![("APASSY_CONNECT_SMTP_PROBE_SECS", "86401")],
     ] {
         assert!(with(&refused).is_err(), "{refused:?}");
     }
+    // The defaults of the caps and of the check of the session, and their settings.
+    let links = with(&[]).unwrap().connect.links;
+    assert_eq!(
+        (
+            links.mail_per_recipient,
+            links.mail_no_plan,
+            links.mail_per_day,
+            links.probe_secs,
+            links.creates,
+            links.creates_team
+        ),
+        (10, 500, 2000, 300, 100, 400)
+    );
+    let set = with(&[
+        ("APASSY_CONNECT_MAIL_PER_RECIPIENT", "3"),
+        ("APASSY_CONNECT_MAIL_NO_PLAN", "7"),
+        ("APASSY_CONNECT_SMTP_PROBE_SECS", "0"),
+        ("APASSY_CONNECT_LINK_CREATES", "5"),
+        ("APASSY_CONNECT_LINK_CREATES_TEAM", "9"),
+    ])
+    .unwrap()
+    .connect
+    .links;
+    assert_eq!(
+        (
+            set.mail_per_recipient,
+            set.mail_no_plan,
+            set.probe_secs,
+            set.creates,
+            set.creates_team
+        ),
+        (3, 7, 0, 5, 9)
+    );
 }
 
 // ---- No log line holds an address or a code. ----
@@ -1025,6 +1109,9 @@ fn no_log_line_holds_an_address() {
             .env("APASSY_CONNECT_SMTP_HOST", "localhost")
             .env("APASSY_CONNECT_SMTP_PORT", smtp_port.to_string())
             .env("APASSY_CONNECT_SMTP_FROM", "connect@apassy.test")
+            // This server refuses every session, so a check of the session would turn the
+            // mail off before any mail is tried: the test needs the tries in the log.
+            .env("APASSY_CONNECT_SMTP_PROBE_SECS", "0")
             .args(args);
         command
     };
@@ -1140,4 +1227,437 @@ fn no_log_line_holds_an_address() {
     {
         assert!(!lower.contains(&secret), "the log holds {secret}: {log}");
     }
+}
+
+// ---- The caps of each recipient and of the accounts without a plan. ----
+
+/// One address gets at most `mail_per_recipient` code mails in a UTC day, across all links
+/// and accounts. The count is under a keyed hash of the address, never the address, and
+/// goes with its day.
+#[test]
+fn a_recipient_gets_its_daily_mails_across_links_and_accounts() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            mail_per_recipient: 3,
+            ..LinkSettings::default()
+        };
+    });
+    let a = c.account("Ada");
+    let b = c.account("Bea");
+    let (a_link, a_key) = email_link(&c, &a, &[ADA_NORMAL, "grace@example.com"]);
+    let (b_link, b_key) = email_link(&c, &b, &[ADA_NORMAL]);
+    for (link, key) in [(&a_link, &a_key), (&b_link, &b_key), (&a_link, &a_key)] {
+        assert_eq!(ask_code(&c, link, ADA, key).0, 200);
+    }
+    assert_eq!(smtp.wait_for(3).len(), 3);
+    // The fourth request for Ada gets the same answer, and no mail goes.
+    let (status, answer) = ask_code(&c, &b_link, ADA, &b_key);
+    assert_eq!(
+        (status, &answer["result"]),
+        (200, &json!({"expires_in": 900}))
+    );
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(smtp.mails().len(), 3);
+    // Another address of the same link has its own count.
+    assert_eq!(ask_code(&c, &a_link, "grace@example.com", &a_key).0, 200);
+    let mails = smtp.wait_for(4);
+    assert_eq!(mails.len(), 4);
+    assert_eq!(mails[3].to, "grace@example.com");
+    // The count holds a keyed hash of the address, not the address.
+    let conn = links_db(&c);
+    let rows: Vec<(String, i64)> = conn
+        .prepare("SELECT recipient, mails FROM mail_recipient ORDER BY mails")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.iter().map(|row| row.1).collect::<Vec<_>>(), vec![1, 3]);
+    for (recipient, _) in &rows {
+        assert_eq!(recipient.len(), 43, "b64u of 32 bytes");
+        assert!(!recipient.contains('@') && !recipient.contains("ada"));
+    }
+    let secret: Vec<u8> = conn
+        .query_row("SELECT secret FROM link_secret", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(secret.len(), 32);
+    // The rows of a past day go at the maintenance pass.
+    conn.execute_batch("UPDATE mail_recipient SET day = day - 1;")
+        .unwrap();
+    let hub = c.relay.hub();
+    c.relay
+        .hub()
+        .links()
+        .unwrap()
+        .prune(&hub.directory.store, now())
+        .unwrap();
+    assert_eq!(count_of(&c, "SELECT count(*) FROM mail_recipient"), 0);
+    // The secret stays: the same address has the same key the next day.
+    let again: Vec<u8> = conn
+        .query_row("SELECT secret FROM link_secret", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(again, secret);
+}
+
+/// The accounts without a plan share `mail_no_plan` of the relay's mails in a UTC day, so
+/// the accounts on a plan keep the rest; above it every code request of their links gets
+/// 503 `mail_unavailable` with `Retry-After`, whatever the address.
+#[test]
+fn accounts_without_a_plan_share_their_part_of_the_relays_mails() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            mail_no_plan: 2,
+            mail_per_day: 4,
+            ..LinkSettings::default()
+        };
+    });
+    let a = c.account("Ada");
+    let b = c.account("Bea");
+    let p = c.account("Pia");
+    c.subscribe(&p, "connect_personal_month", 1);
+    assert_eq!(c.plan(&p)["entitled"], true);
+    let (a_link, a_key) = email_link(&c, &a, &[ADA_NORMAL]);
+    let (b_link, b_key) = email_link(&c, &b, &["bea@example.com"]);
+    let (p_link, p_key) = email_link(&c, &p, &["pia@example.com"]);
+    assert_eq!(ask_code(&c, &a_link, ADA, &a_key).0, 200);
+    assert_eq!(ask_code(&c, &b_link, "bea@example.com", &b_key).0, 200);
+    assert_eq!(smtp.wait_for(2).len(), 2);
+    std::thread::sleep(Duration::from_millis(300));
+    // The share is used: both accounts without a plan are refused, for any address.
+    for (link, email, key) in [
+        (&a_link, ADA, &a_key),
+        (&b_link, "nobody@example.com", &b_key),
+    ] {
+        let (status, headers, text) = call_with_headers(
+            &c.relay.url,
+            EDGE_SECRET,
+            "POST",
+            &format!("/v1/links/{link}/code"),
+            &[],
+            Some(&json!({"email": email, "address_key": key})),
+        );
+        assert_eq!(status, 503, "{text}");
+        assert!(text.contains("mail_unavailable"), "{text}");
+        let retry: u64 = header(&headers, "retry-after").unwrap().parse().unwrap();
+        assert!((1..=86_400).contains(&retry));
+    }
+    // An account on a plan keeps the rest of the relay's mails.
+    for _ in 0..2 {
+        assert_eq!(ask_code(&c, &p_link, "pia@example.com", &p_key).0, 200);
+    }
+    assert_eq!(smtp.wait_for(4).len(), 4);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ask_code(&c, &p_link, "pia@example.com", &p_key).0, 503);
+}
+
+// ---- A mail lost to the relay's own settings counts nothing. ----
+
+/// A mail that fails before its recipient is named (a refused AUTH or `MAIL FROM`, TLS, or
+/// the connection: the relay's own settings) gives back its counts of the account, the
+/// recipient, and the link and address; a refused recipient keeps them (above).
+#[test]
+fn a_mail_lost_to_the_relays_settings_counts_nothing() {
+    let smtp = fake_smtp::start(false);
+    smtp.refuse_auth
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            mail_per_account: 1,
+            mail_per_recipient: 1,
+            // No check of the session: the mail stays on, so each try reaches AUTH.
+            probe_secs: 0,
+            ..LinkSettings::default()
+        };
+    });
+    let links = c.relay.hub().links().unwrap().clone();
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    for tried in 1..=3 {
+        // Each request is accepted: the mail before it took nothing from the caps (1).
+        assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+        // A 535 at AUTH is permanent: the mail is made, tried, and dropped, and its counts
+        // came back in the same transaction.
+        wait_until("the mail thread made, tried, and dropped the mail", || {
+            count_of(&c, "SELECT mails FROM mail_count WHERE account_id = ''") == tried
+                && links.outbox_len().unwrap() == 0
+        });
+        assert_eq!(
+            count_of(
+                &c,
+                "SELECT sum(mails) FROM mail_count WHERE account_id LIKE 'acc_%'"
+            ),
+            0
+        );
+        assert_eq!(count_of(&c, "SELECT sum(mails) FROM mail_recipient"), 0);
+        assert_eq!(count_of(&c, "SELECT sum(codes) FROM link_address"), 0);
+        assert!(links.mail_on(), "without checks the mail stays on");
+    }
+    // The relay's own count keeps every mail it tried.
+    assert_eq!(
+        count_of(&c, "SELECT mails FROM mail_count WHERE account_id = ''"),
+        3
+    );
+    assert!(smtp.mails().is_empty());
+    // With the account taken again, the same caps (1) hold for a mail that goes.
+    smtp.refuse_auth
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    assert_eq!(smtp.wait_for(1).len(), 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 503);
+}
+
+/// A mail that cannot reach a server with a checked certificate waits, and when it is
+/// deleted after an hour it gives its counts back.
+#[test]
+fn a_mail_that_never_reached_the_server_gives_its_counts_back_at_its_end() {
+    let smtp = fake_smtp::start(false);
+    let mut settings = smtp.settings();
+    // A root that the relay does not trust: every session fails at TLS.
+    settings.extra_roots_der = Vec::new();
+    let c = connect::start_with_config(move |cfg| {
+        cfg.connect.mail = Some(settings);
+        cfg.connect.links = LinkSettings {
+            probe_secs: 0,
+            ..LinkSettings::default()
+        };
+    });
+    let links = c.relay.hub().links().unwrap().clone();
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    wait_until("the mail thread tried the mail", || {
+        count_of(&c, "SELECT tries FROM mail_outbox") > 0
+    });
+    assert_eq!(links.outbox_len().unwrap(), 1);
+    assert_eq!(
+        count_of(
+            &c,
+            "SELECT sum(mails) FROM mail_count WHERE account_id LIKE 'acc_%'"
+        ),
+        1
+    );
+    // An hour later the mail goes, with its counts.
+    links_db(&c)
+        .execute(
+            "UPDATE mail_outbox SET created_at = ?1, next_at = ?2",
+            [
+                i64::try_from(now() - 3601).unwrap(),
+                i64::try_from(now() + 3600).unwrap(),
+            ],
+        )
+        .unwrap();
+    let hub = c.relay.hub();
+    links.prune(&hub.directory.store, now()).unwrap();
+    assert_eq!(links.outbox_len().unwrap(), 0);
+    assert_eq!(
+        count_of(
+            &c,
+            "SELECT sum(mails) FROM mail_count WHERE account_id LIKE 'acc_%'"
+        ),
+        0
+    );
+    assert_eq!(count_of(&c, "SELECT sum(mails) FROM mail_recipient"), 0);
+    assert_eq!(count_of(&c, "SELECT sum(codes) FROM link_address"), 0);
+    assert!(smtp.mails().is_empty());
+}
+
+// ---- The check of the SMTP session. ----
+
+/// The relay checks its session at start and then every `probe_secs`: no recipient, no
+/// mail. While a check fails the mail is off: the list says `mail: false`, a link for
+/// e-mail addresses and a code request are 503 `mail_unavailable`; a passing check turns
+/// it on again.
+#[test]
+fn the_mail_is_off_while_the_check_of_the_session_fails() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            probe_secs: 1,
+            ..LinkSettings::default()
+        };
+    });
+    let links = c.relay.hub().links().unwrap().clone();
+    wait_for_probes(&links, 1);
+    assert!(links.mail_healthy());
+    // The check names no recipient and sends nothing.
+    assert!(smtp.probes() >= 1);
+    assert!(smtp.mails().is_empty());
+    assert!(
+        !smtp
+            .commands()
+            .iter()
+            .any(|line| line.contains("RCPT TO") || line.ends_with("DATA")),
+        "{:?}",
+        smtp.commands()
+    );
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    assert_eq!(smtp.wait_for(1).len(), 1);
+    // The account of the relay is refused: the next check fails.
+    smtp.refuse_auth
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_until("the check failed", || !links.mail_healthy());
+    assert_eq!(
+        c.ok("GET", "/v1/account/links", Some(&a.token), None)["mail"],
+        false
+    );
+    let (status, answer) = ask_code(&c, &link_id, ADA, &key);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (503, Some("mail_unavailable"))
+    );
+    let mut body = vector_body("anyone", 3600);
+    body["link_id"] = json!(links::new_link_id());
+    body["access"] = json!("emails");
+    body["address_hashes"] = json!(links::hashes_for("anyone", &[ADA_NORMAL]));
+    let (status, answer) = c.call("POST", "/v1/account/links", Some(&a.token), Some(&body));
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (503, Some("mail_unavailable"))
+    );
+    // A link for anyone still works.
+    c.ok(
+        "POST",
+        "/v1/account/links",
+        Some(&a.token),
+        Some(&links::anyone_body(false, 3600)),
+    );
+    // The account is taken again: the next check turns the mail on.
+    smtp.refuse_auth
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_until("the check passed", || links.mail_healthy());
+    assert_eq!(
+        c.ok("GET", "/v1/account/links", Some(&a.token), None)["mail"],
+        true
+    );
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    assert_eq!(smtp.wait_for(2).len(), 2);
+}
+
+/// A mail refused at `MAIL FROM` (a sender the account may not use) turns the mail off at
+/// once, until a check of the session passes; the mail gives its counts back.
+#[test]
+fn a_refused_sender_turns_the_mail_off() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            // One check, at start: none in the time of the test.
+            probe_secs: 3600,
+            ..LinkSettings::default()
+        };
+    });
+    let links = c.relay.hub().links().unwrap().clone();
+    wait_for_probes(&links, 1);
+    assert!(links.mail_on());
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    smtp.refuse_from
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    wait_until("the refused sender turned the mail off", || {
+        !links.mail_on()
+    });
+    assert_eq!(
+        c.ok("GET", "/v1/account/links", Some(&a.token), None)["mail"],
+        false
+    );
+    let (status, answer) = ask_code(&c, &link_id, ADA, &key);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (503, Some("mail_unavailable"))
+    );
+    // A 553 is permanent: the mail went from the outbox and gave its counts back.
+    assert_eq!(outbox_after_send(&links), 0);
+    assert_eq!(
+        count_of(
+            &c,
+            "SELECT sum(mails) FROM mail_count WHERE account_id LIKE 'acc_%'"
+        ),
+        0
+    );
+    assert_eq!(count_of(&c, "SELECT sum(codes) FROM link_address"), 0);
+    assert!(smtp.mails().is_empty());
+}
+
+// ---- `apassy-relay mail-test`. ----
+
+/// `mail_test` sends one test mail with the relay's settings: no code, no link; it needs a
+/// mail sender and an address.
+#[test]
+fn the_test_mail_goes_with_the_relays_settings() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            probe_secs: 0,
+            ..LinkSettings::default()
+        };
+    });
+    let config = c.relay.config.clone();
+    let sent = apassy_relay::server::mail::mail_test(&config, ADA).unwrap();
+    assert_eq!(sent, ADA_NORMAL);
+    let mails = smtp.wait_for(1);
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].to, ADA_NORMAL);
+    assert_eq!(mails[0].user.as_deref(), Some(fake_smtp::USER));
+    assert!(mails[0].tls);
+    assert!(
+        mails[0]
+            .data
+            .contains("\r\nSubject: Apassy relay test mail\r\n")
+    );
+    assert!(!mails[0].data.contains("Apassy item:"));
+    assert!(!mails[0].data.contains("http"));
+    // No address, no sender, or a refused account: a clear error with the step.
+    assert!(apassy_relay::server::mail::mail_test(&config, "not an address").is_err());
+    let mut without = config.clone();
+    without.connect.mail = None;
+    let error = apassy_relay::server::mail::mail_test(&without, ADA).unwrap_err();
+    assert!(
+        error.message.contains("APASSY_CONNECT_SMTP_HOST"),
+        "{}",
+        error.message
+    );
+    smtp.refuse_auth
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = apassy_relay::server::mail::mail_test(&config, ADA).unwrap_err();
+    assert!(
+        error.message.contains("step auth (535)"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains(ADA_NORMAL));
+    assert_eq!(smtp.mails().len(), 1);
+}
+
+/// The binary: `apassy-relay mail-test <address>` exits 1 and names the failed step, and
+/// never prints the address on a failure; without an address it is a usage error.
+#[test]
+fn the_mail_test_command_names_the_failed_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let smtp_port = refusing_server();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_apassy-relay"))
+            .env_clear()
+            .env("APASSY_RELAY_DATA", dir.path().join("data"))
+            .env("APASSY_RELAY_PUBLIC_URL", "https://connect.example.test")
+            .env("APASSY_RELAY_EDGE_SECRET", EDGE_SECRET)
+            .env("APASSY_RELAY_KEY", VAULT_KEY)
+            .env("APASSY_RELAY_CONNECT_ACCOUNTS", "1")
+            .env("APASSY_CONNECT_SMTP_HOST", "localhost")
+            .env("APASSY_CONNECT_SMTP_PORT", smtp_port.to_string())
+            .env("APASSY_CONNECT_SMTP_FROM", "connect@apassy.test")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let failed = run(&["mail-test", ADA_NORMAL]);
+    assert_eq!(failed.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&failed.stderr);
+    assert!(text.contains("step greeting (421)"), "{text}");
+    assert!(!text.contains("lovelace"), "{text}");
+    assert_eq!(run(&["mail-test"]).status.code(), Some(2));
 }

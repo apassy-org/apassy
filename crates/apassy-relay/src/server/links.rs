@@ -34,9 +34,12 @@ use crate::server::store::{Store, db, is_unique_violation, to_i, to_u};
 // ---- The contract's numbers (sections 2, 3, and 7). ----
 
 /// The schema version of `links.db`.
-pub const LINKS_VERSION: i64 = 2;
+pub const LINKS_VERSION: i64 = 3;
 /// The first version of `links.db`, before `link.code_failures` and `link.code_requests`.
 const LINKS_VERSION_1: i64 = 1;
+/// The version before the relay secret, the counts of each recipient, and the counts of
+/// new links (`SCHEMA_3`).
+const LINKS_VERSION_2: i64 = 2;
 /// The padding block of the plaintext, and its smallest and largest padded length.
 pub const PAD: usize = 1024;
 pub const MIN_PLAINTEXT: usize = PAD;
@@ -72,12 +75,20 @@ const MAX_WINDOWS: usize = 100_000;
 const PRUNE_SECS: u64 = 60;
 /// The `account_id` of the relay's own row in `mail_count`: no account id is empty.
 const RELAY_COUNT: &str = "";
+/// The `account_id` of the row in `mail_count` that all accounts without a plan share: no
+/// account id is `-`.
+const NO_PLAN_COUNT: &str = "-";
+/// The HMAC tag of the key of a recipient's daily count.
+const RECIPIENT_TAG: &str = "apassy-connect mail recipient v1";
 /// The HMAC tag of a code's hash.
 const CODE_TAG: &str = "apassy-connect public-link code v1";
 
 /// The subject and the text of the code mail (section 10). The code takes `{code}`.
 pub const MAIL_SUBJECT: &str = "Your Apassy code";
 const MAIL_TEXT: &str = "Your code to open a shared Apassy item: {code}\r\n\r\nIt works for 15 minutes. If you did not ask for it, ignore this mail.\r\n";
+/// The subject and the text of the test mail of `apassy-relay mail-test`: no code, no link.
+pub const TEST_SUBJECT: &str = "Apassy relay test mail";
+pub const TEST_TEXT: &str = "This is a test mail of an Apassy relay. Its operator sent it to check the mail settings.\r\n\r\nIt holds no code. If you did not expect it, ignore this mail.\r\n";
 
 const SCHEMA: &str = "
 CREATE TABLE link (
@@ -124,14 +135,41 @@ CREATE TABLE mail_outbox (
   next_at INTEGER NOT NULL,
   tries INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX mail_outbox_next ON mail_outbox(next_at);
-PRAGMA user_version = 2;
 ";
 
-/// Moves a `links.db` of version 1 to `LINKS_VERSION`, in one transaction: the two counts
-/// of the link row, when they are missing (a file of a build before them). A file of the
-/// current version is left as it is; any other version is refused by the caller.
+/// The tables of version 3, made by a new file and by the move from an older version: the
+/// random secret of the relay that keys the recipients' counts (one row, made at the first
+/// open), the code mails of each recipient on each UTC day under a keyed hash of its
+/// normal form, and the new links of each account on each UTC day.
+const SCHEMA_3: &str = "
+CREATE TABLE IF NOT EXISTS link_secret (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  secret BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS mail_recipient (
+  day INTEGER NOT NULL,
+  recipient TEXT NOT NULL,
+  mails INTEGER NOT NULL,
+  PRIMARY KEY (day, recipient)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS link_creates (
+  day INTEGER NOT NULL,
+  account_id TEXT NOT NULL,
+  creates INTEGER NOT NULL,
+  PRIMARY KEY (day, account_id)) WITHOUT ROWID;
+PRAGMA user_version = 3;
+";
+
+/// The whole schema of a new `links.db`.
+fn schema() -> String {
+    format!("{SCHEMA}{SCHEMA_3}")
+}
+
+/// Moves a `links.db` of version 1 or 2 to `LINKS_VERSION`, in one transaction: the two
+/// counts of the link row, when they are missing (a file of a build before them), and the
+/// tables of `SCHEMA_3`. A file of the current version is left as it is; any other version
+/// is refused by the caller.
 fn migrate(store: &Store) -> RelayResult<()> {
-    if store.user_version()? != LINKS_VERSION_1 {
+    let version = store.user_version()?;
+    if version != LINKS_VERSION_1 && version != LINKS_VERSION_2 {
         return Ok(());
     }
     store.tx(|tx| {
@@ -143,8 +181,27 @@ fn migrate(store: &Store) -> RelayResult<()> {
                 .map_err(db)?;
             }
         }
-        tx.execute_batch(&format!("PRAGMA user_version = {LINKS_VERSION};"))
-            .map_err(db)
+        tx.execute_batch(SCHEMA_3).map_err(db)
+    })
+}
+
+/// The random secret of the relay in `links.db`, made at its first open and never
+/// changed: the key of the recipients' daily counts.
+fn relay_secret(store: &Store) -> RelayResult<zeroize::Zeroizing<Vec<u8>>> {
+    let mut fresh = zeroize::Zeroizing::new(vec![0u8; 32]);
+    getrandom::fill(fresh.as_mut_slice())
+        .map_err(|_| RelayError::internal("The random source failed."))?;
+    store.tx(|tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO link_secret (id, secret) VALUES (1, ?1)",
+            params![fresh.as_slice()],
+        )
+        .map_err(db)?;
+        tx.query_row("SELECT secret FROM link_secret WHERE id = 1", [], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map(zeroize::Zeroizing::new)
+        .map_err(db)
     })
 }
 
@@ -153,6 +210,16 @@ fn migrate(store: &Store) -> RelayResult<()> {
 /// The one answer for a link that does not open (section 1).
 fn link_not_found() -> RelayError {
     RelayError::new(codes::NOT_FOUND, "This link does not open.")
+}
+
+/// 429 `link_create_limit`: the account made `budget` links this UTC day.
+fn create_limit(budget: u64) -> RelayError {
+    RelayError::new(
+        codes::LINK_CREATE_LIMIT,
+        format!(
+            "This account made {budget} links today, as many as it may make in one UTC day. Make the next one tomorrow."
+        ),
+    )
 }
 
 fn mail_unavailable() -> RelayError {
@@ -217,6 +284,25 @@ pub fn normal_address(text: &str) -> Option<String> {
     }
     let address = format!("{}@{domain}", local.to_ascii_lowercase());
     (address.len() <= 254).then_some(address)
+}
+
+/// The form of a normal address that the daily cap of one recipient counts under
+/// (connect-share-v1 section 11): one inbox, one count. A `+tag` of the local part goes,
+/// and for Gmail the dots of the local part go and `googlemail.com` is `gmail.com`. The
+/// mail itself goes to the address as the reader typed it.
+pub fn recipient_form(normal: &str) -> String {
+    let Some((local, domain)) = normal.rsplit_once('@') else {
+        return normal.to_owned();
+    };
+    let local = local.split('+').next().unwrap_or(local);
+    let (local, domain) = match domain {
+        "gmail.com" | "googlemail.com" => (local.replace('.', ""), "gmail.com"),
+        _ => (local.to_owned(), domain),
+    };
+    if local.is_empty() {
+        return normal.to_owned();
+    }
+    format!("{local}@{domain}")
 }
 
 /// The address hash of section 6: b64u of HMAC-SHA256 of the normal form under the
@@ -547,6 +633,17 @@ pub struct Links {
     /// A mail sender is set up (`APASSY_CONNECT_SMTP_HOST`) and its thread runs. Off from
     /// the moment the mail thread ends (`mail_stopped`).
     mail: std::sync::atomic::AtomicBool,
+    /// The last check of the SMTP session passed, and no mail failed at AUTH or `MAIL
+    /// FROM` since (`probed`, `sender_refused`). Always true without checks.
+    mail_healthy: std::sync::atomic::AtomicBool,
+    /// The checks of the SMTP session so far (tests).
+    probes: AtomicU64,
+    /// The key of the recipients' daily counts (`recipient_key`), from `link_secret`.
+    recipient_hmac: hmac::Key,
+    /// The counts that each mail in the outbox took, kept in memory only, so a mail lost
+    /// before its recipient was named gives them back (`refund`). A restart forgets them:
+    /// such a mail then keeps its counts.
+    refunds: Mutex<HashMap<i64, Refund>>,
     /// The submission client, built at start (a start without it is refused).
     mailer: Option<std::sync::Arc<crate::server::mail::Mailer>>,
     windows: Mutex<Windows>,
@@ -561,6 +658,18 @@ pub struct Links {
     pruned_at: AtomicU64,
 }
 
+/// The counts that one mail of the outbox took: the account's, the recipient's, and the
+/// codes of the link and address on the UTC day `day`; `relay_fault` when its last try
+/// failed before the recipient was named.
+struct Refund {
+    day: i64,
+    account: String,
+    link_id: String,
+    address_hash: String,
+    recipient: String,
+    relay_fault: bool,
+}
+
 /// A code request after its answer: the mail thread looks the address up on the link and,
 /// when it is there, makes the code, its row, and the mail.
 struct CodeJob {
@@ -568,6 +677,9 @@ struct CodeJob {
     /// The account of the link, and its daily mail cap.
     account: String,
     account_cap: u64,
+    /// The account has no plan: its mails count in the relay's share for accounts
+    /// without a plan too.
+    no_plan: bool,
     normal: zeroize::Zeroizing<String>,
     address_key: zeroize::Zeroizing<Vec<u8>>,
     at: u64,
@@ -583,8 +695,8 @@ impl Links {
         let exists = std::fs::symlink_metadata(&path).is_ok();
         let plain = config.connect.plain_files();
         let opened = match (exists, plain) {
-            (false, true) => Store::create_plain(&path, config, SCHEMA),
-            (false, false) => Store::create_at(&path, &config.master_key, SCHEMA),
+            (false, true) => Store::create_plain(&path, config, &schema()),
+            (false, false) => Store::create_at(&path, &config.master_key, &schema()),
             (true, true) => Store::open_plain(&path, config),
             (true, false) => Store::open_at(&path, &config.master_key),
         };
@@ -606,10 +718,15 @@ impl Links {
         if store.user_version().map_err(|_| refused())? != LINKS_VERSION {
             return Err(refused());
         }
+        let secret = relay_secret(&store)?;
         Ok(Self {
             store,
             settings: config.connect.links,
             mail: std::sync::atomic::AtomicBool::new(mailer.is_some()),
+            mail_healthy: std::sync::atomic::AtomicBool::new(true),
+            probes: AtomicU64::new(0),
+            recipient_hmac: hmac::Key::new(hmac::HMAC_SHA256, secret.as_slice()),
+            refunds: Mutex::new(HashMap::new()),
             mailer,
             windows: Mutex::new(Windows::default()),
             jobs: Mutex::new(VecDeque::new()),
@@ -620,9 +737,77 @@ impl Links {
         })
     }
 
-    /// True when this relay sends the code mail.
+    /// True when this relay sends the code mail: a sender, its thread, and a session that
+    /// passes its check (`probed`).
     pub fn mail_on(&self) -> bool {
+        self.mail.load(Ordering::SeqCst) && self.mail_healthy.load(Ordering::SeqCst)
+    }
+
+    /// True when a mail sender is set up and its thread has not ended (whatever the check
+    /// of the session says): the node listener starts the mail thread then.
+    pub(crate) fn mail_sender(&self) -> bool {
         self.mail.load(Ordering::SeqCst)
+    }
+
+    /// True while the last check of the SMTP session passed and no mail failed at AUTH or
+    /// `MAIL FROM` since.
+    pub fn mail_healthy(&self) -> bool {
+        self.mail_healthy.load(Ordering::SeqCst)
+    }
+
+    /// The checks of the SMTP session that ended so far (tests).
+    pub fn probes(&self) -> u64 {
+        self.probes.load(Ordering::SeqCst)
+    }
+
+    /// How often the mail thread checks its session, or `None`: never.
+    pub(crate) fn probe_secs(&self) -> Option<u64> {
+        (self.settings.probe_secs > 0).then_some(self.settings.probe_secs)
+    }
+
+    /// The end of a check of the SMTP session (`mail::Mailer::probe`). A change of the
+    /// state logs one line: the mail is off from a failed check until one passes.
+    pub(crate) fn probed(&self, failure: Option<&crate::server::mail::MailError>) {
+        match failure {
+            None => {
+                if !self.mail_healthy.swap(true, Ordering::SeqCst) {
+                    eprintln!(
+                        "apassy-relay: the check of the SMTP session passes again: the code mail is on"
+                    );
+                }
+            }
+            // A 4xx is a busy server (a rate limit): the state stays as it is.
+            Some(error) if error.reply.is_some_and(|code| (400..500).contains(&code)) => {}
+            Some(error) => {
+                if self.mail_healthy.swap(false, Ordering::SeqCst) {
+                    eprintln!(
+                        "apassy-relay: the check of the SMTP session failed at step {error}: no code mail is sent, and links for e-mail addresses and code requests answer 503 mail_unavailable, until a check passes (every {} s)",
+                        self.settings.probe_secs
+                    );
+                }
+            }
+        }
+        self.probes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A mail failed at AUTH or `MAIL FROM`: the server refuses the relay's account or
+    /// sender, so the mail is off until a check of the session passes. Without checks the
+    /// state does not change (nothing would turn it on again).
+    pub(crate) fn sender_refused(&self, error: &crate::server::mail::MailError) {
+        if self.probe_secs().is_some() && self.mail_healthy.swap(false, Ordering::SeqCst) {
+            eprintln!(
+                "apassy-relay: a code mail failed at step {error}: the SMTP server refuses the relay's account or sender; no code mail is sent, and links for e-mail addresses and code requests answer 503 mail_unavailable, until a check of the session passes (every {} s)",
+                self.settings.probe_secs
+            );
+        }
+    }
+
+    /// The key of a recipient's daily count: b64u of HMAC-SHA256 of the normal form under
+    /// the relay's secret (`link_secret`). Kept for one UTC day.
+    fn recipient_key(&self, normal: &str) -> String {
+        let folded = recipient_form(normal);
+        let message = [RECIPIENT_TAG, folded.as_str()].join("\0");
+        crate::hostkeys::encode_b64(hmac::sign(&self.recipient_hmac, message.as_bytes()).as_ref())
     }
 
     /// The submission client (the mail thread).
@@ -644,7 +829,7 @@ impl Links {
     /// The live-link limit of a sharing level (`None`: no limit).
     fn limit_of(&self, sharing: Sharing) -> Option<u64> {
         match sharing {
-            Sharing::Standard => Some(self.settings.links),
+            Sharing::NoPlan | Sharing::Standard => Some(self.settings.links),
             Sharing::Team => Some(self.settings.links_team),
             Sharing::Open => None,
         }
@@ -670,13 +855,40 @@ impl Links {
                 params![account],
             )
             .map_err(db)?;
+            tx.execute(
+                "DELETE FROM link_creates WHERE account_id = ?1",
+                params![account],
+            )
+            .map_err(db)?;
             tx.execute("DELETE FROM link WHERE account_id = ?1", params![account])
                 .map_err(db)
         })
     }
 
-    /// The code mails of `account` and of the relay (`RELAY_COUNT`) on the UTC day `day`.
-    fn mail_counts(conn: &Connection, account: &str, day: i64) -> RelayResult<(u64, u64)> {
+    /// The new links of `account` on the UTC day `day`.
+    fn creates_of(conn: &Connection, account: &str, day: i64) -> RelayResult<u64> {
+        conn.query_row(
+            "SELECT creates FROM link_creates WHERE day = ?1 AND account_id = ?2",
+            params![day, account],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|creates| creates.map_or(0, to_u))
+        .map_err(db)
+    }
+
+    /// The links that an account of `sharing` may make in one UTC day (`None`: no budget).
+    fn create_budget(&self, sharing: Sharing) -> Option<u64> {
+        match sharing {
+            Sharing::NoPlan | Sharing::Standard => Some(self.settings.creates),
+            Sharing::Team => Some(self.settings.creates_team),
+            Sharing::Open => None,
+        }
+    }
+
+    /// The code mails of `account`, of the relay (`RELAY_COUNT`), and of all accounts
+    /// without a plan (`NO_PLAN_COUNT`) on the UTC day `day`.
+    fn mail_counts(conn: &Connection, account: &str, day: i64) -> RelayResult<(u64, u64, u64)> {
         let count = |who: &str| -> RelayResult<u64> {
             conn.query_row(
                 "SELECT mails FROM mail_count WHERE day = ?1 AND account_id = ?2",
@@ -687,7 +899,7 @@ impl Links {
             .map(|mails| mails.map_or(0, to_u))
             .map_err(db)
         };
-        Ok((count(account)?, count(RELAY_COUNT)?))
+        Ok((count(account)?, count(RELAY_COUNT)?, count(NO_PLAN_COUNT)?))
     }
 
     /// The link ids of `account` (tests and the operator).
@@ -706,20 +918,25 @@ impl Links {
 
     // ---- The outbox (section 10). ----
 
-    /// The mails that are due now, the oldest first: `(id, recipient, text, tries)`.
+    /// The mails that are due now, the oldest first: `(id, recipient, text, tries)`. Only
+    /// mails with at least `ahead` seconds of their hour left, so a mail that the thread
+    /// sends never expires (and gives its counts back) while it is sent; an older one
+    /// waits for its expiry.
     pub(crate) fn due_mail(
         &self,
         now: u64,
         limit: u32,
+        ahead: u64,
     ) -> RelayResult<Vec<(i64, String, String, i64)>> {
+        let fresh = to_i(now.saturating_sub(MAIL_LIFETIME_SECS.saturating_sub(ahead)));
         self.store.with(|conn| {
             let mut statement = conn
                 .prepare(
-                    "SELECT id, recipient, text, tries FROM mail_outbox WHERE next_at <= ?1 ORDER BY next_at, id LIMIT ?2",
+                    "SELECT id, recipient, text, tries FROM mail_outbox WHERE next_at <= ?1 AND created_at > ?3 ORDER BY next_at, id LIMIT ?2",
                 )
                 .map_err(db)?;
             statement
-                .query_map(params![to_i(now), limit], |row| {
+                .query_map(params![to_i(now), limit, fresh], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })
                 .map_err(db)?
@@ -728,30 +945,119 @@ impl Links {
         })
     }
 
-    /// A mail that the SMTP server took leaves the outbox at once.
+    /// A mail that the SMTP server took leaves the outbox at once, with its counts.
     pub(crate) fn mail_sent(&self, id: i64) -> RelayResult<()> {
         self.store.tx(|tx| {
+            tx.execute("DELETE FROM mail_outbox WHERE id = ?1", params![id])
+                .map_err(db)?;
+            self.refunds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            Ok(())
+        })
+    }
+
+    /// A mail that the server refused for good (5xx) leaves the outbox at once. When it
+    /// failed before its recipient was named (`setup`: a refused AUTH or `MAIL FROM`, the
+    /// relay's own settings), it gives back what it counted for the account, the recipient,
+    /// and the link and address; a refused recipient keeps its counts.
+    pub(crate) fn mail_dropped(&self, id: i64, setup: bool) -> RelayResult<()> {
+        self.store.tx(|tx| {
+            let refund = self
+                .refunds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&id);
+            if setup && let Some(refund) = refund {
+                Self::refund(tx, &refund)?;
+            }
             tx.execute("DELETE FROM mail_outbox WHERE id = ?1", params![id])
                 .map_err(db)
                 .map(drop)
         })
     }
 
-    /// A mail that failed waits `retry` seconds; one older than an hour is deleted.
-    pub(crate) fn mail_failed(&self, id: i64, now: u64, retry: u64) -> RelayResult<()> {
+    /// A mail that failed waits `retry` seconds, and remembers whether the failure was
+    /// before its recipient (`setup`); one older than an hour is deleted (`expire_mail`).
+    pub(crate) fn mail_failed(
+        &self,
+        id: i64,
+        now: u64,
+        retry: u64,
+        setup: bool,
+    ) -> RelayResult<()> {
         self.store.tx(|tx| {
             tx.execute(
                 "UPDATE mail_outbox SET tries = tries + 1, next_at = ?2 WHERE id = ?1",
                 params![id, to_i(now.saturating_add(retry))],
             )
             .map_err(db)?;
-            tx.execute(
-                "DELETE FROM mail_outbox WHERE created_at <= ?1",
-                params![to_i(now.saturating_sub(MAIL_LIFETIME_SECS))],
-            )
-            .map_err(db)
-            .map(drop)
+            if let Some(refund) = self
+                .refunds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_mut(&id)
+            {
+                refund.relay_fault = setup;
+            }
+            self.expire_mail(tx, now)
         })
+    }
+
+    /// Deletes the mails older than an hour. One whose last try failed before its
+    /// recipient was named gives its counts back (`refund`).
+    fn expire_mail(&self, tx: &Connection, now: u64) -> RelayResult<()> {
+        let cutoff = to_i(now.saturating_sub(MAIL_LIFETIME_SECS));
+        let ids: Vec<i64> = {
+            let mut statement = tx
+                .prepare("SELECT id FROM mail_outbox WHERE created_at <= ?1")
+                .map_err(db)?;
+            statement
+                .query_map(params![cutoff], |row| row.get(0))
+                .map_err(db)?
+                .collect::<Result<_, _>>()
+                .map_err(db)?
+        };
+        {
+            let mut refunds = self.refunds.lock().unwrap_or_else(PoisonError::into_inner);
+            for id in ids {
+                if let Some(refund) = refunds.remove(&id)
+                    && refund.relay_fault
+                {
+                    Self::refund(tx, &refund)?;
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM mail_outbox WHERE created_at <= ?1",
+            params![cutoff],
+        )
+        .map_err(db)
+        .map(drop)
+    }
+
+    /// Gives back what one mail counted: the account's mails, the recipient's mails, and
+    /// the codes of the link and address, of its UTC day. The relay's own count, and the
+    /// share of the accounts without a plan, keep it.
+    fn refund(tx: &Connection, refund: &Refund) -> RelayResult<()> {
+        tx.execute(
+            "UPDATE mail_count SET mails = mails - 1 WHERE day = ?1 AND account_id = ?2 AND mails > 0",
+            params![refund.day, refund.account],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE mail_recipient SET mails = mails - 1 WHERE day = ?1 AND recipient = ?2 AND mails > 0",
+            params![refund.day, refund.recipient],
+        )
+        .map_err(db)?;
+        tx.execute(
+            "UPDATE link_address SET codes = codes - 1 WHERE link_id = ?1 AND address_hash = ?2 \
+             AND code_day = ?3 AND codes > 0",
+            params![refund.link_id, refund.address_hash, refund.day],
+        )
+        .map_err(db)
+        .map(drop)
     }
 
     /// The mails in the outbox (tests).
@@ -820,16 +1126,15 @@ impl Links {
                 params![to_i(now), CODE_TRIES],
             )
             .map_err(db)?;
-            tx.execute(
-                "DELETE FROM mail_outbox WHERE created_at <= ?1",
-                params![to_i(now.saturating_sub(MAIL_LIFETIME_SECS))],
-            )
-            .map_err(db)?;
-            tx.execute(
-                "DELETE FROM mail_count WHERE day < ?1",
-                params![to_i(now / 86_400)],
-            )
-            .map_err(db)?;
+            self.expire_mail(tx, now)?;
+            // The counts of past UTC days, with the keyed hashes of the recipients.
+            for table in ["mail_count", "mail_recipient", "link_creates"] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE day < ?1"),
+                    params![to_i(now / 86_400)],
+                )
+                .map_err(db)?;
+            }
             Ok(links)
         })?;
         let accounts: Vec<String> = self.store.with(|conn| {
@@ -894,6 +1199,8 @@ pub fn purge_stopped(config: &RelayConfig) -> RelayResult<Value> {
         tx.execute("DELETE FROM link_code", []).map_err(db)?;
         tx.execute("DELETE FROM link_address", []).map_err(db)?;
         tx.execute("DELETE FROM mail_count", []).map_err(db)?;
+        tx.execute("DELETE FROM mail_recipient", []).map_err(db)?;
+        tx.execute("DELETE FROM link_creates", []).map_err(db)?;
         let mails = tx.execute("DELETE FROM mail_outbox", []).map_err(db)?;
         let kept: i64 = tx
             .query_row("SELECT count(*) FROM link_id_used", [], |row| row.get(0))
@@ -1038,7 +1345,21 @@ fn create(
         .plans()
         .sharing(&hub.directory.store, &caller.account, now)?;
     let limit = links.limit_of(sharing);
-    let view = links.store.tx(|tx| {
+    // The links that the account may make today, read before the write lock of
+    // `links.db`: over it the answer is 429 at once. The transaction reads it again.
+    let budget = links.create_budget(sharing);
+    let day = to_i(now / 86_400);
+    if let Some(budget) = budget
+        && links
+            .store
+            .with(|conn| Links::creates_of(conn, &caller.account, day))?
+            >= budget
+    {
+        return Err(create_limit(budget));
+    }
+    // The outer result is the transaction's; the inner one is the answer, and a refusal
+    // there still commits the count of the try.
+    let view = links.store.tx(|tx| -> RelayResult<RelayResult<LinkView>> {
         let known: Option<(String, Vec<u8>)> = tx
             .query_row(
                 "SELECT account_id, create_hash FROM link WHERE link_id = ?1",
@@ -1047,21 +1368,37 @@ fn create(
             )
             .optional()
             .map_err(db)?;
-        if let Some((account, hash)) = known {
+        if let Some((account, hash)) = &known {
             // The same body again from the same account: the stored view (a lost answer).
-            if account == caller.account && hash == body_hash {
+            if *account == caller.account && *hash == body_hash {
                 return tx
                     .query_row(
                         &format!("SELECT {VIEW_COLUMNS} FROM link WHERE link_id = ?1"),
                         params![request.link_id],
                         view_of,
                     )
+                    .map(Ok)
                     .map_err(db);
             }
-            return Err(RelayError::new(
+        }
+        // Every try past the retry counts in the budget of the day, also one refused
+        // below, so a refused try still takes from it.
+        if let Some(budget) = budget {
+            if Links::creates_of(tx, &caller.account, day)? >= budget {
+                return Ok(Err(create_limit(budget)));
+            }
+            tx.execute(
+                "INSERT INTO link_creates (day, account_id, creates) VALUES (?1, ?2, 1) \
+                 ON CONFLICT (day, account_id) DO UPDATE SET creates = creates + 1",
+                params![day, caller.account],
+            )
+            .map_err(db)?;
+        }
+        if known.is_some() {
+            return Ok(Err(RelayError::new(
                 codes::CONFLICT,
                 "A link with this id exists. Make a new link.",
-            ));
+            )));
         }
         // An id is used once, ever: revoked, expired, and deleted ids stay in `link_id_used`.
         let used: bool = tx
@@ -1072,20 +1409,20 @@ fn create(
             )
             .map_err(db)?;
         if used {
-            return Err(RelayError::new(
+            return Ok(Err(RelayError::new(
                 codes::CONFLICT,
                 "A link with this id existed. Make a new link.",
-            ));
+            )));
         }
         if let Some(limit) = limit
             && Links::live(tx, &caller.account, now)? >= limit
         {
-            return Err(RelayError::new(
+            return Ok(Err(RelayError::new(
                 codes::LINK_LIMIT,
                 format!(
                     "This account has {limit} live links, its limit. Revoke one, or wait until one expires."
                 ),
-            ));
+            )));
         }
         tx.execute(
             "INSERT INTO link (link_id, account_id, created_at, expires_at, one_time, access, addresses, sealed, create_hash) \
@@ -1121,7 +1458,7 @@ fn create(
             )
             .map_err(db)?;
         }
-        Ok(LinkView {
+        Ok(Ok(LinkView {
             link_id: request.link_id.clone(),
             created_at: now,
             expires_at: request.expires_at,
@@ -1131,8 +1468,8 @@ fn create(
             state: "live",
             opens: 0,
             last_opened_at: None,
-        })
-    })?;
+        }))
+    })??;
     to_value(&view)
 }
 
@@ -1371,15 +1708,16 @@ impl From<RelayError> for CodeRefusal {
 }
 
 /// The seconds until the next UTC day.
-fn until_tomorrow(now: u64) -> u64 {
+pub(crate) fn until_tomorrow(now: u64) -> u64 {
     (now / 86_400 + 1) * 86_400 - now
 }
 
 /// `POST /v1/links/{link_id}/code` (section 4.5). The answer comes before any look at the
 /// addresses. In this order, and only these: the form of the body, the normal form of
 /// `email` and the address key (400); the link, live, for e-mail addresses, of an account
-/// that exists (404); a mail sender, and the daily mail caps of the account and of the
-/// relay (503 `mail_unavailable` until the day ends); the code requests of the link (429).
+/// that exists (404); a mail sender whose session passes its check, and the daily mail
+/// caps of the account, of the accounts without a plan (for one of them), and of the relay
+/// (503 `mail_unavailable` until the day ends); the code requests of the link (429).
 /// None of these depends on the address. The lookup of the address on the link, the code,
 /// its row, and the mail happen later in the mail thread (`process_jobs`), so an address on
 /// the link and one that is not look the same on the wire and in time.
@@ -1415,11 +1753,15 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
         .plans()
         .sharing(&hub.directory.store, &account, now)?;
     let account_cap = links.mail_cap(sharing);
+    let no_plan = sharing == Sharing::NoPlan;
     let day = to_i(now / 86_400);
-    let (account_mails, relay_mails) = links
+    let (account_mails, relay_mails, no_plan_mails) = links
         .store
         .with(|conn| Links::mail_counts(conn, &account, day))?;
-    if account_mails >= account_cap || relay_mails >= links.settings.mail_per_day {
+    if account_mails >= account_cap
+        || relay_mails >= links.settings.mail_per_day
+        || (no_plan && no_plan_mails >= links.settings.mail_no_plan)
+    {
         return Err(CodeRefusal {
             error: mail_unavailable(),
             retry_after: Some(until_tomorrow(now)),
@@ -1465,6 +1807,7 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
             link_id: link_id.to_string(),
             account,
             account_cap,
+            no_plan,
             normal,
             address_key,
             at: now,
@@ -1487,7 +1830,7 @@ impl Links {
     /// The daily mail cap of an account of `sharing`.
     fn mail_cap(&self, sharing: Sharing) -> u64 {
         match sharing {
-            Sharing::Standard => self.settings.mail_per_account,
+            Sharing::NoPlan | Sharing::Standard => self.settings.mail_per_account,
             Sharing::Team => self.settings.mail_per_account_team,
             Sharing::Open => self.settings.mail_per_account_open,
         }
@@ -1503,9 +1846,11 @@ impl Links {
 
     /// The mail thread's part of the code requests: for each, in one transaction, the
     /// address hash on the link, its wrong tries (under 10 over the life of the link) and
-    /// its codes today (under 5); then a new code, which ends the one before, its hash,
-    /// and the mail in the outbox. An address that is not on the link, or that is over a
-    /// count, gets nothing. The address key leaves memory with the job.
+    /// its codes today (under 5), the recipient's mails today (under
+    /// `mail_per_recipient`, across all links and accounts), and the daily caps; then a
+    /// new code, which ends the one before, its hash, and the mail in the outbox. An
+    /// address that is not on the link, or that is over a count, gets nothing. The address
+    /// key leaves memory with the job.
     pub(crate) fn process_jobs(&self) -> RelayResult<()> {
         if self.jobs_held.load(Ordering::SeqCst) {
             return Ok(());
@@ -1527,6 +1872,7 @@ impl Links {
         let now = job.at.max(crate::now_unix());
         let day = to_i(now / 86_400);
         let hash = address_hash(&job.address_key, &job.normal);
+        let recipient = self.recipient_key(&job.normal);
         let code = zeroize::Zeroizing::new(new_code()?);
         let stored = code_hash(&job.address_key, &job.link_id, &code);
         let text = zeroize::Zeroizing::new(MAIL_TEXT.replace("{code}", &code));
@@ -1535,7 +1881,7 @@ impl Links {
         // rows that the writes touch differ (none when no code is made), so the time of the
         // transaction, of its lock of `links.db` and of its commit, is close on both paths,
         // not equal: the accepted signal of contract section 4.5.
-        self.store.tx(|tx| {
+        let outbox_id = self.store.tx(|tx| {
             let live = live_link(tx, &job.link_id, now)?.is_some();
             let pair: Option<(i64, i64, i64)> = tx
                 .query_row(
@@ -1545,30 +1891,52 @@ impl Links {
                 )
                 .optional()
                 .map_err(db)?;
-            let (account_mails, relay_mails) = Links::mail_counts(tx, &job.account, day)?;
+            let (account_mails, relay_mails, no_plan_mails) =
+                Links::mail_counts(tx, &job.account, day)?;
+            let recipient_mails = tx
+                .query_row(
+                    "SELECT mails FROM mail_recipient WHERE day = ?1 AND recipient = ?2",
+                    params![day, recipient],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(db)?
+                .map_or(0, to_u);
             let pair_room = pair.is_some_and(|(wrong, code_day, codes)| {
                 let today = if code_day == day { codes } else { 0 };
                 wrong < PAIR_WRONG_TRIES && today < PAIR_CODES_PER_DAY
             });
             // The caps hold for the mails of the thread too.
-            let made = i64::from(
-                live && pair_room
-                    && account_mails < job.account_cap
-                    && relay_mails < self.settings.mail_per_day,
-            );
+            let made = live
+                && pair_room
+                && account_mails < job.account_cap
+                && relay_mails < self.settings.mail_per_day
+                && (!job.no_plan || no_plan_mails < self.settings.mail_no_plan)
+                && recipient_mails < self.settings.mail_per_recipient;
+            let (made, pooled) = (i64::from(made), i64::from(made && job.no_plan));
             tx.execute(
                 "UPDATE link SET code_requests = code_requests + 1 WHERE link_id = ?1",
                 params![job.link_id],
             )
             .map_err(db)?;
-            for who in [job.account.as_str(), RELAY_COUNT] {
+            for (who, counted) in [
+                (job.account.as_str(), made),
+                (RELAY_COUNT, made),
+                (NO_PLAN_COUNT, pooled),
+            ] {
                 tx.execute(
                     "INSERT INTO mail_count (day, account_id, mails) SELECT ?1, ?2, 1 WHERE ?3 = 1 \
                      ON CONFLICT (day, account_id) DO UPDATE SET mails = mails + 1",
-                    params![day, who, made],
+                    params![day, who, counted],
                 )
                 .map_err(db)?;
             }
+            tx.execute(
+                "INSERT INTO mail_recipient (day, recipient, mails) SELECT ?1, ?2, 1 WHERE ?3 = 1 \
+                 ON CONFLICT (day, recipient) DO UPDATE SET mails = mails + 1",
+                params![day, recipient, made],
+            )
+            .map_err(db)?;
             tx.execute(
                 "UPDATE link_address SET codes = CASE WHEN code_day = ?3 THEN codes + 1 ELSE 1 END, \
                  code_day = ?3 WHERE link_id = ?1 AND address_hash = ?2 AND ?4 = 1",
@@ -1590,14 +1958,46 @@ impl Links {
                 params![job.normal.as_str(), text.as_str(), to_i(now), made],
             )
             .map_err(db)?;
-            Ok(())
-        })
+            Ok((made == 1).then(|| tx.last_insert_rowid()))
+        })?;
+        if let Some(id) = outbox_id {
+            self.refunds
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(
+                    id,
+                    Refund {
+                        day,
+                        account: job.account.clone(),
+                        link_id: job.link_id.clone(),
+                        address_hash: hash,
+                        recipient,
+                        relay_fault: false,
+                    },
+                );
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_inbox_counts_once_for_the_daily_cap() {
+        for (normal, form) in [
+            ("ada@example.com", "ada@example.com"),
+            ("ada+links@example.com", "ada@example.com"),
+            ("ada+a+b@example.com", "ada@example.com"),
+            ("a.d.a@example.com", "a.d.a@example.com"),
+            ("a.d.a+x@gmail.com", "ada@gmail.com"),
+            ("ada@googlemail.com", "ada@gmail.com"),
+            ("+tag@example.com", "+tag@example.com"),
+        ] {
+            assert_eq!(recipient_form(normal), form, "{normal}");
+        }
+    }
 
     #[test]
     fn the_normal_form_follows_the_contract() {
@@ -1628,12 +2028,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("links.db");
         let key = crate::secret::SecretString::new("a synthetic master key for tests".into());
-        let version_1 = SCHEMA
-            .replace(
+        let version_1 = format!(
+            "{}PRAGMA user_version = 1;",
+            SCHEMA.replace(
                 "  code_failures INTEGER NOT NULL DEFAULT 0,\n  code_requests INTEGER NOT NULL DEFAULT 0,\n",
                 "",
             )
-            .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;");
+        );
         assert!(!version_1.contains("code_failures"));
         let store = Store::create_at(&path, &key, &version_1).unwrap();
         store
@@ -1660,6 +2061,38 @@ mod tests {
         // Again: nothing changes.
         migrate(&store).unwrap();
         assert_eq!(store.user_version().unwrap(), LINKS_VERSION);
+    }
+
+    #[test]
+    fn a_links_db_of_version_2_gets_the_tables_of_version_3_and_one_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("links.db");
+        let key = crate::secret::SecretString::new("a synthetic master key for tests".into());
+        let version_2 = format!("{SCHEMA}PRAGMA user_version = 2;");
+        let store = Store::create_at(&path, &key, &version_2).unwrap();
+        migrate(&store).unwrap();
+        assert_eq!(store.user_version().unwrap(), LINKS_VERSION);
+        let tables: i64 = store
+            .with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name IN ('link_secret', 'mail_recipient', 'link_creates')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(db)
+            })
+            .unwrap();
+        assert_eq!(tables, 3);
+        // The secret is made once and kept.
+        let first = relay_secret(&store).unwrap();
+        let second = relay_secret(&store).unwrap();
+        assert_eq!(first.len(), 32);
+        assert_eq!(*first, *second);
+        // A new file has the same schema at once.
+        let fresh = Store::create_at(&dir.path().join("new.db"), &key, &schema()).unwrap();
+        assert_eq!(fresh.user_version().unwrap(), LINKS_VERSION);
+        migrate(&fresh).unwrap();
+        assert_eq!(relay_secret(&fresh).unwrap().len(), 32);
     }
 
     #[test]

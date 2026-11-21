@@ -30,18 +30,23 @@
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
 //! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
-//! | `APASSY_RELAY_ACCOUNT_PLANS` | With the account routes on: `open` for a relay that you run yourself: every account is entitled without Stripe, and its public links have no plan limit (docs/SPEC.md section 38.9). Refused beside the Stripe files and in `connect` mode. Unset: the plans of billing, or none without Stripe | unset |
+//! | `APASSY_RELAY_ACCOUNT_PLANS` | With the account routes on: `open` for a relay that you run yourself: every account is entitled without Stripe, and its public links have no plan limit (docs/SPEC.md section 38.9); refused beside the Stripe files and in `connect` mode. `billing`: the plans of billing, or none without Stripe. Unset: `billing`, so a deploy that loses the Stripe settings gives no account a plan; a relay that you run yourself sets `open` | `billing` |
 //! | `APASSY_CONNECT_LINKS` | The live public links of an account without a plan, on Personal, or on Family (connect-share-v1 section 7), 1 to 10000 | `25` |
 //! | `APASSY_CONNECT_LINKS_TEAM` | The live public links of a Team member, 1 to 10000 | `100` |
+//! | `APASSY_CONNECT_LINK_CREATES` | New public links of one account in one UTC day (no plan, Personal, Family), 1 to 100000; over it `POST /v1/account/links` is 429 `link_create_limit` until the day ends. Open plans have no such budget | `100` |
+//! | `APASSY_CONNECT_LINK_CREATES_TEAM` | The same for a Team member, 1 to 100000 | `400` |
 //! | `APASSY_CONNECT_SMTP_HOST` | The SMTP submission server of the code mail of public links (connect-share-v1 section 10). Unset: no mail sender: a link for e-mail addresses is refused and the code route answers 503 `mail_unavailable` | none |
 //! | `APASSY_CONNECT_SMTP_PORT` | Its port: 465 is TLS from the first byte, any other port STARTTLS (required) | `587` |
 //! | `APASSY_CONNECT_SMTP_USER`, `APASSY_CONNECT_SMTP_PASSWORD_FILE` | The submission account (AUTH PLAIN or LOGIN, only over TLS). Both or neither | none |
 //! | `APASSY_CONNECT_SMTP_FROM` | The sender of the code mail, such as `connect@apassy.wyderka.cc`. Required with the host: there is no default sender | none |
+//! | `APASSY_CONNECT_SMTP_PROBE_SECS` | How often the relay checks its SMTP session (connect, TLS, EHLO, AUTH, `MAIL FROM`, `RSET`; no mail), also at start; while the check fails the mail is off. `0`, or 30 to 86400 seconds; `0`: no check and no health state | `300` |
 //! | `APASSY_CONNECT_MAIL_PER_LINK` | Code requests for one link in one hour, 1 to 1000 | `20` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT` | Code mails of the links of one account in one UTC day (no plan, Personal, Family), 0 to 100000; counted before the relay's cap; above it every code request of that account's links answers 503 `mail_unavailable` until the day ends | `50` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_TEAM` | The same for a Team member, 0 to 100000 | `200` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN` | The same with `APASSY_RELAY_ACCOUNT_PLANS=open`, 0 to 1000000 | `500` |
 //! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `2000` |
+//! | `APASSY_CONNECT_MAIL_NO_PLAN` | The code mails of one UTC day that all accounts without a plan share, inside the relay's, 0 to 1000000; above it every code request of their links answers 503 `mail_unavailable` until the day ends, and accounts on a plan keep the rest | `500` |
+//! | `APASSY_CONNECT_MAIL_PER_RECIPIENT` | Code mails to one address in one UTC day (its normal form without a `+tag`, and for Gmail without the dots of the local part), across all links and accounts, 1 to 1000; above it no code mail goes to it, and the answer stays the same | `10` |
 //! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
@@ -157,6 +162,19 @@ pub const DEFAULT_MAIL_PER_ACCOUNT: u64 = 50;
 pub const DEFAULT_MAIL_PER_ACCOUNT_TEAM: u64 = 200;
 /// The same with open plans (a relay that you run yourself).
 pub const DEFAULT_MAIL_PER_ACCOUNT_OPEN: u64 = 500;
+/// The code mails of one UTC day that all accounts without a plan share, inside the
+/// relay's (`APASSY_CONNECT_MAIL_NO_PLAN`).
+pub const DEFAULT_MAIL_NO_PLAN: u64 = 500;
+/// Code mails to one address in one UTC day, across all links and accounts
+/// (`APASSY_CONNECT_MAIL_PER_RECIPIENT`).
+pub const DEFAULT_MAIL_PER_RECIPIENT: u64 = 10;
+/// New public links of one account in one UTC day: no plan, Personal, Family
+/// (`APASSY_CONNECT_LINK_CREATES`).
+pub const DEFAULT_LINK_CREATES: u64 = 100;
+/// The same for a Team member (`APASSY_CONNECT_LINK_CREATES_TEAM`).
+pub const DEFAULT_LINK_CREATES_TEAM: u64 = 400;
+/// How often the relay checks its SMTP session (`APASSY_CONNECT_SMTP_PROBE_SECS`).
+pub const DEFAULT_SMTP_PROBE_SECS: u64 = 300;
 /// The submission port of `APASSY_CONNECT_SMTP_PORT` (STARTTLS).
 pub const DEFAULT_SMTP_PORT: u16 = 587;
 /// The port of submission over TLS from the first byte (RFC 8314).
@@ -472,11 +490,15 @@ pub struct ConnectConfig {
 /// section 38.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AccountPlans {
-    /// Billing when Stripe is set up, else no account has a plan.
+    /// Billing when Stripe is set up, else no account has a plan. The default of a
+    /// `ConnectConfig` built in code; from the environment only with Stripe, in `connect`
+    /// mode, or when `APASSY_RELAY_ACCOUNT_PLANS=billing` asks for it.
     #[default]
     Billing,
     /// A relay that you run yourself: every account is entitled without Stripe, and its
-    /// public links have no plan limit. Never beside Stripe, never in `connect` mode.
+    /// public links have no plan limit. Never beside Stripe, never in `connect` mode. From
+    /// the environment also when `APASSY_RELAY_ACCOUNT_PLANS` is unset on a relay with the
+    /// account routes, without Stripe, and not in `connect` mode.
     Open,
 }
 
@@ -496,6 +518,18 @@ pub struct LinkSettings {
     pub mail_per_account: u64,
     pub mail_per_account_team: u64,
     pub mail_per_account_open: u64,
+    /// Code mails of one UTC day that all accounts without a plan share, inside
+    /// `mail_per_day`.
+    pub mail_no_plan: u64,
+    /// Code mails to one address in one UTC day, across all links and accounts.
+    pub mail_per_recipient: u64,
+    /// New links of one account in one UTC day: no plan, Personal, or Family; Team. Open
+    /// plans have no such budget.
+    pub creates: u64,
+    pub creates_team: u64,
+    /// How often the mail thread checks its SMTP session, in seconds (`0`: never, and
+    /// the mail has no health state).
+    pub probe_secs: u64,
 }
 
 impl Default for LinkSettings {
@@ -508,6 +542,11 @@ impl Default for LinkSettings {
             mail_per_account: DEFAULT_MAIL_PER_ACCOUNT,
             mail_per_account_team: DEFAULT_MAIL_PER_ACCOUNT_TEAM,
             mail_per_account_open: DEFAULT_MAIL_PER_ACCOUNT_OPEN,
+            mail_no_plan: DEFAULT_MAIL_NO_PLAN,
+            mail_per_recipient: DEFAULT_MAIL_PER_RECIPIENT,
+            creates: DEFAULT_LINK_CREATES,
+            creates_team: DEFAULT_LINK_CREATES_TEAM,
+            probe_secs: DEFAULT_SMTP_PROBE_SECS,
         }
     }
 }
@@ -749,15 +788,20 @@ fn connect_from(
             url
         }
     };
+    let stripe_set = lookup("STRIPE_SECRET_KEY_FILE").is_some()
+        || lookup("STRIPE_WEBHOOK_SECRET_FILE").is_some();
     let plans = match lookup("APASSY_RELAY_ACCOUNT_PLANS")
         .as_deref()
         .map(str::trim)
     {
-        None => AccountPlans::Billing,
+        // Unset is billing's: a deploy that loses its Stripe settings gives no account a
+        // plan, never every account one. A relay that you run yourself sets `open` for no
+        // link limit (ADR 0047).
+        None | Some("billing") => AccountPlans::Billing,
         Some("open") => AccountPlans::Open,
         Some(_) => {
             return Err(RelayError::invalid(
-                "APASSY_RELAY_ACCOUNT_PLANS is open, or unset.",
+                "APASSY_RELAY_ACCOUNT_PLANS is open, billing, or unset.",
             ));
         }
     };
@@ -767,9 +811,7 @@ fn connect_from(
                 "APASSY_RELAY_ACCOUNT_PLANS=open is for a relay that you run yourself: APASSY_RELAY_MODE=connect takes the plans of billing.",
             ));
         }
-        if lookup("STRIPE_SECRET_KEY_FILE").is_some()
-            || lookup("STRIPE_WEBHOOK_SECRET_FILE").is_some()
-        {
+        if stripe_set {
             return Err(RelayError::invalid(
                 "APASSY_RELAY_ACCOUNT_PLANS=open gives every account a plan without Stripe: unset STRIPE_SECRET_KEY_FILE and STRIPE_WEBHOOK_SECRET_FILE, or unset APASSY_RELAY_ACCOUNT_PLANS.",
             ));
@@ -832,6 +874,48 @@ fn connect_from(
             0,
             1_000_000,
         )?,
+        mail_no_plan: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_NO_PLAN",
+            DEFAULT_MAIL_NO_PLAN,
+            0,
+            1_000_000,
+        )?,
+        mail_per_recipient: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_RECIPIENT",
+            DEFAULT_MAIL_PER_RECIPIENT,
+            1,
+            1000,
+        )?,
+        creates: number(
+            lookup,
+            "APASSY_CONNECT_LINK_CREATES",
+            DEFAULT_LINK_CREATES,
+            1,
+            100_000,
+        )?,
+        creates_team: number(
+            lookup,
+            "APASSY_CONNECT_LINK_CREATES_TEAM",
+            DEFAULT_LINK_CREATES_TEAM,
+            1,
+            100_000,
+        )?,
+        probe_secs: match number(
+            lookup,
+            "APASSY_CONNECT_SMTP_PROBE_SECS",
+            DEFAULT_SMTP_PROBE_SECS,
+            0,
+            86_400,
+        )? {
+            secs if secs == 0 || secs >= 30 => secs,
+            _ => {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_SMTP_PROBE_SECS is 0 (no check) or 30 to 86400 seconds.",
+                ));
+            }
+        },
     };
     let mail = mail_from(lookup)?;
     Ok(ConnectConfig {
