@@ -26,7 +26,7 @@ use super::to_sql_id;
 use super::types::{VaultErrorKind, VaultResult, err};
 
 /// The most addresses of a link (connect-share-v1 section 7).
-pub const MAX_LINK_ADDRESSES: usize = 20;
+pub const MAX_LINK_ADDRESSES: usize = super::schema35::MAX_LINK_ADDRESSES;
 /// The longest name of a link in bytes (the `title` of the snapshot).
 pub const MAX_LINK_NAME_BYTES: usize = 128;
 
