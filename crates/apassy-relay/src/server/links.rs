@@ -286,6 +286,25 @@ pub fn normal_address(text: &str) -> Option<String> {
     (address.len() <= 254).then_some(address)
 }
 
+/// The form of a normal address that the daily cap of one recipient counts under
+/// (connect-share-v1 section 11): one inbox, one count. A `+tag` of the local part goes,
+/// and for Gmail the dots of the local part go and `googlemail.com` is `gmail.com`. The
+/// mail itself goes to the address as the reader typed it.
+pub fn recipient_form(normal: &str) -> String {
+    let Some((local, domain)) = normal.rsplit_once('@') else {
+        return normal.to_owned();
+    };
+    let local = local.split('+').next().unwrap_or(local);
+    let (local, domain) = match domain {
+        "gmail.com" | "googlemail.com" => (local.replace('.', ""), "gmail.com"),
+        _ => (local.to_owned(), domain),
+    };
+    if local.is_empty() {
+        return normal.to_owned();
+    }
+    format!("{local}@{domain}")
+}
+
 /// The address hash of section 6: b64u of HMAC-SHA256 of the normal form under the
 /// address key of the link.
 pub fn address_hash(address_key: &[u8], normal: &str) -> String {
@@ -757,6 +776,8 @@ impl Links {
                     );
                 }
             }
+            // A 4xx is a busy server (a rate limit): the state stays as it is.
+            Some(error) if error.reply.is_some_and(|code| (400..500).contains(&code)) => {}
             Some(error) => {
                 if self.mail_healthy.swap(false, Ordering::SeqCst) {
                     eprintln!(
@@ -784,7 +805,8 @@ impl Links {
     /// The key of a recipient's daily count: b64u of HMAC-SHA256 of the normal form under
     /// the relay's secret (`link_secret`). Kept for one UTC day.
     fn recipient_key(&self, normal: &str) -> String {
-        let message = [RECIPIENT_TAG, normal].join("\0");
+        let folded = recipient_form(normal);
+        let message = [RECIPIENT_TAG, folded.as_str()].join("\0");
         crate::hostkeys::encode_b64(hmac::sign(&self.recipient_hmac, message.as_bytes()).as_ref())
     }
 
@@ -896,20 +918,25 @@ impl Links {
 
     // ---- The outbox (section 10). ----
 
-    /// The mails that are due now, the oldest first: `(id, recipient, text, tries)`.
+    /// The mails that are due now, the oldest first: `(id, recipient, text, tries)`. Only
+    /// mails with at least `ahead` seconds of their hour left, so a mail that the thread
+    /// sends never expires (and gives its counts back) while it is sent; an older one
+    /// waits for its expiry.
     pub(crate) fn due_mail(
         &self,
         now: u64,
         limit: u32,
+        ahead: u64,
     ) -> RelayResult<Vec<(i64, String, String, i64)>> {
+        let fresh = to_i(now.saturating_sub(MAIL_LIFETIME_SECS.saturating_sub(ahead)));
         self.store.with(|conn| {
             let mut statement = conn
                 .prepare(
-                    "SELECT id, recipient, text, tries FROM mail_outbox WHERE next_at <= ?1 ORDER BY next_at, id LIMIT ?2",
+                    "SELECT id, recipient, text, tries FROM mail_outbox WHERE next_at <= ?1 AND created_at > ?3 ORDER BY next_at, id LIMIT ?2",
                 )
                 .map_err(db)?;
             statement
-                .query_map(params![to_i(now), limit], |row| {
+                .query_map(params![to_i(now), limit, fresh], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })
                 .map_err(db)?
@@ -1956,6 +1983,21 @@ impl Links {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_inbox_counts_once_for_the_daily_cap() {
+        for (normal, form) in [
+            ("ada@example.com", "ada@example.com"),
+            ("ada+links@example.com", "ada@example.com"),
+            ("ada+a+b@example.com", "ada@example.com"),
+            ("a.d.a@example.com", "a.d.a@example.com"),
+            ("a.d.a+x@gmail.com", "ada@gmail.com"),
+            ("ada@googlemail.com", "ada@gmail.com"),
+            ("+tag@example.com", "+tag@example.com"),
+        ] {
+            assert_eq!(recipient_form(normal), form, "{normal}");
+        }
+    }
 
     #[test]
     fn the_normal_form_follows_the_contract() {

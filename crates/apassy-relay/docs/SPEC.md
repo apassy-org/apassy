@@ -2737,7 +2737,7 @@ The checks at the request depend on nothing but the link: a refusal says nothing
 
 ### 38.9 Open plans (R0)
 
-`APASSY_RELAY_ACCOUNT_PLANS=open` (`config::AccountPlans::Open`) is for a relay that you run yourself: `Hub::open` installs `account::OpenPlans`, so every account is entitled without Stripe (Personal, active, nothing that ends): it makes vault stores and pushes, gets the entitlement token, its links have no plan limit, and it has no budget of new links. The configuration refuses it beside either Stripe file, in `connect` mode, and without the account routes. **Unset**, a relay with the account routes, without either Stripe file, and not in `connect` mode takes `open` (a relay that you run yourself has no link limit); with a Stripe file (the hosted relay), in `connect` mode, or without the account routes it takes `billing`. `APASSY_RELAY_ACCOUNT_PLANS=billing` asks for the plans of billing explicitly: none without Stripe.
+`APASSY_RELAY_ACCOUNT_PLANS=open` (`config::AccountPlans::Open`) is for a relay that you run yourself: `Hub::open` installs `account::OpenPlans`, so every account is entitled without Stripe (Personal, active, nothing that ends): it makes vault stores and pushes, gets the entitlement token, its links have no plan limit, and it has no budget of new links. The configuration refuses it beside either Stripe file, in `connect` mode, and without the account routes. **Unset** is `billing`, as is `APASSY_RELAY_ACCOUNT_PLANS=billing`: the plans of billing, none without Stripe. So a deploy of the hosted relay that loses its Stripe settings gives no account a plan, never every account one. A relay that you run yourself sets `open` for no link limit (ADR 0047).
 
 ### 38.10 The edge Worker
 

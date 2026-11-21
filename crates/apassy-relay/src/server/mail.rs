@@ -73,10 +73,15 @@ impl MailError {
         }
     }
 
-    /// True for a failure at AUTH or `MAIL FROM`: the account or the sender of the relay
-    /// is refused, so no mail can go until the check of the session passes again.
+    /// True for a 5xx at AUTH or `MAIL FROM`, or a server that offers no AUTH: the server
+    /// refuses the account or the sender of the relay for good, so no mail can go until
+    /// the check of the session passes again. A 4xx (a rate limit of the server) or a
+    /// timeout there leaves the mail on.
     pub fn refused_sender(&self) -> bool {
-        self.setup && matches!(self.step, "auth" | "auth offered" | "mail from")
+        let permanent = self.reply.is_some_and(|code| (500..600).contains(&code));
+        self.setup
+            && (self.step == "auth offered"
+                || (matches!(self.step, "auth" | "mail from") && permanent))
     }
 }
 
@@ -549,7 +554,8 @@ pub fn mail_test(config: &crate::config::RelayConfig, address: &str) -> RelayRes
 /// The `relay-mail` thread: it checks its SMTP session at start and then every
 /// `probe_secs` (`Mailer::probe`, `Links::probed`); it turns the waiting code requests
 /// into mails (`Links::process_jobs`), also between two mails, so a slow server delays
-/// them by one session at most (`SESSION_SECS`); it hands each due mail to the server and
+/// them by a check and a session at most (`SESSION_SECS` each); it hands each due mail to
+/// the server (only one with time left in its hour for the round) and
 /// deletes it once the server took it; a 5xx reply drops the mail at once; any other
 /// failure waits longer each time; a mail that is not taken within an hour is deleted
 /// (`Links::mail_failed`, the maintenance pass). A mail lost before its recipient was
@@ -578,7 +584,9 @@ pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
         }
         jobs();
         let now = crate::now_unix();
-        let due = match links.due_mail(now, BATCH) {
+        // A round of `BATCH` sessions of `SESSION_SECS` each, and a minute to spare.
+        let ahead = u64::from(BATCH) * SESSION_SECS + 60;
+        let due = match links.due_mail(now, BATCH, ahead) {
             Ok(due) => due,
             Err(_) => {
                 eprintln!("apassy-relay: the mail outbox cannot be read");
@@ -649,6 +657,18 @@ mod tests {
             setup: true,
         };
         assert!(refused_sender.refused_sender());
+        // A 4xx there (a rate limit of the server) or a timeout leaves the mail on.
+        for busy in [
+            MailError {
+                step: "mail from",
+                reply: Some(450),
+                setup: true,
+            },
+            MailError::at("auth").in_setup(),
+        ] {
+            assert!(!busy.refused_sender(), "{busy}");
+        }
+        assert!(MailError::at("auth offered").in_setup().refused_sender());
         // A failed connection or TLS is the relay's own, but does not stop the mail: the
         // next check of the session does that.
         let tls = MailError::at("tls").in_setup();

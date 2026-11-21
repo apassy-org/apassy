@@ -30,7 +30,7 @@
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
 //! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
-//! | `APASSY_RELAY_ACCOUNT_PLANS` | With the account routes on: `open` for a relay that you run yourself: every account is entitled without Stripe, and its public links have no plan limit (docs/SPEC.md section 38.9); refused beside the Stripe files and in `connect` mode. `billing`: the plans of billing, or none without Stripe. Unset: `open` on a relay with the account routes, without the Stripe files, and not in `connect` mode; else `billing` | see the left |
+//! | `APASSY_RELAY_ACCOUNT_PLANS` | With the account routes on: `open` for a relay that you run yourself: every account is entitled without Stripe, and its public links have no plan limit (docs/SPEC.md section 38.9); refused beside the Stripe files and in `connect` mode. `billing`: the plans of billing, or none without Stripe. Unset: `billing`, so a deploy that loses the Stripe settings gives no account a plan; a relay that you run yourself sets `open` | `billing` |
 //! | `APASSY_CONNECT_LINKS` | The live public links of an account without a plan, on Personal, or on Family (connect-share-v1 section 7), 1 to 10000 | `25` |
 //! | `APASSY_CONNECT_LINKS_TEAM` | The live public links of a Team member, 1 to 10000 | `100` |
 //! | `APASSY_CONNECT_LINK_CREATES` | New public links of one account in one UTC day (no plan, Personal, Family), 1 to 100000; over it `POST /v1/account/links` is 429 `link_create_limit` until the day ends. Open plans have no such budget | `100` |
@@ -46,7 +46,7 @@
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN` | The same with `APASSY_RELAY_ACCOUNT_PLANS=open`, 0 to 1000000 | `500` |
 //! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `2000` |
 //! | `APASSY_CONNECT_MAIL_NO_PLAN` | The code mails of one UTC day that all accounts without a plan share, inside the relay's, 0 to 1000000; above it every code request of their links answers 503 `mail_unavailable` until the day ends, and accounts on a plan keep the rest | `500` |
-//! | `APASSY_CONNECT_MAIL_PER_RECIPIENT` | Code mails to one address (its normal form) in one UTC day, across all links and accounts, 1 to 1000; above it no code mail goes to it, and the answer stays the same | `10` |
+//! | `APASSY_CONNECT_MAIL_PER_RECIPIENT` | Code mails to one address in one UTC day (its normal form without a `+tag`, and for Gmail without the dots of the local part), across all links and accounts, 1 to 1000; above it no code mail goes to it, and the answer stays the same | `10` |
 //! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
@@ -794,10 +794,9 @@ fn connect_from(
         .as_deref()
         .map(str::trim)
     {
-        // A relay that you run yourself has no link limit (ADR 0047): with the account
-        // routes, without Stripe, and not in `connect` mode, every account is entitled.
-        // The hosted relay has Stripe, and `connect` mode takes the plans of billing.
-        None if accounts && !stripe_set && mode != RelayMode::Connect => AccountPlans::Open,
+        // Unset is billing's: a deploy that loses its Stripe settings gives no account a
+        // plan, never every account one. A relay that you run yourself sets `open` for no
+        // link limit (ADR 0047).
         None | Some("billing") => AccountPlans::Billing,
         Some("open") => AccountPlans::Open,
         Some(_) => {
