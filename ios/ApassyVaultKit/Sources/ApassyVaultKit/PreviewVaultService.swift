@@ -545,7 +545,7 @@ public actor PreviewVaultService: VaultService {
             archived: old?.row.archived ?? false, hasTotp: fields.contains { $0.role == .totp },
             conflictOf: old?.row.conflictOf, addedAt: old?.row.addedAt ?? now, changedAt: now, usedAt: nil,
             hasPasskey: old?.passkey != nil, hasPassword: Self.storesPassword(secrets), folder: old?.row.folder,
-            provider: old?.row.provider, production: old?.row.production ?? false)
+            folders: old?.row.folders, provider: old?.row.provider, production: old?.row.production ?? false)
         items[newID] = Stored(row: row, notes: draft.notes, fields: fields, secrets: secrets, passkey: old?.passkey)
         return SavedItem(id: newID, revision: row.revision)
     }

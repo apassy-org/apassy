@@ -222,8 +222,12 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
     public var addedAt: Int64?
     public var changedAt: Int64?
     public var usedAt: Int64?
-    /// The folder UUID of the item; nil at the top level, and from an older core (contract section 5.11).
+    /// The first folder UUID of the item (by the time it was added); nil at the top level, and from
+    /// an older core (contract section 5.11).
     public var folder: String?
+    /// Every folder UUID of the item, `folder` first; empty at the top level. From an older core
+    /// without `folders`: `folder` alone.
+    public var folders: [String]
     /// The label of the provider of its declaration, such as "Stripe", for the provider tile. nil
     /// without one, and from an older core.
     public var provider: String?
@@ -234,7 +238,7 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         id: UInt64, revision: UInt64, title: String, kind: ItemKind, subtitle: String, websites: [String],
         tags: [String], archived: Bool, hasTotp: Bool, conflictOf: UInt64?, addedAt: Int64?,
         changedAt: Int64?, usedAt: Int64?, hasPasskey: Bool = false, hasPassword: Bool? = nil,
-        folder: String? = nil, provider: String? = nil, production: Bool? = nil
+        folder: String? = nil, folders: [String]? = nil, provider: String? = nil, production: Bool? = nil
     ) {
         self.id = id
         self.revision = revision
@@ -252,12 +256,13 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         self.changedAt = changedAt
         self.usedAt = usedAt
         self.folder = folder
+        self.folders = folders ?? folder.map { [$0] } ?? []
         self.provider = provider
         self.production = production
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, revision, title, kind, subtitle, websites, tags, archived, folder, provider, production
+        case id, revision, title, kind, subtitle, websites, tags, archived, folder, folders, provider, production
         case hasTotp = "has_totp"
         case hasPasskey = "has_passkey"
         case hasPassword = "has_password"
@@ -285,6 +290,7 @@ public struct ItemRow: Codable, Sendable, Hashable, Identifiable {
         changedAt = try container.decodeIfPresent(Int64.self, forKey: .changedAt)
         usedAt = try container.decodeIfPresent(Int64.self, forKey: .usedAt)
         folder = try container.decodeIfPresent(String.self, forKey: .folder)
+        folders = try container.decodeIfPresent([String].self, forKey: .folders) ?? folder.map { [$0] } ?? []
         provider = try container.decodeIfPresent(String.self, forKey: .provider)
         production = try container.decodeIfPresent(Bool.self, forKey: .production)
     }

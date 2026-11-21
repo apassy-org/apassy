@@ -697,11 +697,28 @@ final class VaultModel {
         await change("Delete the folder") { try await service.deleteFolder(uuid: folder.uuid) }
     }
 
-    /// Put a credential in `folder` (nil: the top level). Sharing, rules, and history stay.
+    /// Put a credential in `folder` alone (nil: the top level): it leaves its other folders.
+    /// Sharing, rules, and history stay.
     @discardableResult
     func moveItem(_ id: UInt64, to folder: String?) async -> Bool {
-        guard item(id)?.folder != folder else { return true }
+        guard (item(id)?.folders ?? []) != (folder.map { [$0] } ?? []) else { return true }
         return await change("Move the item") { try await service.setItemFolder(id: id, folder: folder) } != nil
+    }
+
+    /// "Add to Folder…": the credential is also in `folder` and stays in its other folders.
+    @discardableResult
+    func addToFolder(_ id: UInt64, folder: String) async -> Bool {
+        guard item(id)?.folders.contains(folder) != true else { return true }
+        return await change("Add to the folder") { try await service.addItemToFolder(id: id, folder: folder) } != nil
+    }
+
+    /// "Remove from This Folder": the credential stays in its other folders (none: the top level).
+    @discardableResult
+    func removeFromFolder(_ id: UInt64, folder: String) async -> Bool {
+        if let row = item(id), !row.folders.contains(folder) { return true }
+        return await change("Remove from the folder") {
+            try await service.removeItemFromFolder(id: id, folder: folder)
+        } != nil
     }
 
     /// Save "Always ask me" or the environment. The owner check, when the change needs one, is

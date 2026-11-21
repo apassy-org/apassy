@@ -268,6 +268,16 @@ final class ItemDetailModel {
         return vault.folderTree.pathLabel(detail.folder)
     }
 
+    /// Every folder of the credential with its path, the first one first; "No folder" at the top
+    /// level. One folder reads the core's path, as `folderLabel`.
+    var folderPlaces: [FolderPlace] {
+        guard let detail else { return [FolderPlace(folder: nil, title: FolderTree.noFolder)] }
+        let places = vault.folderTree.places(of: detail.row)
+        guard places.count < 2 else { return places }
+        let known = places.first?.folder ?? (detail.folderPath?.isEmpty == false ? detail.folder : nil)
+        return [FolderPlace(folder: known, title: folderLabel)]
+    }
+
     /// Turn "Always ask me" on at once; turning it off asks the owner first.
     func setAlwaysAsk(_ on: Bool) async {
         guard let detail, let current = detail.alwaysAsk, current != on, !isSavingOptions else { return }

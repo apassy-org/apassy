@@ -232,6 +232,7 @@ actor SpyVaultService: VaultService {
     private nonisolated func older(_ row: ItemRow) -> ItemRow {
         var row = row
         row.folder = nil
+        row.folders = []
         row.provider = nil
         row.production = nil
         return row
@@ -489,6 +490,14 @@ actor SpyVaultService: VaultService {
     func setItemFolder(id: UInt64, folder: String?) async throws {
         try requireOrganize("hold folders")
         try await inner.setItemFolder(id: id, folder: folder)
+    }
+    func addItemToFolder(id: UInt64, folder: String) async throws {
+        try requireOrganize("hold folders")
+        try await inner.addItemToFolder(id: id, folder: folder)
+    }
+    func removeItemFromFolder(id: UInt64, folder: String) async throws {
+        try requireOrganize("hold folders")
+        try await inner.removeItemFromFolder(id: id, folder: folder)
     }
     func detect(text: String) async throws -> [DetectedCredential] {
         try requireOrganize("add a pasted credential")

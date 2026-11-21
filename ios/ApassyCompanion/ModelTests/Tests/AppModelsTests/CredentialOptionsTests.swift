@@ -183,6 +183,32 @@ struct CredentialOptionsTests {
         #expect(vault.item(102)?.folder == PreviewOrganize.FolderID.personal)
     }
 
+    @Test("a credential added to a second folder is in both; moving or removing leaves one")
+    func addAndRemoveFolder() async {
+        let vault = await unlockedVault()
+        let billing = PreviewOrganize.FolderID.billing
+        let personal = PreviewOrganize.FolderID.personal
+        #expect(await vault.moveItem(102, to: billing))
+        #expect(await vault.addToFolder(102, folder: personal))
+        #expect(vault.item(102)?.folders == [billing, personal])
+        #expect(vault.folderTree.items(in: billing, of: vault.items).contains { $0.id == 102 })
+        #expect(vault.folderTree.items(in: personal, of: vault.items).contains { $0.id == 102 })
+
+        let model = ItemDetailModel(id: 102, vault: vault)
+        await model.load()
+        #expect(model.folderPlaces.map(\.title) == ["Acme › Billing", "Personal"])
+
+        #expect(await vault.removeFromFolder(102, folder: billing))
+        #expect(vault.item(102)?.folders == [personal])
+        #expect(await vault.addToFolder(102, folder: billing))
+        #expect(await vault.moveItem(102, to: billing))
+        #expect(vault.item(102)?.folders == [billing])
+        #expect(await vault.removeFromFolder(102, folder: billing))
+        #expect(vault.item(102)?.folders == [])
+        await model.load()
+        #expect(model.folderPlaces == [FolderPlace(folder: nil, title: "No folder")])
+    }
+
     // MARK: ItemDetailModel
 
     private func detailModel(

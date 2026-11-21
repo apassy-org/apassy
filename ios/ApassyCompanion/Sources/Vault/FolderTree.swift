@@ -21,6 +21,16 @@ struct FolderChoice: Identifiable, Equatable, Sendable {
     var id: String { folder.uuid }
 }
 
+/// One place of a credential on its screen: a folder with its path, or "No folder".
+struct FolderPlace: Identifiable, Equatable, Sendable {
+    /// nil at the top level.
+    let folder: String?
+    /// "Acme › Billing", or `FolderTree.noFolder`.
+    let title: String
+
+    var id: String { folder ?? "" }
+}
+
 /// The folders of the vault as the screens use them (ADR 0026 §5), as the Mac's `FolderTree`:
 /// the subfolders of a folder, its path, the credentials in it, and the groups of "All
 /// credentials". No call to the core.
@@ -76,29 +86,51 @@ struct FolderTree: Equatable, Sendable {
         return found
     }
 
-    /// The folder of a credential, as the screens see it: nil at the top level, and for a folder
-    /// that is gone (another device deleted it; the core reads it as the top level too).
+    /// The folders of a credential that are here, the first one first: empty at the top level. A
+    /// folder that is gone (another device deleted it) is left out, as the core reads it.
+    func folders(of item: ItemRow) -> [String] {
+        item.folders.filter { folder($0) != nil }
+    }
+
+    /// The first folder of a credential, as the screens see it: nil at the top level.
     func folder(of item: ItemRow) -> String? {
-        guard let uuid = item.folder, folder(uuid) != nil else { return nil }
-        return uuid
+        folders(of: item).first
+    }
+
+    /// The places of a credential on its screen: each folder with its path, or "No folder".
+    func places(of item: ItemRow) -> [FolderPlace] {
+        let found = folders(of: item)
+        guard !found.isEmpty else { return [FolderPlace(folder: nil, title: Self.noFolder)] }
+        return found.map { FolderPlace(folder: $0, title: pathLabel($0)) }
     }
 
     /// The credentials that are not archived in the folder and its subfolders, as the Mac lists a
-    /// folder.
+    /// folder. A credential in several of them counts once.
     func count(_ uuid: String, in items: [ItemRow]) -> Int {
         let inside = subtree(uuid)
-        return items.count(where: { !$0.archived && folder(of: $0).map(inside.contains) == true })
+        return items.count(where: { !$0.archived && folders(of: $0).contains(where: inside.contains) })
     }
 
-    /// The credentials right in `uuid` (nil: without a folder) that are not archived, A–Z.
+    /// The credentials right in `uuid` (nil: without a folder) that are not archived, A–Z. A
+    /// credential is in the list of each of its folders.
     func items(in uuid: String?, of items: [ItemRow]) -> [ItemRow] {
-        VaultQuery.sorted(items.filter { !$0.archived && folder(of: $0) == uuid }, by: .title)
+        let inside: (ItemRow) -> Bool = { item in
+            uuid.map { self.folders(of: item).contains($0) } ?? self.folders(of: item).isEmpty
+        }
+        return VaultQuery.sorted(items.filter { !$0.archived && inside($0) }, by: .title)
     }
 
     /// The groups of "All credentials", as on the Mac: the credentials without a folder first,
-    /// then each folder by its path. Each group A–Z; an empty folder has no group.
+    /// then each folder by its path. Each group A–Z; an empty folder has no group. A credential in
+    /// several folders is in the group of each.
     func groups(_ items: [ItemRow]) -> [FolderGroup] {
-        let byFolder = Dictionary(grouping: items) { folder(of: $0) }
+        var byFolder: [String?: [ItemRow]] = [:]
+        for item in items {
+            let found = folders(of: item)
+            for place in found.isEmpty ? [nil] : found.map(Optional.some) {
+                byFolder[place, default: []].append(item)
+            }
+        }
         return byFolder.keys
             .map { (folder: $0, title: pathLabel($0)) }
             .sorted { a, b in
