@@ -682,8 +682,8 @@ pub(crate) struct LinksUi {
     retry: Option<Retry>,
     /// The target of the open sheet, so a new sheet starts clean.
     target: Option<LinkTarget>,
-    /// The relay answered the list without the links routes: no link here, and no new
-    /// list until a sheet opens.
+    /// The relay answered the list without the links routes: no link here. A sheet that
+    /// opens asks again at once, Settings after [`NO_LINKS_AGAIN`].
     no_links: bool,
     /// Settings › Connect: the group of the links not in this vault is open.
     unknown_open: bool,
@@ -1128,6 +1128,24 @@ fn revoke(app: &mut DesktopApp, ctx: &egui::Context, uuid: String, link_id: Stri
 }
 
 /// The steps of one frame: the worker's result, the owner proof, and the list.
+/// How long a relay without the links routes is not asked again, unless a sheet opens: a
+/// relay can get them with its next image.
+const NO_LINKS_AGAIN: Duration = Duration::from_secs(600);
+
+/// At quit: a step of the links that runs (a new link whose row the worker writes, or its
+/// revoke) gets up to 2 seconds to end before the vault locks, so a link that Connect made
+/// keeps its row. A step that is still running then is left: its link shows under "Links
+/// not in this vault".
+pub(crate) fn quit(app: &mut DesktopApp) {
+    let Some(task) = app.ui.connect.links.task.take() else {
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while matches!(task.poll(), TaskPoll::Waiting) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     if let Some(task) = &app.ui.connect.links.task {
         match task.poll() {
@@ -1149,10 +1167,12 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_millis(250));
         return;
     }
-    let due = !links.no_links
-        && links
-            .listed_at
-            .is_none_or(|at| at.elapsed() >= Duration::from_secs(30));
+    let every = if links.no_links {
+        NO_LINKS_AGAIN
+    } else {
+        Duration::from_secs(30)
+    };
+    let due = links.listed_at.is_none_or(|at| at.elapsed() >= every);
     if due && app.connect_session().is_open() && app.owner_ui.session.epoch().is_some() {
         app.ui.connect.links.listed_at = Some(Instant::now());
         spawn(app, ctx, |account| Outcome::Listed(account.public_links()));

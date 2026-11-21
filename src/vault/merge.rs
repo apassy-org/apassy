@@ -268,7 +268,10 @@ const LWW_TABLES: [LwwTable; 5] = [
             "deleted_at",
         ],
         since: FOLDER_SCHEMA_VERSION,
-        removal_wins: false,
+        // A deleted folder stays deleted (ios-core-v1 section 5.11): a later edit of its
+        // row on another device, for example a delete of its parent there that moves it,
+        // never brings it back.
+        removal_wins: true,
     },
     LwwTable {
         table: "shared_vault",
@@ -3755,6 +3758,67 @@ mod tests {
                 .map(|folder| folder.parent);
             assert_eq!(parent, Some(Some(archive.clone())));
         }
+    }
+
+    /// A deleted folder stays deleted: Mac A deletes "Bills" (in "Personal") while Mac B
+    /// deletes "Personal", which moves "Bills" to the top level there with a later row.
+    #[test]
+    fn a_folder_deleted_on_one_device_stays_deleted_when_the_other_moves_it() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Personal"]);
+        let personal = &folders[0];
+        let bills = a.create_folder(Some(personal), "Bills").unwrap().uuid;
+        a.add_item_to_folder(mail, &bills).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        tick();
+        a.delete_folder(&bills).unwrap();
+        tick();
+        b.delete_folder(personal).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty());
+        assert_eq!(local_hashes(&a), local_hashes(&b));
+        for (vault, id) in [(&a, mail), (&b, b_mail)] {
+            assert!(
+                vault.folders().unwrap().is_empty(),
+                "both folders stay deleted"
+            );
+            assert!(vault.item_folders(id).unwrap().is_empty());
+        }
+    }
+
+    /// "Power" is in "Personal" only through the row of "Bills", which Mac A deleted
+    /// while Mac B added "Power" to it. Mac A then adds "Power" to "Home", and after it
+    /// Mac B takes it out of "Personal": the removal holds, as with a row of "Personal".
+    #[test]
+    fn a_removal_through_a_deleted_folder_holds_against_an_earlier_add() {
+        let (dir, mut a, mut b, _mail, _b_mail, folders) = two_macs(&["Personal", "Home"]);
+        let (personal, home) = (&folders[0], &folders[1]);
+        let bills = a.create_folder(Some(personal), "Bills").unwrap().uuid;
+        let power = a.add(draft("Power", "SYNTH-power")).unwrap().id;
+        exchange(&dir, &mut a, &mut b);
+        let b_power = b
+            .search("")
+            .unwrap()
+            .into_iter()
+            .find(|item| item.title == "Power")
+            .unwrap()
+            .id;
+        tick();
+        a.delete_folder(&bills).unwrap();
+        b.add_item_to_folder(b_power, &bills).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        assert_eq!(
+            b.item_folders(b_power).unwrap(),
+            std::slice::from_ref(personal)
+        );
+        tick();
+        a.add_item_to_folder(power, home).unwrap();
+        tick();
+        b.remove_item_from_folder(b_power, personal).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty());
+        assert_eq!(local_hashes(&a), local_hashes(&b));
+        assert_eq!(a.item_folders(power).unwrap(), std::slice::from_ref(home));
+        assert_eq!(b.item_folders(b_power).unwrap(), std::slice::from_ref(home));
     }
 
     fn sorted_ids(mut ids: Vec<u64>) -> Vec<u64> {

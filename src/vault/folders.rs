@@ -129,6 +129,13 @@ pub enum FolderChange {
 
 /// The folders that are not deleted, with each parent resolved (see the module
 /// documentation).
+/// Where a chain of deleted folders ends ([`Tree::settle`]).
+enum Settled<'a> {
+    Live(&'a str),
+    Top,
+    Unknown(&'a str),
+}
+
 struct Tree {
     folders: BTreeMap<String, Folder>,
     /// The deleted folders, each with the parent its row names.
@@ -312,16 +319,33 @@ impl Tree {
     /// folder its nearest live ancestor, or `None` (the top level) when it has none.
     /// `None` too for a folder that is not here at all.
     fn place<'a>(&'a self, uuid: &'a str) -> Option<&'a str> {
+        match self.settle(uuid) {
+            Settled::Live(live) => Some(live),
+            Settled::Top | Settled::Unknown(_) => None,
+        }
+    }
+
+    /// Where a chain of deleted rows from `uuid` ends: at a live folder, at no parent or
+    /// after every deleted row once (a cycle of deleted rows counts as the top level), or
+    /// at a folder that is not here.
+    fn settle<'a>(&'a self, uuid: &'a str) -> Settled<'a> {
         let mut at = uuid;
-        // A chain of deleted rows ends at a live folder, at no parent, or after every
-        // deleted row once (a cycle of deleted rows counts as the top level).
         for _ in 0..=self.gone.len() {
             if self.folders.contains_key(at) {
-                return Some(at);
+                return Settled::Live(at);
             }
-            at = self.gone.get(at)?.as_deref()?;
+            match self.gone.get(at) {
+                Some(Some(parent)) => at = parent.as_str(),
+                Some(None) => return Settled::Top,
+                None => return Settled::Unknown(at),
+            }
         }
-        None
+        Settled::Top
+    }
+
+    /// `uuid` is a live folder here.
+    fn is_live(&self, uuid: &str) -> bool {
+        self.folders.contains_key(uuid)
     }
 
     /// The memberships of a credential from its stored rows, each where it counts
@@ -333,9 +357,13 @@ impl Tree {
         let mut out: Vec<(String, i64)> = Vec::new();
         for (uuid, added_at) in stored {
             let folder = if self.knows(&uuid) {
-                match self.place(&uuid) {
-                    Some(live) => live.to_owned(),
-                    None => continue,
+                match self.settle(&uuid) {
+                    Settled::Live(live) => live.to_owned(),
+                    // The parent of a deleted folder that is not here (a copy without its
+                    // row yet): the membership waits there, as one of a folder that is not
+                    // here does.
+                    Settled::Unknown(unknown) => unknown.to_owned(),
+                    Settled::Top => continue,
                 }
             } else {
                 uuid
@@ -453,9 +481,39 @@ fn set_folders(
             .collect::<Result<_, _>>()
             .map_err(storage)?
     };
+    let before = tree.normalize(stored_folders(tx, item)?);
     let (now, device) = version(tx)?;
     let at = |last: i64| now.max(last.saturating_add(1));
     let wanted = |uuid: &str| folders.iter().any(|(folder, _)| folder == uuid);
+    // A live folder that the credential is in only through the row of a deleted folder
+    // ([`Tree::normalize`]) and leaves now gets an ended row of its own, so the removal
+    // holds against an add of it on another device at the same time, as it would with a
+    // row of that folder.
+    for (folder, added_at) in &before {
+        if wanted(folder) || !tree.is_live(folder) {
+            continue;
+        }
+        match rows.iter().find(|(uuid, _, _)| uuid == folder) {
+            Some((_, _, false)) => {}
+            Some((_, last, true)) => {
+                tx.execute(
+                    "UPDATE item_folder SET removed_at = ?1, updated_at = ?1, updated_by = ?2
+                     WHERE item_id = ?3 AND folder_uuid = ?4",
+                    (at(*last), &device, item, folder),
+                )
+                .map_err(storage)?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO item_folder
+                         (item_id, folder_uuid, added_at, updated_at, updated_by, removed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?4)",
+                    (item, folder, added_at, now, &device),
+                )
+                .map_err(storage)?;
+            }
+        }
+    }
     for (folder, last, removed) in &rows {
         // A row of a deleted folder ends too: the caller gave its place instead
         // ([`Tree::normalize`]).
@@ -1179,6 +1237,26 @@ mod tests {
     use crate::vault::{Field, ItemDraft, ItemEventKind, MAX_ITEM_EVENTS, SecretValue};
 
     const PASS: &str = "synthetic-folder-pass";
+
+    /// A deleted folder whose parent is not here (a copy without that row yet): its
+    /// membership waits in that parent, and is not dropped. A deleted folder without a
+    /// parent puts it at the top level.
+    #[test]
+    fn a_membership_waits_in_a_parent_that_is_not_here() {
+        let tree = Tree {
+            folders: BTreeMap::new(),
+            gone: BTreeMap::from([
+                ("f".to_owned(), Some("q".to_owned())),
+                ("g".to_owned(), None),
+            ]),
+        };
+        assert_eq!(
+            tree.normalize(vec![("f".to_owned(), 5)]),
+            vec![("q".to_owned(), 5)]
+        );
+        assert!(tree.normalize(vec![("g".to_owned(), 1)]).is_empty());
+        assert!(tree.place("f").is_none());
+    }
 
     fn vault(dir: &tempfile::TempDir) -> Vault {
         let mut vault = Vault::create(&dir.path().join("folders.db"), PASS).unwrap();
