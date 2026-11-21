@@ -587,6 +587,8 @@ impl eframe::App for DesktopApp {
             self.relay_quit();
             // A device that joins an Apassy Connect account cancels its join.
             self.connect_quit();
+            // A new public link keeps its row: its step ends before the vault locks.
+            ui::share_sheet::quit(self);
             // No background sync after this: the lock in `shut_down` syncs last.
             self.stop_sync_worker();
             self.shut_down();
