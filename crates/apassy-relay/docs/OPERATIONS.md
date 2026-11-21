@@ -2174,3 +2174,52 @@ state). Stripe does not send again an event that the relay already answered: res
 events of the subscriptions that changed since the backup from the Stripe dashboard
 (Developers › Events › the event › Resend), or reconcile them by hand. The Worker goes back
 with `RELAY_MODE=relay`.
+
+## 30. Public links (`links.db`) and the code mail
+
+Public links (ADR 0047 release A, connect-share-v1, docs/SPEC.md section 38) live in `links.db` beside `relay.db`, made at the first start with the account routes: plain in `connect` mode, keyed with the master key otherwise.
+
+### 30.1 Backups
+
+- `links.db` is in no backup: not in `admin backup`, not in the stopped backup, not in the backup check of a cutover. This is on purpose: no restore brings back a link that its owner revoked or that expired.
+- Snapshots of the data directory by the host (a volume snapshot, restic, a copy of the folder) must exclude `links.db*` too (`links.db`, `links.db-journal`, `links.db.plain`): such a copy would bring revoked links back.
+- A restore of a backup leaves `links.db` as it is.
+- To end every live link (no link opens any more), stop the relay and run `apassy-relay purge-links`: the links, their codes, the counts, and the outbox go; the ids of every link ever made stay, so none opens or is made again. Never delete `links.db`: that drops those ids too.
+- A start that refuses `links.db` (another form or another version) says so and changes nothing. Start the image that wrote it. A keyed `links.db` becomes plain in `connect-cutover` (docs/SPEC.md 38.13), with every link and id.
+
+### 30.2 The code mail
+
+Links for "Only these e-mail addresses" need a mail sender. Without `APASSY_CONNECT_SMTP_HOST` the relay makes no such link and answers their code requests with 503 `mail_unavailable`; links for anyone work.
+
+| Setting | Value on the hosted relay |
+| --- | --- |
+| `APASSY_CONNECT_SMTP_HOST` | The submission host of the mail server; its certificate must name it |
+| `APASSY_CONNECT_SMTP_PORT` | `587` (STARTTLS) or `465` (TLS) |
+| `APASSY_CONNECT_SMTP_USER` | The submission account of the sender |
+| `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password (mode 0600, mounted read-only) |
+| `APASSY_CONNECT_SMTP_FROM` | `connect@apassy.wyderka.cc` |
+| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_LINK` | The defaults (50, 200, 500, 2000, 20) unless the owner decides otherwise |
+
+The sending domain needs its records before the first mail: SPF that names the mail server (or its relay), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
+
+### 30.3 What to watch
+
+- `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted.
+- A relay whose mail sender cannot be built does not start (the system roots, or the host name).
+- `the mail thread cannot start: no code mail is sent`: the mail is off until a restart; links for e-mail addresses and code requests answer 503 `mail_unavailable`.
+- `a code mail was refused by the SMTP server at step … (5xx): it is dropped`: a permanent refusal; the reader may ask for a new code.
+- Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day (the counts are in `links.db`, so a restart keeps them).
+
+### 30.4 Settings of a relay that you run yourself
+
+`APASSY_RELAY_ACCOUNT_PLANS=open` gives every account a plan without Stripe and no plan limit on links. It needs `APASSY_RELAY_CONNECT_ACCOUNTS=1`, and the relay refuses it beside the Stripe files and in `connect` mode. A link needs an `https:` public URL (`APASSY_RELAY_PUBLIC_URL`).
+
+### 30.5 Rollback
+
+An image before public links never opens `links.db` and leaves it in place; its link routes are 404 without the marker `x-apassy-links: 1`, so a device that revokes a link meanwhile keeps the revoke pending and sends it again on the way forward (connect-share-v1 section 4.3). An app before that rule took any 404 for a done revoke: so before going forward after such a rollback:
+
+1. Keep the relay stopped.
+2. Run `apassy-relay purge-links` with the configuration of the new image. Every link goes; the ids stay used.
+3. Start the new image. The owners make new links where they need them.
+
+The edge Worker's `LINK_LIMITER` and `LINK_CODE_LIMITER` bindings are unused by an older Worker.

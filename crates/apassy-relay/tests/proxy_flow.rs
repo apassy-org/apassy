@@ -916,6 +916,38 @@ fn a_redirect_is_passed_through_and_not_followed() {
     assert_eq!(event.outcome, ProxyOutcome::Forwarded);
 }
 
+/// Every proxied answer runs in a sandbox (`Content-Security-Policy: sandbox`, beside the
+/// upstream's own policy), and `Service-Worker-Allowed` never reaches the client: the
+/// relay's origin also serves the viewer of public links (connect-share-v1 section 5).
+#[test]
+fn proxy_responses_are_sandboxed() {
+    let h = Harness::new();
+    let bearer = format!("Bearer {}", h.placeholder_a);
+    for target in ["/worker", "/echo", "/redirect"] {
+        let reply = h.get(
+            &h.path("api.stripe.com", target),
+            &[("Authorization", &bearer)],
+        );
+        assert!(
+            matches!(reply.status, 200 | 302),
+            "{target}: {}",
+            reply.status
+        );
+        let policies: Vec<&str> = reply
+            .headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("content-security-policy"))
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert!(policies.contains(&"sandbox"), "{target}: {policies:?}");
+        assert_eq!(reply.header("Service-Worker-Allowed"), None, "{target}");
+        if target == "/worker" {
+            assert!(policies.contains(&"default-src 'self'"), "{policies:?}");
+            assert!(reply.text().contains("serviceWorker"));
+        }
+    }
+}
+
 #[test]
 fn head_has_the_upstream_length_and_no_body() {
     let h = Harness::new();

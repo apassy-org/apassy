@@ -30,6 +30,18 @@
 //! | `APASSY_CONNECT_SITE_URL` | The `https://` origin of the site: the Stripe return pages and the group invites | `https://apassy.wyderka.cc` |
 //! | `STRIPE_SECRET_KEY_FILE` | With the account routes on: a file with the restricted Stripe key (`rk_live_…`; `rk_test_…` or `sk_test_…` in a sandbox; `sk_live_…` is refused). Set it and the next one together, or neither: without them the billing routes answer 503 `busy` and no account has a plan | none |
 //! | `STRIPE_WEBHOOK_SECRET_FILE` | A file with the signing secret of the Stripe webhook endpoint (`whsec_…`) | none |
+//! | `APASSY_RELAY_ACCOUNT_PLANS` | With the account routes on: `open` for a relay that you run yourself: every account is entitled without Stripe, and its public links have no plan limit (docs/SPEC.md section 38.9). Refused beside the Stripe files and in `connect` mode. Unset: the plans of billing, or none without Stripe | unset |
+//! | `APASSY_CONNECT_LINKS` | The live public links of an account without a plan, on Personal, or on Family (connect-share-v1 section 7), 1 to 10000 | `25` |
+//! | `APASSY_CONNECT_LINKS_TEAM` | The live public links of a Team member, 1 to 10000 | `100` |
+//! | `APASSY_CONNECT_SMTP_HOST` | The SMTP submission server of the code mail of public links (connect-share-v1 section 10). Unset: no mail sender: a link for e-mail addresses is refused and the code route answers 503 `mail_unavailable` | none |
+//! | `APASSY_CONNECT_SMTP_PORT` | Its port: 465 is TLS from the first byte, any other port STARTTLS (required) | `587` |
+//! | `APASSY_CONNECT_SMTP_USER`, `APASSY_CONNECT_SMTP_PASSWORD_FILE` | The submission account (AUTH PLAIN or LOGIN, only over TLS). Both or neither | none |
+//! | `APASSY_CONNECT_SMTP_FROM` | The sender of the code mail, such as `connect@apassy.wyderka.cc`. Required with the host: there is no default sender | none |
+//! | `APASSY_CONNECT_MAIL_PER_LINK` | Code requests for one link in one hour, 1 to 1000 | `20` |
+//! | `APASSY_CONNECT_MAIL_PER_ACCOUNT` | Code mails of the links of one account in one UTC day (no plan, Personal, Family), 0 to 100000; counted before the relay's cap; above it every code request of that account's links answers 503 `mail_unavailable` until the day ends | `50` |
+//! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_TEAM` | The same for a Team member, 0 to 100000 | `200` |
+//! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN` | The same with `APASSY_RELAY_ACCOUNT_PLANS=open`, 0 to 1000000 | `500` |
+//! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `2000` |
 //! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
@@ -129,8 +141,31 @@ pub const MAX_CONNECT_ACCOUNTS_PER_DAY: u64 = 100_000;
 /// Connect accounts the relay holds at once (`APASSY_RELAY_CONNECT_ACCOUNTS_MAX`).
 pub const DEFAULT_CONNECT_ACCOUNTS_MAX: u64 = 100_000;
 pub const MAX_CONNECT_ACCOUNTS_MAX: u64 = 10_000_000;
+/// The live public links of an account without a plan, on Personal, or on Family
+/// (`APASSY_CONNECT_LINKS`, connect-share-v1 section 7).
+pub const DEFAULT_CONNECT_LINKS: u64 = 25;
+/// The live public links of a Team member (`APASSY_CONNECT_LINKS_TEAM`).
+pub const DEFAULT_CONNECT_LINKS_TEAM: u64 = 100;
+pub const MAX_CONNECT_LINKS: u64 = 10_000;
+/// Code requests for one link in `CODE_LINK_WINDOW_SECS`.
+pub const DEFAULT_MAIL_PER_LINK: u64 = 20;
+/// Code mails of the relay in one UTC day.
+pub const DEFAULT_MAIL_PER_DAY: u64 = 2000;
+/// Code requests of the links of one account in one UTC day: no plan, Personal, Family.
+pub const DEFAULT_MAIL_PER_ACCOUNT: u64 = 50;
+/// The same for a Team member.
+pub const DEFAULT_MAIL_PER_ACCOUNT_TEAM: u64 = 200;
+/// The same with open plans (a relay that you run yourself).
+pub const DEFAULT_MAIL_PER_ACCOUNT_OPEN: u64 = 500;
+/// The submission port of `APASSY_CONNECT_SMTP_PORT` (STARTTLS).
+pub const DEFAULT_SMTP_PORT: u16 = 587;
+/// The port of submission over TLS from the first byte (RFC 8314).
+pub const SMTP_TLS_PORT: u16 = 465;
 /// The directory of the relay in the data directory: the teams and their keys.
 pub const DIRECTORY_FILE: &str = "relay.db";
+/// The public links of Apassy Connect (connect-share-v1, docs/SPEC.md section 38): a file of
+/// its own in the data directory, in no backup.
+pub const LINKS_FILE: &str = "links.db";
 /// The folder of the team files in the data directory.
 pub const TEAMS_DIR: &str = "teams";
 /// The one team vault of a relay from before teams (ADR 0019). `apassy-relay migrate`
@@ -424,6 +459,108 @@ pub struct ConnectConfig {
     pub billing: Option<BillingSettings>,
     /// The tunnel and its ingress (connect-tunnel-v1), used only with the account routes.
     pub tunnel: TunnelSettings,
+    /// Where the plans of accounts come from (`APASSY_RELAY_ACCOUNT_PLANS`).
+    pub plans: AccountPlans,
+    /// The limits of public links and their code requests (connect-share-v1 section 7).
+    pub links: LinkSettings,
+    /// The SMTP sender of the code mail (`APASSY_CONNECT_SMTP_*`), or `None`: no link for
+    /// e-mail addresses, and the code route answers 503 `mail_unavailable`.
+    pub mail: Option<MailSettings>,
+}
+
+/// Where the plans of accounts come from (`APASSY_RELAY_ACCOUNT_PLANS`, docs/SPEC.md
+/// section 38.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccountPlans {
+    /// Billing when Stripe is set up, else no account has a plan.
+    #[default]
+    Billing,
+    /// A relay that you run yourself: every account is entitled without Stripe, and its
+    /// public links have no plan limit. Never beside Stripe, never in `connect` mode.
+    Open,
+}
+
+/// The limits of public links (connect-share-v1 section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkSettings {
+    /// Live links of an account without a plan, on Personal, or on Family.
+    pub links: u64,
+    /// Live links of a Team member.
+    pub links_team: u64,
+    /// Code requests for one link in an hour.
+    pub mail_per_link: u64,
+    /// Code mails of the relay in one UTC day (`0`: none).
+    pub mail_per_day: u64,
+    /// Code mails of the links of one account in one UTC day, by its sharing level:
+    /// no plan, Personal, or Family; Team; open plans.
+    pub mail_per_account: u64,
+    pub mail_per_account_team: u64,
+    pub mail_per_account_open: u64,
+}
+
+impl Default for LinkSettings {
+    fn default() -> Self {
+        Self {
+            links: DEFAULT_CONNECT_LINKS,
+            links_team: DEFAULT_CONNECT_LINKS_TEAM,
+            mail_per_link: DEFAULT_MAIL_PER_LINK,
+            mail_per_day: DEFAULT_MAIL_PER_DAY,
+            mail_per_account: DEFAULT_MAIL_PER_ACCOUNT,
+            mail_per_account_team: DEFAULT_MAIL_PER_ACCOUNT_TEAM,
+            mail_per_account_open: DEFAULT_MAIL_PER_ACCOUNT_OPEN,
+        }
+    }
+}
+
+/// The SMTP submission of the code mail (docs/SPEC.md section 38.7).
+#[derive(Clone)]
+pub struct MailSettings {
+    /// The host name of the submission server: its certificate must name it.
+    pub host: String,
+    /// 465: TLS from the first byte; any other port: STARTTLS, which the server must offer.
+    pub port: u16,
+    /// The submission account and its password (AUTH PLAIN or LOGIN), or `None`.
+    pub auth: Option<(String, SecretString)>,
+    /// The sender address (`MAIL FROM` and `From`).
+    pub from: String,
+    /// Extra trusted roots (DER) beside the system roots. Tests only.
+    pub extra_roots_der: Vec<Vec<u8>>,
+    /// A fixed address of the server instead of DNS. Tests only.
+    pub connect_to: Option<SocketAddr>,
+    pub connect_timeout: Duration,
+    pub io_timeout: Duration,
+}
+
+impl std::fmt::Debug for MailSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailSettings")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("auth", &self.auth.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MailSettings {
+    /// Settings for `host` and `port` with no account, the sender `from`, and the default
+    /// timeouts.
+    pub fn new(host: &str, port: u16, from: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+            auth: None,
+            from: from.to_string(),
+            extra_roots_der: Vec::new(),
+            connect_to: None,
+            connect_timeout: Duration::from_secs(10),
+            io_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// True when the connection is TLS from its first byte (port 465).
+    pub fn implicit_tls(&self) -> bool {
+        self.port == SMTP_TLS_PORT
+    }
 }
 
 /// The settings of Connect billing (docs/SPEC.md section 34.7).
@@ -491,6 +628,9 @@ impl Default for ConnectConfig {
             site_url: DEFAULT_CONNECT_SITE_URL.to_string(),
             billing: None,
             tunnel: TunnelSettings::default(),
+            plans: AccountPlans::Billing,
+            links: LinkSettings::default(),
+            mail: None,
         }
     }
 }
@@ -609,8 +749,91 @@ fn connect_from(
             url
         }
     };
+    let plans = match lookup("APASSY_RELAY_ACCOUNT_PLANS")
+        .as_deref()
+        .map(str::trim)
+    {
+        None => AccountPlans::Billing,
+        Some("open") => AccountPlans::Open,
+        Some(_) => {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_ACCOUNT_PLANS is open, or unset.",
+            ));
+        }
+    };
+    if plans == AccountPlans::Open {
+        if mode == RelayMode::Connect {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_ACCOUNT_PLANS=open is for a relay that you run yourself: APASSY_RELAY_MODE=connect takes the plans of billing.",
+            ));
+        }
+        if lookup("STRIPE_SECRET_KEY_FILE").is_some()
+            || lookup("STRIPE_WEBHOOK_SECRET_FILE").is_some()
+        {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_ACCOUNT_PLANS=open gives every account a plan without Stripe: unset STRIPE_SECRET_KEY_FILE and STRIPE_WEBHOOK_SECRET_FILE, or unset APASSY_RELAY_ACCOUNT_PLANS.",
+            ));
+        }
+        if !accounts {
+            return Err(RelayError::invalid(
+                "APASSY_RELAY_ACCOUNT_PLANS=open needs the account routes: set APASSY_RELAY_CONNECT_ACCOUNTS=1.",
+            ));
+        }
+    }
     let billing = billing_from(lookup, &site_url)?;
     let tunnel = tunnel_from(lookup)?;
+    let links = LinkSettings {
+        links: number(
+            lookup,
+            "APASSY_CONNECT_LINKS",
+            DEFAULT_CONNECT_LINKS,
+            1,
+            MAX_CONNECT_LINKS,
+        )?,
+        links_team: number(
+            lookup,
+            "APASSY_CONNECT_LINKS_TEAM",
+            DEFAULT_CONNECT_LINKS_TEAM,
+            1,
+            MAX_CONNECT_LINKS,
+        )?,
+        mail_per_link: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_LINK",
+            DEFAULT_MAIL_PER_LINK,
+            1,
+            1000,
+        )?,
+        mail_per_day: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_DAY",
+            DEFAULT_MAIL_PER_DAY,
+            0,
+            1_000_000,
+        )?,
+        mail_per_account: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_ACCOUNT",
+            DEFAULT_MAIL_PER_ACCOUNT,
+            0,
+            100_000,
+        )?,
+        mail_per_account_team: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_ACCOUNT_TEAM",
+            DEFAULT_MAIL_PER_ACCOUNT_TEAM,
+            0,
+            100_000,
+        )?,
+        mail_per_account_open: number(
+            lookup,
+            "APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN",
+            DEFAULT_MAIL_PER_ACCOUNT_OPEN,
+            0,
+            1_000_000,
+        )?,
+    };
+    let mail = mail_from(lookup)?;
     Ok(ConnectConfig {
         mode,
         accounts,
@@ -621,7 +844,89 @@ fn connect_from(
         site_url,
         billing,
         tunnel,
+        plans,
+        links,
+        mail,
     })
+}
+
+/// The SMTP sender of the code mail from the environment (docs/SPEC.md section 38.7):
+/// none without `APASSY_CONNECT_SMTP_HOST`; the other settings without the host are a
+/// configuration error, so a typo does not turn the mail off without a word.
+fn mail_from(lookup: &impl Fn(&str) -> Option<String>) -> RelayResult<Option<MailSettings>> {
+    let host = lookup("APASSY_CONNECT_SMTP_HOST").map(|host| host.trim().to_ascii_lowercase());
+    let user = lookup("APASSY_CONNECT_SMTP_USER");
+    let password = lookup("APASSY_CONNECT_SMTP_PASSWORD_FILE");
+    let from = lookup("APASSY_CONNECT_SMTP_FROM");
+    let port = lookup("APASSY_CONNECT_SMTP_PORT");
+    let Some(host) = host else {
+        if user.is_some() || password.is_some() || from.is_some() || port.is_some() {
+            return Err(RelayError::invalid(
+                "APASSY_CONNECT_SMTP_PORT, _USER, _PASSWORD_FILE, and _FROM need APASSY_CONNECT_SMTP_HOST.",
+            ));
+        }
+        return Ok(None);
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-'))
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-']);
+    if !host_ok {
+        return Err(RelayError::invalid(
+            "APASSY_CONNECT_SMTP_HOST is the host name of the submission server.",
+        ));
+    }
+    let port = match port {
+        None => DEFAULT_SMTP_PORT,
+        Some(text) => match text.trim().parse::<u16>() {
+            Ok(port) if port > 0 => port,
+            _ => {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_SMTP_PORT is a port from 1 to 65535.",
+                ));
+            }
+        },
+    };
+    let from = from.map(|from| from.trim().to_string()).ok_or_else(|| {
+        RelayError::invalid(
+            "APASSY_CONNECT_SMTP_FROM is required with APASSY_CONNECT_SMTP_HOST: the sender of the code mail, such as connect@apassy.wyderka.cc.",
+        )
+    })?;
+    if crate::server::links::normal_address(&from).as_deref() != Some(from.as_str()) {
+        return Err(RelayError::invalid(
+            "APASSY_CONNECT_SMTP_FROM is one address in its normal form (lowercase, ASCII), such as connect@apassy.wyderka.cc.",
+        ));
+    }
+    let auth = match (user, password) {
+        (None, None) => None,
+        (Some(user), Some(path)) => {
+            let user = user.trim().to_string();
+            let password = std::fs::read_to_string(path.trim()).map_err(|_| {
+                RelayError::invalid("APASSY_CONNECT_SMTP_PASSWORD_FILE cannot be read.")
+            })?;
+            let password = zeroize::Zeroizing::new(password);
+            let password = password.trim_end_matches(['\n', '\r']);
+            let printable = |text: &str| !text.is_empty() && !text.chars().any(char::is_control);
+            if !printable(&user) || !printable(password) {
+                return Err(RelayError::invalid(
+                    "APASSY_CONNECT_SMTP_USER and the password file hold one line of text each.",
+                ));
+            }
+            Some((user, SecretString::new(password.to_string())))
+        }
+        _ => {
+            return Err(RelayError::invalid(
+                "Set APASSY_CONNECT_SMTP_USER and APASSY_CONNECT_SMTP_PASSWORD_FILE together, or neither.",
+            ));
+        }
+    };
+    Ok(Some(MailSettings {
+        auth,
+        ..MailSettings::new(&host, port, &from)
+    }))
 }
 
 /// The keys of `APASSY_CONNECT_PUBLISHED_KEYS_FILE`: `{"keys":[{"kid","public_key"}]}`,
@@ -1240,6 +1545,11 @@ pub fn checked_node_origin(text: &str) -> RelayResult<String> {
 impl RelayConfig {
     pub fn directory_path(&self) -> PathBuf {
         self.data_dir.join(DIRECTORY_FILE)
+    }
+
+    /// `links.db`: the public links of Connect, in no backup (docs/SPEC.md section 38).
+    pub fn links_path(&self) -> PathBuf {
+        self.data_dir.join(LINKS_FILE)
     }
 
     pub fn teams_dir(&self) -> PathBuf {
