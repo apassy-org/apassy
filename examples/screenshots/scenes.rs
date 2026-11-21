@@ -11,6 +11,9 @@
 //! - `start-join`: no vault and no account: the start screen › Apassy Connect.
 //! - `start-connect`: no vault; this computer is a device of Alex's account, whose
 //!   vault is in Apassy Connect.
+//! - `connect-links`: this computer is Alex's, an account without a plan: the Share
+//!   sheet of a credential and of a folder, a public link made through the owner check,
+//!   and Settings › Connect › Public Links.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +43,7 @@ pub const SCENES: &[&str] = &[
     "start-join",
     "start-connect",
     "connect-recover",
+    "connect-links",
 ];
 
 /// The fake relay keeps the vault stores of the fake Connect, as in tests/common/mod.rs.
@@ -297,6 +301,10 @@ pub fn setup(name: &str) -> Option<Scene> {
             scene.this_account = Some(o_id);
             scene.team = Some(team);
             scene.other = Some(alex);
+        }
+        "connect-links" => {
+            let alex = this_account(connect, &data, "Alex", "Linux desktop");
+            scene.this_account = Some(alex.state().account_id.clone());
         }
         "start-join" => scene.other = Some(peer(connect, "Alex", "Alex's MacBook Pro")),
         "start-connect" => {
@@ -666,6 +674,42 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Wait(4.0),
                 Shot("sync-connect-past-due"),
                 Hook("plan-active"),
+            ]);
+        }
+        "connect-links" => {
+            let pass = || [Type(super::PASS), enter(), Wait(4.0)];
+            steps.extend([
+                Wait(3.0),
+                Connect("link-item"),
+                Wait(1.5),
+                Shot("link-sheet"),
+                Connect("link-form"),
+                Wait(1.0),
+                Shot("link-sheet-form"),
+                Connect("link-emails"),
+                Wait(1.0),
+                Shot("link-sheet-emails"),
+                Connect("link-anyone"),
+                Connect("link-create"),
+                Wait(1.5),
+                Shot("link-owner-check"),
+            ]);
+            steps.extend(pass());
+            steps.extend([
+                Shot("link-sheet-made"),
+                escape(),
+                Wait(1.0),
+                Connect("link-folder"),
+                Wait(1.5),
+                Shot("link-sheet-folder"),
+                escape(),
+                Wait(1.0),
+            ]);
+            steps.extend(settings);
+            steps.extend([
+                Click(SETTINGS_X, CONNECT_ROW),
+                Wait(3.0),
+                Pages("link-settings"),
             ]);
         }
         "connect-member" => {

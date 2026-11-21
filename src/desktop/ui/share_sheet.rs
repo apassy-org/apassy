@@ -1058,3 +1058,69 @@ fn apply(app: &mut DesktopApp, outcome: Outcome) {
 #[cfg(test)]
 #[path = "share_sheet_tests.rs"]
 mod share_sheet_tests;
+
+impl DesktopApp {
+    /// A step of the screenshot tour (`connect link-…`, scene `connect-links`):
+    /// `link-item` opens the Share sheet of the first credential, `link-folder` that of
+    /// the first folder, `link-form` opens the choices, `link-emails` picks "Only these
+    /// e-mail addresses" with two synthetic addresses, `link-anyone` picks "Anyone with
+    /// the link" again, and `link-create` presses "Create Link" (the owner check opens).
+    /// Returns false when the step does not fit the window.
+    pub(crate) fn tour_link(&mut self, ctx: &egui::Context, step: &str) -> bool {
+        use super::Sheet;
+        match step {
+            "link-item" => {
+                let first = self
+                    .owner_ui
+                    .session
+                    .with_vault(|vault| vault.search("").ok())
+                    .flatten()
+                    .and_then(|items| items.into_iter().map(|item| item.id).min());
+                let Some(item_id) = first else {
+                    return false;
+                };
+                self.ui.sheet = Some(Sheet::Share { item_id });
+                true
+            }
+            "link-folder" => {
+                let first = self
+                    .owner_ui
+                    .session
+                    .with_vault(|vault| vault.folders().ok())
+                    .flatten()
+                    .and_then(|folders| folders.into_iter().find(|f| f.parent.is_none()));
+                let Some(folder) = first else {
+                    return false;
+                };
+                self.ui.sheet = Some(Sheet::ShareFolder { uuid: folder.uuid });
+                true
+            }
+            "link-form" => {
+                act(self, ctx, &LinkTarget::Item(0), LinkAction::OpenForm);
+                self.ui.connect.links.form.is_some()
+            }
+            "link-emails" | "link-anyone" => {
+                let Some(form) = self.ui.connect.links.form.as_mut() else {
+                    return false;
+                };
+                form.emails = step == "link-emails";
+                form.addresses = if form.emails {
+                    "ada@example.com\ngrace@example.com".to_owned()
+                } else {
+                    String::new()
+                };
+                true
+            }
+            "link-create" => {
+                let target = match &self.ui.sheet {
+                    Some(Sheet::Share { item_id }) => LinkTarget::Item(*item_id),
+                    Some(Sheet::ShareFolder { uuid }) => LinkTarget::Folder(uuid.clone()),
+                    _ => return false,
+                };
+                act(self, ctx, &target, LinkAction::Submit);
+                self.owner.check.is_some()
+            }
+            _ => false,
+        }
+    }
+}
