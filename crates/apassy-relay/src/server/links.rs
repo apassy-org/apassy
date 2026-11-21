@@ -58,8 +58,7 @@ pub const PAIR_WRONG_TRIES: i64 = 10;
 pub const PAIR_CODES_PER_DAY: i64 = 5;
 /// The code requests that wait for the mail thread; above it 503 `busy`.
 const MAX_JOBS: usize = 10_000;
-/// The windows of the code requests: for each link and address hash, and for each link.
-pub const CODE_ADDRESS_WINDOW_SECS: u64 = 15 * 60;
+/// The window of the code requests of each link.
 pub const CODE_LINK_WINDOW_SECS: u64 = 3600;
 /// A code mail that cannot be handed to the SMTP server within this is deleted.
 pub const MAIL_LIFETIME_SECS: u64 = 3600;
@@ -69,6 +68,8 @@ pub const MAX_LISTED: u32 = 1000;
 const MAX_WINDOWS: usize = 100_000;
 /// The maintenance pass of the links runs at most this often.
 const PRUNE_SECS: u64 = 60;
+/// The `account_id` of the relay's own row in `mail_count`: no account id is empty.
+const RELAY_COUNT: &str = "";
 /// The HMAC tag of a code's hash.
 const CODE_TAG: &str = "apassy-connect public-link code v1";
 
@@ -98,7 +99,12 @@ CREATE TABLE link_address (
   code_day INTEGER NOT NULL DEFAULT 0,
   codes INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (link_id, address_hash));
-CREATE TABLE link_used (link_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE link_id_used (link_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE mail_count (
+  day INTEGER NOT NULL,
+  account_id TEXT NOT NULL,
+  mails INTEGER NOT NULL,
+  PRIMARY KEY (day, account_id)) WITHOUT ROWID;
 CREATE TABLE link_code (
   link_id TEXT NOT NULL REFERENCES link(link_id) ON DELETE CASCADE,
   address_hash TEXT NOT NULL,
@@ -157,7 +163,6 @@ pub fn normal_address(text: &str) -> Option<String> {
     if !local_ok || local.starts_with('.') || local.ends_with('.') || local.contains("..") {
         return None;
     }
-    let domain = domain.strip_suffix('.').unwrap_or(domain);
     if domain.is_empty()
         || domain
             .chars()
@@ -165,7 +170,10 @@ pub fn normal_address(text: &str) -> Option<String> {
     {
         return None;
     }
-    let domain = idna::domain_to_ascii(domain).ok()?;
+    // UTS #46 ToASCII, non-transitional; then one trailing dot goes, so a mapped full-width
+    // dot counts as one too.
+    let ascii = idna::domain_to_ascii(domain).ok()?;
+    let domain = ascii.strip_suffix('.').unwrap_or(&ascii);
     let labels: Vec<&str> = domain.split('.').collect();
     if domain.len() > 253 || labels.len() < 2 {
         return None;
@@ -178,7 +186,8 @@ pub fn normal_address(text: &str) -> Option<String> {
             && !label.starts_with('-')
             && !label.ends_with('-')
     };
-    if !labels.iter().all(label_ok) || labels.last()?.bytes().all(|byte| byte.is_ascii_digit()) {
+    if !labels.iter().all(label_ok) || !labels.last()?.starts_with(|c: char| c.is_ascii_lowercase())
+    {
         return None;
     }
     let address = format!("{}@{domain}", local.to_ascii_lowercase());
@@ -340,7 +349,7 @@ const SHARE_CSS: &str = include_str!("../../deploy/worker/public/share.css");
 pub const VIEWER_HEADERS: [(&str, &str); 7] = [
     (
         "Content-Security-Policy",
-        "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
     ),
     ("Cache-Control", "no-store"),
     ("Referrer-Policy", "no-referrer"),
@@ -483,7 +492,7 @@ impl Windows {
 
     /// Drops every time older than the longest window.
     fn sweep(&mut self, now: u64) {
-        let longest = CODE_ADDRESS_WINDOW_SECS.max(CODE_LINK_WINDOW_SECS);
+        let longest = CODE_LINK_WINDOW_SECS;
         self.times.retain(|_, times| {
             times.retain(|at| at.saturating_add(longest) > now);
             !times.is_empty()
@@ -499,10 +508,6 @@ pub struct Links {
     /// A mail sender is set up (`APASSY_CONNECT_SMTP_HOST`).
     mail: bool,
     windows: Mutex<Windows>,
-    /// The UTC day and the code requests of the relay on that day.
-    mail_day: Mutex<(u64, u64)>,
-    /// The UTC day and the code requests of each account's links on that day.
-    account_mail: Mutex<(u64, HashMap<String, u64>)>,
     /// The code requests that the mail thread has not looked at yet. Memory only: the
     /// address key in them is never stored.
     jobs: Mutex<VecDeque<CodeJob>>,
@@ -518,6 +523,9 @@ pub struct Links {
 /// when it is there, makes the code, its row, and the mail.
 struct CodeJob {
     link_id: String,
+    /// The account of the link, and its daily mail cap.
+    account: String,
+    account_cap: u64,
     normal: zeroize::Zeroizing<String>,
     address_key: zeroize::Zeroizing<Vec<u8>>,
     at: u64,
@@ -552,8 +560,6 @@ impl Links {
             settings: config.connect.links,
             mail: config.connect.mail.is_some(),
             windows: Mutex::new(Windows::default()),
-            mail_day: Mutex::new((0, 0)),
-            account_mail: Mutex::new((0, HashMap::new())),
             jobs: Mutex::new(VecDeque::new()),
             jobs_held: std::sync::atomic::AtomicBool::new(false),
             outbox: Mutex::new(false),
@@ -591,9 +597,29 @@ impl Links {
     /// that is deleted, connect-share-v1 section 1). Answers how many went.
     pub fn delete_account(&self, account: &str) -> RelayResult<usize> {
         self.store.tx(|tx| {
+            tx.execute(
+                "DELETE FROM mail_count WHERE account_id = ?1",
+                params![account],
+            )
+            .map_err(db)?;
             tx.execute("DELETE FROM link WHERE account_id = ?1", params![account])
                 .map_err(db)
         })
+    }
+
+    /// The code mails of `account` and of the relay (`RELAY_COUNT`) on the UTC day `day`.
+    fn mail_counts(conn: &Connection, account: &str, day: i64) -> RelayResult<(u64, u64)> {
+        let count = |who: &str| -> RelayResult<u64> {
+            conn.query_row(
+                "SELECT mails FROM mail_count WHERE day = ?1 AND account_id = ?2",
+                params![day, who],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|mails| mails.map_or(0, to_u))
+            .map_err(db)
+        };
+        Ok((count(account)?, count(RELAY_COUNT)?))
     }
 
     /// The link ids of `account` (tests and the operator).
@@ -729,6 +755,11 @@ impl Links {
             tx.execute(
                 "DELETE FROM mail_outbox WHERE created_at <= ?1",
                 params![to_i(now.saturating_sub(MAIL_LIFETIME_SECS))],
+            )
+            .map_err(db)?;
+            tx.execute(
+                "DELETE FROM mail_count WHERE day < ?1",
+                params![to_i(now / 86_400)],
             )
             .map_err(db)?;
             Ok(links)
@@ -896,10 +927,10 @@ fn create(
                 "A link with this id exists. Make a new link.",
             ));
         }
-        // An id is used once, ever: revoked, expired, and deleted ids stay in `link_used`.
+        // An id is used once, ever: revoked, expired, and deleted ids stay in `link_id_used`.
         let used: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM link_used WHERE link_id = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM link_id_used WHERE link_id = ?1)",
                 params![request.link_id],
                 |row| row.get(0),
             )
@@ -943,7 +974,7 @@ fn create(
             }
         })?;
         tx.execute(
-            "INSERT INTO link_used (link_id) VALUES (?1)",
+            "INSERT INTO link_id_used (link_id) VALUES (?1)",
             params![request.link_id],
         )
         .map_err(db)?;
@@ -1016,7 +1047,7 @@ fn revoke(links: &Links, caller: &AccountCaller, link_id: &str) -> RelayResult<V
 // ---- The public routes (sections 4.4 and 4.5). ----
 
 /// The live link `link_id`: not expired, not revoked, not opened, of an account that
-/// `relay.db` still holds. A tombstoned id (`link_used` without a row) is never live. `(account, expires_at, one_time, access, sealed)`.
+/// `relay.db` still holds. A tombstoned id (`link_id_used` without a row) is never live. `(account, expires_at, one_time, access, sealed)`.
 type LiveLink = (String, u64, bool, String, String);
 
 fn live_link(conn: &Connection, link_id: &str, now: u64) -> RelayResult<Option<LiveLink>> {
@@ -1149,6 +1180,13 @@ pub fn open(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> RelayResult<Valu
                     .optional()
                     .map_err(db)?;
                 let Some(stored) = live_code else {
+                    // An address of the link without a live code: a wrong try of the pair
+                    // over the life of the link all the same (section 4.4).
+                    tx.execute(
+                        "UPDATE link_address SET wrong_tries = wrong_tries + 1 WHERE link_id = ?1 AND address_hash = ?2",
+                        params![link_id, hash],
+                    )
+                    .map_err(db)?;
                     return Ok(OpenOutcome::CodeInvalid);
                 };
                 if !code_matches(&address_key, link_id, code, &stored) {
@@ -1207,27 +1245,28 @@ fn until_tomorrow(now: u64) -> u64 {
     (now / 86_400 + 1) * 86_400 - now
 }
 
-/// `POST /v1/links/{link_id}/code` (section 4.5). It answers at once, before any lookup
-/// of the address: the form of the body, the link (live, for e-mail addresses, of an
-/// account that exists), and the counts, none of which depends on the address, decide the
-/// answer. The lookup of the address on the link, the code, its row, and the mail happen
-/// later in the mail thread (`process_jobs`), so an address on the link and one that is
-/// not look the same on the wire.
+/// `POST /v1/links/{link_id}/code` (section 4.5). The answer comes before any look at the
+/// addresses. In this order, and only these: the form of the body, the normal form of
+/// `email` and the address key (400); the link, live, for e-mail addresses, of an account
+/// that exists (404); a mail sender, and the daily mail caps of the account and of the
+/// relay (503 `mail_unavailable` until the day ends); the code requests of the link (429).
+/// None of these depends on the address. The lookup of the address on the link, the code,
+/// its row, and the mail happen later in the mail thread (`process_jobs`), so an address on
+/// the link and one that is not look the same on the wire and in time.
 pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<Value, CodeRefusal> {
     let links = links_of(hub)?;
-    if !links.mail {
-        return Err(mail_unavailable().into());
-    }
     let request: CodeRequest = strict(body)?;
-    if !valid_link_id(link_id) {
-        return Err(link_not_found().into());
-    }
-    let normal = normal_address(&request.email)
-        .ok_or_else(|| RelayError::invalid("The e-mail address is not one."))?;
+    let normal = zeroize::Zeroizing::new(
+        normal_address(&request.email)
+            .ok_or_else(|| RelayError::invalid("The e-mail address is not one."))?,
+    );
     let address_key = zeroize::Zeroizing::new(
         b64u_of(&request.address_key, 32)
             .ok_or_else(|| RelayError::invalid("The address key is b64u of 32 bytes."))?,
     );
+    if !valid_link_id(link_id) {
+        return Err(link_not_found().into());
+    }
     let link = links.store.with(|conn| live_link(conn, link_id, now))?;
     let Some((account, _, _, access, _)) = link else {
         return Err(link_not_found().into());
@@ -1235,28 +1274,36 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
     if access != "emails" || !account_exists(&hub.directory.store, &account)? {
         return Err(link_not_found().into());
     }
-    let hash = address_hash(&address_key, &normal);
-    // The windows of the link and of the address hash (the hash is computed, not looked
-    // up): every request counts, with or without a mail.
+    if !links.mail {
+        return Err(mail_unavailable().into());
+    }
+    // The daily caps: the account's that made the link first, then the relay's. They count
+    // the mails that the mail thread made, so above a cap every code request of the
+    // account's links gets the same 503, whatever the address.
+    let sharing = hub
+        .accounts
+        .plans()
+        .sharing(&hub.directory.store, &account, now)?;
+    let account_cap = links.mail_cap(sharing);
+    let day = to_i(now / 86_400);
+    let (account_mails, relay_mails) = links
+        .store
+        .with(|conn| Links::mail_counts(conn, &account, day))?;
+    if account_mails >= account_cap || relay_mails >= links.settings.mail_per_day {
+        return Err(CodeRefusal {
+            error: mail_unavailable(),
+            retry_after: Some(until_tomorrow(now)),
+        });
+    }
+    // The code requests of the link: every request counts, with or without a mail.
     {
         let mut windows = links.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        let address_name = format!("a:{link_id}:{hash}");
-        let link_name = format!("l:{link_id}");
-        let (by_address, address_oldest) =
-            windows.count(&address_name, CODE_ADDRESS_WINDOW_SECS, now);
-        let (by_link, link_oldest) = windows.count(&link_name, CODE_LINK_WINDOW_SECS, now);
-        let over_address = by_address as u64 >= links.settings.mail_per_address;
-        let over_link = by_link as u64 >= links.settings.mail_per_link;
-        if over_address || over_link {
-            let retry = if over_link {
-                link_oldest.map_or(CODE_LINK_WINDOW_SECS, |at| {
-                    (at + CODE_LINK_WINDOW_SECS).saturating_sub(now)
-                })
-            } else {
-                address_oldest.map_or(CODE_ADDRESS_WINDOW_SECS, |at| {
-                    (at + CODE_ADDRESS_WINDOW_SECS).saturating_sub(now)
-                })
-            };
+        let name = format!("l:{link_id}");
+        let (count, oldest) = windows.count(&name, CODE_LINK_WINDOW_SECS, now);
+        if count as u64 >= links.settings.mail_per_link {
+            let retry = oldest.map_or(CODE_LINK_WINDOW_SECS, |at| {
+                (at + CODE_LINK_WINDOW_SECS).saturating_sub(now)
+            });
             return Err(CodeRefusal {
                 error: RelayError::new(
                     codes::RATE_LIMITED,
@@ -1275,52 +1322,7 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
                 .into());
             }
         }
-        windows.record(address_name, now);
-        windows.record(link_name, now);
-    }
-    // The daily caps: the account's that made the link first, then the relay's. Every
-    // request counts, so a cap that is reached says nothing about an address, and every
-    // code request of that link gets the same 503 until the day ends.
-    let sharing = hub
-        .accounts
-        .plans()
-        .sharing(&hub.directory.store, &account, now)?;
-    let account_cap = match sharing {
-        Sharing::Standard => links.settings.mail_per_account,
-        Sharing::Team => links.settings.mail_per_account_team,
-        Sharing::Open => links.settings.mail_per_account_open,
-    };
-    let day = now / 86_400;
-    let capped = || CodeRefusal {
-        error: mail_unavailable(),
-        retry_after: Some(until_tomorrow(now)),
-    };
-    {
-        let mut accounts = links
-            .account_mail
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut relay = links
-            .mail_day
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if accounts.0 != day {
-            *accounts = (day, HashMap::new());
-        }
-        if relay.0 != day {
-            *relay = (day, 0);
-        }
-        let used = accounts.1.get(&account).copied().unwrap_or(0);
-        if used >= account_cap || relay.1 >= links.settings.mail_per_day {
-            return Err(capped());
-        }
-        if accounts.1.len() >= MAX_WINDOWS && !accounts.1.contains_key(&account) {
-            return Err(
-                RelayError::new(codes::BUSY, "The relay is busy. Try again in a moment.").into(),
-            );
-        }
-        *accounts.1.entry(account).or_insert(0) += 1;
-        relay.1 += 1;
+        windows.record(name, now);
     }
     {
         let mut jobs = links.jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1331,7 +1333,9 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
         }
         jobs.push_back(CodeJob {
             link_id: link_id.to_string(),
-            normal: zeroize::Zeroizing::new(normal),
+            account,
+            account_cap,
+            normal,
             address_key,
             at: now,
         });
@@ -1347,6 +1351,15 @@ impl Links {
         self.jobs_held.store(held, Ordering::SeqCst);
         if !held {
             self.wake_mail();
+        }
+    }
+
+    /// The daily mail cap of an account of `sharing`.
+    fn mail_cap(&self, sharing: Sharing) -> u64 {
+        match sharing {
+            Sharing::Standard => self.settings.mail_per_account,
+            Sharing::Team => self.settings.mail_per_account_team,
+            Sharing::Open => self.settings.mail_per_account_open,
         }
     }
 
@@ -1405,6 +1418,19 @@ impl Links {
             let codes_today = if code_day == day { codes_today } else { 0 };
             if wrong >= PAIR_WRONG_TRIES || codes_today >= PAIR_CODES_PER_DAY {
                 return Ok(());
+            }
+            // The caps hold for the mails of the thread too.
+            let (account_mails, relay_mails) = Links::mail_counts(tx, &job.account, day)?;
+            if account_mails >= job.account_cap || relay_mails >= self.settings.mail_per_day {
+                return Ok(());
+            }
+            for who in [job.account.as_str(), RELAY_COUNT] {
+                tx.execute(
+                    "INSERT INTO mail_count (day, account_id, mails) VALUES (?1, ?2, 1) \
+                     ON CONFLICT (day, account_id) DO UPDATE SET mails = mails + 1",
+                    params![day, who],
+                )
+                .map_err(db)?;
             }
             tx.execute(
                 "UPDATE link_address SET code_day = ?3, codes = ?4 WHERE link_id = ?1 AND address_hash = ?2",

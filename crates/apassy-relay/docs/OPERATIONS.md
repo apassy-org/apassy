@@ -2196,7 +2196,7 @@ Links for "Only these e-mail addresses" need a mail sender. Without `APASSY_CONN
 | `APASSY_CONNECT_SMTP_USER` | The submission account of the sender |
 | `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password (mode 0600, mounted read-only) |
 | `APASSY_CONNECT_SMTP_FROM` | `connect@apassy.wyderka.cc` |
-| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_ADDRESS`, `_PER_LINK` | The defaults (50, 200, 500, 500, 3, 20) unless the owner decides otherwise |
+| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_LINK` | The defaults (50, 200, 500, 500, 20) unless the owner decides otherwise |
 
 The sending domain needs its records before the first mail: SPF that names the mail server (or its relay), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
 
@@ -2204,7 +2204,7 @@ The sending domain needs its records before the first mail: SPF that names the m
 
 - `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted.
 - `the mail sender cannot start`: the system roots or the host name; no code mail is sent until a restart with a fix.
-- Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day or a restart.
+- Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day (the counts are in `links.db`, so a restart keeps them).
 
 ### 30.4 Settings of a relay that you run yourself
 

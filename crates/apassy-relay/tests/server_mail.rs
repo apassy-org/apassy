@@ -236,13 +236,6 @@ fn an_email_link_opens_only_with_the_mailed_code() {
         .unwrap()
         .clone();
     assert_eq!(row["opens"], 2);
-    // A third request in 15 minutes still works; the fourth is 429.
-    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
-    assert_eq!(
-        ask_code(&c, &link_id, ADA, &key).0,
-        429,
-        "3 requests in 15 minutes"
-    );
 }
 
 #[test]
@@ -339,11 +332,12 @@ fn five_wrong_codes_end_the_code() {
         (status, answer["error"]["code"].as_str()),
         (403, Some("code_invalid"))
     );
-    // Four wrong tries leave a new code usable.
+    // Under five tries a new code is usable. The pair has 6 wrong tries now (the right
+    // code of an ended code counts too); 3 more leave it under its 10.
     assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
     let code = smtp.wait_for(2)[1].code();
     let wrong = other_code(&code);
-    for _ in 0..4 {
+    for _ in 0..3 {
         assert_eq!(open_with(&c, &link_id, ADA, &key, &wrong, false).0, 403);
     }
     let opened = open_with(&c, &link_id, ADA, &key, &code, false);
@@ -385,18 +379,18 @@ fn the_mail_caps_hold() {
     let smtp = fake_smtp::start(false);
     let c = start_with_mail(&smtp, |cfg| {
         cfg.connect.links = LinkSettings {
-            mail_per_link: 7,
+            mail_per_link: 4,
             ..LinkSettings::default()
         };
     });
     let a = c.account("Ada");
-    // For each link and address hash: 3 in 15 minutes, for an address on the link and one
-    // that is not, with the same answer.
+    // The code requests of a link (4 an hour here): every request counts, for an address
+    // on the link and one that is not, before any look at the address.
     let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    for email in [ADA, "nobody@example.com", "third@example.com", ADA] {
+        assert_eq!(ask_code(&c, &link_id, email, &key).0, 200, "{email}");
+    }
     for email in [ADA, "nobody@example.com"] {
-        for _ in 0..3 {
-            assert_eq!(ask_code(&c, &link_id, email, &key).0, 200, "{email}");
-        }
         let (status, headers, text) = call_with_headers(
             &c.relay.url,
             EDGE_SECRET,
@@ -407,21 +401,17 @@ fn the_mail_caps_hold() {
         );
         assert_eq!(status, 429, "{email}: {text}");
         let retry: u64 = header(&headers, "retry-after").unwrap().parse().unwrap();
-        assert!((1..=900).contains(&retry), "{retry}");
+        assert!((1..=3600).contains(&retry), "{retry}");
     }
-    // For each link: 7 an hour here (the 6 above counted), also without a mail.
-    assert_eq!(ask_code(&c, &link_id, "third@example.com", &key).0, 200);
-    let (status, answer) = ask_code(&c, &link_id, "fourth@example.com", &key);
-    assert_eq!(
-        (status, answer["error"]["code"].as_str()),
-        (429, Some("rate_limited"))
-    );
+    // Another link has its own count.
+    let (other, other_key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &other, ADA, &other_key).0, 200);
     assert_eq!(smtp.wait_for(3).len(), 3);
 }
 
-/// The daily caps: each account's (counted first), then the relay's. Every code request
-/// counts, with or without a mail; above a cap every request of that link gets the same
-/// 503 `mail_unavailable`, whatever the address.
+/// The daily caps of code mails: each account's (counted first), then the relay's. They
+/// count the mails that the mail thread made; above a cap every code request of that
+/// account's links gets the same 503 `mail_unavailable`, whatever the address.
 #[test]
 fn the_daily_caps_of_an_account_and_of_the_relay_hold() {
     let smtp = fake_smtp::start(false);
@@ -436,8 +426,16 @@ fn the_daily_caps_of_an_account_and_of_the_relay_hold() {
     let b = c.account("Bea");
     let d = c.account("Dan");
     let (a_link, a_key) = email_link(&c, &a, &[ADA_NORMAL]);
-    assert_eq!(ask_code(&c, &a_link, ADA, &a_key).0, 200);
-    assert_eq!(ask_code(&c, &a_link, "nobody@example.com", &a_key).0, 200);
+    // A request for an address that is not on the link makes no mail and counts nothing.
+    for _ in 0..3 {
+        assert_eq!(ask_code(&c, &a_link, "nobody@example.com", &a_key).0, 200);
+    }
+    for count in 1..=2 {
+        assert_eq!(ask_code(&c, &a_link, ADA, &a_key).0, 200);
+        assert_eq!(smtp.wait_for(count).len(), count);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    // The account's cap (2): the same 503 for every address of its links.
     let refusals: Vec<(u16, Value)> = [ADA, "nobody@example.com", "other@example.com"]
         .iter()
         .map(|email| ask_code(&c, &a_link, email, &a_key))
@@ -460,12 +458,13 @@ fn the_daily_caps_of_an_account_and_of_the_relay_hold() {
     // Another account has its own cap, inside the relay's (3 here).
     let (b_link, b_key) = email_link(&c, &b, &["bea@example.com"]);
     assert_eq!(ask_code(&c, &b_link, "bea@example.com", &b_key).0, 200);
+    assert_eq!(smtp.wait_for(3).len(), 3);
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(ask_code(&c, &b_link, "bea@example.com", &b_key).0, 503);
     let (d_link, d_key) = email_link(&c, &d, &["dan@example.com"]);
     assert_eq!(ask_code(&c, &d_link, "dan@example.com", &d_key).0, 503);
-    let mails = smtp.wait_for(2);
     std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(smtp.mails().len(), 2, "{mails:?}");
+    assert_eq!(smtp.mails().len(), 3);
 }
 
 /// A link and address get at most 5 codes in a UTC day and 10 wrong tries over the whole
@@ -474,12 +473,7 @@ fn the_daily_caps_of_an_account_and_of_the_relay_hold() {
 #[test]
 fn a_link_and_address_get_five_codes_a_day_and_ten_wrong_tries() {
     let smtp = fake_smtp::start(false);
-    let c = start_with_mail(&smtp, |cfg| {
-        cfg.connect.links = LinkSettings {
-            mail_per_address: 100,
-            ..LinkSettings::default()
-        };
-    });
+    let c = start_with_mail(&smtp, |_| {});
     let a = c.account("Ada");
     let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
     for _ in 0..6 {
@@ -589,6 +583,7 @@ fn without_smtp_an_email_link_is_refused() {
         Some(&a.token),
         Some(&links::anyone_body(false, 3600)),
     );
+    // No link for e-mail addresses exists here: a code request finds no link.
     let (status, answer) = ask_code(
         &c,
         body["link_id"].as_str().unwrap(),
@@ -599,7 +594,7 @@ fn without_smtp_an_email_link_is_refused() {
     );
     assert_eq!(
         (status, answer["error"]["code"].as_str()),
-        (503, Some("mail_unavailable"))
+        (404, Some("not_found"))
     );
 }
 
@@ -634,6 +629,12 @@ fn a_refused_mail_waits_and_goes_after_an_hour() {
     // A mail that is not taken within an hour is deleted.
     smtp.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    // The mail thread writes the outbox row after the answer.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while links.outbox_len().unwrap() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(links.outbox_len().unwrap(), 1);
     conn.execute(
         "UPDATE mail_outbox SET created_at = ?1, next_at = ?2",
         [
@@ -733,7 +734,7 @@ fn the_mail_settings_are_checked_at_start() {
             ("APASSY_CONNECT_SMTP_FROM", "connect@apassy.wyderka.cc"),
             ("APASSY_CONNECT_SMTP_PORT", "0"),
         ],
-        vec![("APASSY_CONNECT_MAIL_PER_ADDRESS", "0")],
+        vec![("APASSY_CONNECT_MAIL_PER_LINK", "0")],
     ] {
         assert!(with(&refused).is_err(), "{refused:?}");
     }

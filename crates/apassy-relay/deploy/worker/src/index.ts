@@ -153,13 +153,6 @@ function jsonError(status: number, code: string, message: string, extra: Record<
   });
 }
 
-// A browser asks for a service worker script with `Service-Worker: script`. This origin
-// serves the viewer of public links, so it never answers one (connect-share-v1 section 5):
-// a script registered here could see every later open of a link.
-function serviceWorkerRequest(request: Request): boolean {
-  return (request.headers.get("service-worker") ?? "").trim().toLowerCase() === "script";
-}
-
 // tiny_http reads and drops the rest of a declared body after an early answer, on any
 // path (an unknown path, a wrong method, a bad token, SPEC 24.10). So the edge bounds
 // the declared `Content-Length` of every request with a body before the relay sees it:
@@ -410,10 +403,6 @@ export default {
         if (mode !== "relay") return text(404, "not found");
         return handleInternal(request, env);
       }
-    }
-    // No service worker script, on any path, before the static files and the relay.
-    if (serviceWorkerRequest(request)) {
-      return jsonError(400, "invalid_request", "This origin serves no service worker.");
     }
     // The relay refuses an upgrade on every other route too; it never reaches it from here.
     if (wantsUpgrade(request)) {

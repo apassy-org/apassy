@@ -406,11 +406,6 @@ fn open_gives_one_refusal_for_every_reason() {
                 &[],
                 Some(&body),
             );
-            if route == "code" {
-                // A relay without a mail sender answers every code request the same way.
-                assert_eq!(status, 503, "{link_id} {text}");
-                continue;
-            }
             assert_eq!(header(&headers, "referrer-policy"), Some("no-referrer"));
             answers.push((status, text));
         }
@@ -673,7 +668,7 @@ fn the_viewer_is_served_with_its_headers() {
         for (name, value) in [
             (
                 "content-security-policy",
-                "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
             ),
             ("cache-control", "no-store"),
             ("referrer-policy", "no-referrer"),
@@ -770,7 +765,7 @@ fn a_revoked_id_cannot_be_registered_again() {
     conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
         .unwrap();
     let columns: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('link_used')")
+        .prepare("SELECT name FROM pragma_table_info('link_id_used')")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -778,7 +773,7 @@ fn a_revoked_id_cannot_be_registered_again() {
         .unwrap();
     assert_eq!(columns, vec!["link_id".to_string()]);
     let used: i64 = conn
-        .query_row("SELECT count(*) FROM link_used", [], |row| row.get(0))
+        .query_row("SELECT count(*) FROM link_id_used", [], |row| row.get(0))
         .unwrap();
     assert_eq!(used, 3);
     let once = anyone_body(true, 3600);

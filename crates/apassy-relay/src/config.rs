@@ -37,12 +37,11 @@
 //! | `APASSY_CONNECT_SMTP_PORT` | Its port: 465 is TLS from the first byte, any other port STARTTLS (required) | `587` |
 //! | `APASSY_CONNECT_SMTP_USER`, `APASSY_CONNECT_SMTP_PASSWORD_FILE` | The submission account (AUTH PLAIN or LOGIN, only over TLS). Both or neither | none |
 //! | `APASSY_CONNECT_SMTP_FROM` | The sender of the code mail, such as `connect@apassy.wyderka.cc`. Required with the host: there is no default sender | none |
-//! | `APASSY_CONNECT_MAIL_PER_ADDRESS` | Code requests for one link and one address hash in 15 minutes, 1 to 100 | `3` |
 //! | `APASSY_CONNECT_MAIL_PER_LINK` | Code requests for one link in one hour, 1 to 1000 | `20` |
-//! | `APASSY_CONNECT_MAIL_PER_ACCOUNT` | Code requests of the links of one account in one UTC day (no plan, Personal, Family), 0 to 100000; counted before the relay's cap; above it every code request of that account's links answers 503 `mail_unavailable` until the day ends | `50` |
+//! | `APASSY_CONNECT_MAIL_PER_ACCOUNT` | Code mails of the links of one account in one UTC day (no plan, Personal, Family), 0 to 100000; counted before the relay's cap; above it every code request of that account's links answers 503 `mail_unavailable` until the day ends | `50` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_TEAM` | The same for a Team member, 0 to 100000 | `200` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN` | The same with `APASSY_RELAY_ACCOUNT_PLANS=open`, 0 to 1000000 | `500` |
-//! | `APASSY_CONNECT_MAIL_PER_DAY` | Code requests of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `500` |
+//! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `500` |
 //! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
@@ -148,8 +147,6 @@ pub const DEFAULT_CONNECT_LINKS: u64 = 25;
 /// The live public links of a Team member (`APASSY_CONNECT_LINKS_TEAM`).
 pub const DEFAULT_CONNECT_LINKS_TEAM: u64 = 100;
 pub const MAX_CONNECT_LINKS: u64 = 10_000;
-/// Code requests for one link and one address hash in `CODE_ADDRESS_WINDOW_SECS`.
-pub const DEFAULT_MAIL_PER_ADDRESS: u64 = 3;
 /// Code requests for one link in `CODE_LINK_WINDOW_SECS`.
 pub const DEFAULT_MAIL_PER_LINK: u64 = 20;
 /// Code mails of the relay in one UTC day.
@@ -490,13 +487,11 @@ pub struct LinkSettings {
     pub links: u64,
     /// Live links of a Team member.
     pub links_team: u64,
-    /// Code requests for one link and one address hash in 15 minutes.
-    pub mail_per_address: u64,
     /// Code requests for one link in an hour.
     pub mail_per_link: u64,
-    /// Code requests of the relay in one UTC day (`0`: none).
+    /// Code mails of the relay in one UTC day (`0`: none).
     pub mail_per_day: u64,
-    /// Code requests of the links of one account in one UTC day, by its sharing level:
+    /// Code mails of the links of one account in one UTC day, by its sharing level:
     /// no plan, Personal, or Family; Team; open plans.
     pub mail_per_account: u64,
     pub mail_per_account_team: u64,
@@ -508,7 +503,6 @@ impl Default for LinkSettings {
         Self {
             links: DEFAULT_CONNECT_LINKS,
             links_team: DEFAULT_CONNECT_LINKS_TEAM,
-            mail_per_address: DEFAULT_MAIL_PER_ADDRESS,
             mail_per_link: DEFAULT_MAIL_PER_LINK,
             mail_per_day: DEFAULT_MAIL_PER_DAY,
             mail_per_account: DEFAULT_MAIL_PER_ACCOUNT,
@@ -802,13 +796,6 @@ fn connect_from(
             DEFAULT_CONNECT_LINKS_TEAM,
             1,
             MAX_CONNECT_LINKS,
-        )?,
-        mail_per_address: number(
-            lookup,
-            "APASSY_CONNECT_MAIL_PER_ADDRESS",
-            DEFAULT_MAIL_PER_ADDRESS,
-            1,
-            100,
         )?,
         mail_per_link: number(
             lookup,
