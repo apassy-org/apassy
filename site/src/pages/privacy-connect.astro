@@ -135,8 +135,8 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
 
   <h2>Public links and the code mail</h2>
   <p>
-    A person who opens a public link needs no account and no app. Links are not in the backups of Connect, so a link
-    that expired or was revoked is gone. For a link of "Only these e-mail addresses", the reader types their address,
+    A person who opens a public link needs no account and no app. A link is a copy of the moment you made it: a later
+    change does not reach it. Links are not in the backups of Connect, so a link that expired or was revoked is gone. For a link of "Only these e-mail addresses", the reader types their address,
     and if it is on the link, Connect mails them a code of 8 digits. This is the only mail that Connect sends. It is
     plain text, from <code>connect@apassy.wyderka.cc</code>, through our mail server, which hands it to Brevo for
     delivery. Connect keeps the address only until the mail is sent, and caps the code mails of each account and of the
