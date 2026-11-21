@@ -112,6 +112,11 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
         <td>The codes of the day: until the end of the day (UTC). A code: at most 15 minutes. The rest: with the link.</td>
       </tr>
       <tr>
+        <td>For an address that got a code mail: a keyed hash of it with the number of code mails of the day. The key is a secret of Connect, not of the link.</td>
+        <td>To cap the code mails one address can get from all links (10 a day)</td>
+        <td>Until the end of the day (UTC)</td>
+      </tr>
+      <tr>
         <td>Link counters: the opens and the time of the last open, the code requests, the codes that did not open, and the code mails of each account and of Connect for the day</td>
         <td>To show you the opens, and for the limits and the daily caps of code mails</td>
         <td>With the link. The mail counts: until the end of the day (UTC).</td>
@@ -146,7 +151,7 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
     and if it is on the link, Connect mails them a code of 8 digits. The reader is often not a customer of Connect. This
     is the only mail that Connect sends. It is plain text, from <code>connect@apassy.wyderka.cc</code>, and Connect's own
     mail server delivers it straight to the reader's mail provider. Connect keeps the address only until the mail is
-    sent, and caps the code mails of each account and of the whole service each day.
+    sent, and caps the code mails of each address, of each account, and of the whole service each day.
   </p>
 
   <h2>Payments by Stripe</h2>
