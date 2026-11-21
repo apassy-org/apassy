@@ -95,7 +95,9 @@ struct ItemDetailView: View {
                             variableRow(envName)
                         }
                         if vault.hasFolders {
-                            folderRow(detail.row)
+                            ForEach(model.folderPlaces) { place in
+                                folderRow(place, of: detail.row)
+                            }
                         }
                     }
                     if let passkey = detail.passkey { passkeySection(passkey) }
@@ -206,13 +208,22 @@ struct ItemDetailView: View {
         }
     }
 
-    /// The folder: a tap opens the folder picker. Moving changes nothing else.
-    private func folderRow(_ row: ItemRow) -> some View {
-        Button {
-            ui.sheet = .moveItem(row)
+    /// One folder of the credential (or "No folder"): a tap opens Move to Folder…, Add to
+    /// Folder…, and Remove from This Folder. Moving changes nothing else.
+    private func folderRow(_ place: FolderPlace, of row: ItemRow) -> some View {
+        Menu {
+            Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(row) }
+            if !vault.folderTree.folders.isEmpty {
+                Button("Add to Folder…", systemImage: "folder.badge.plus") { ui.sheet = .addItemToFolder(row) }
+            }
+            if let folder = place.folder {
+                Button("Remove from This Folder", systemImage: "folder.badge.minus") {
+                    Task { await vault.removeFromFolder(row.id, folder: folder) }
+                }
+            }
         } label: {
             HStack(spacing: 8) {
-                LabeledContent("Folder", value: model.folderLabel)
+                LabeledContent("Folder", value: place.title)
                 Image(systemName: "chevron.forward")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.tertiary)
@@ -220,8 +231,9 @@ struct ItemDetailView: View {
             }
             .contentShape(.rect)
         }
+        .menuStyle(.button)
         .buttonStyle(.plain)
-        .accessibilityHint("Moves the credential to another folder")
+        .accessibilityHint("Moves, adds, or removes the folder")
     }
 
     /// "Always ask me" and the environment. A change that makes the bouncer less careful asks the

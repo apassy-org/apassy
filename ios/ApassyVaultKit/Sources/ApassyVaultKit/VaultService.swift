@@ -246,8 +246,14 @@ public protocol VaultService: Sendable {
     /// Delete a folder. Its credentials and subfolders go to its parent. Returns the count of
     /// credentials that moved. No credential is deleted.
     func deleteFolder(uuid: String) async throws -> Int
-    /// Put a credential in `folder` (nil: the top level).
+    /// Put a credential in `folder` alone (nil: the top level). It leaves its other folders.
     func setItemFolder(id: UInt64, folder: String?) async throws
+    /// Also put a credential in `folder`, after its other folders. A folder that it is in already
+    /// changes nothing.
+    func addItemToFolder(id: UInt64, folder: String) async throws
+    /// Take a credential out of `folder`; it stays in its other folders (none: the top level). A
+    /// folder that it is not in changes nothing.
+    func removeItemFromFolder(id: UInt64, folder: String) async throws
     /// The credentials of a paste, without a secret value (a secret field has a masked preview).
     func detect(text: String) async throws -> [DetectedCredential]
     /// Detect `text` again in the core and add the picked rows (`pick`: indexes of `detect`; nil:
@@ -369,6 +375,14 @@ public extension VaultService {
 
     func setItemFolder(id: UInt64, folder: String?) async throws {
         throw VaultError(.notAllowed, "This vault has no folders. Update Apassy.")
+    }
+
+    func addItemToFolder(id: UInt64, folder: String) async throws {
+        throw VaultError(.notAllowed, "This vault keeps a credential in one folder. Update Apassy.")
+    }
+
+    func removeItemFromFolder(id: UInt64, folder: String) async throws {
+        throw VaultError(.notAllowed, "This vault keeps a credential in one folder. Update Apassy.")
     }
 
     func detect(text: String) async throws -> [DetectedCredential] {

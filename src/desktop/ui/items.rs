@@ -318,6 +318,26 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                 {
                     super::folders::open_move_many(app);
                 }
+                if kit::small_button(ui, "Add…", Style::Bordered)
+                    .on_hover_text("Add selected credentials to a folder")
+                    .clicked()
+                {
+                    let ids = super::folders::chosen_items(app);
+                    super::folders::open_add(app, ids);
+                }
+                if let Place::Folder(Some(uuid)) = &place
+                    && app
+                        .ui
+                        .selected_items
+                        .iter()
+                        .all(|id| tree.directly_in(&place, *id).is_some())
+                    && kit::small_button(ui, "Remove", Style::Bordered)
+                        .on_hover_text("Remove selected credentials from this folder")
+                        .clicked()
+                {
+                    let ids = super::folders::chosen_items(app);
+                    super::folders::remove_items(app, &ids, uuid);
+                }
                 if kit::small_button(ui, "Clear Selection", Style::Bordered).clicked() {
                     app.ui.selected_items.clear();
                 }
@@ -325,8 +345,9 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         if !app.ui.move_undo.is_empty() {
             ui.horizontal_wrapped(|ui| {
-                kit::note(ui, format!("{} credentials moved", app.ui.move_undo.len()));
-                if kit::small_button(ui, "Undo Move", Style::Bordered)
+                let kind = app.ui.move_undo_kind;
+                kit::note(ui, kind.note(app.ui.move_undo.len()));
+                if kit::small_button(ui, kind.button(), Style::Bordered)
                     .on_hover_text(crate::shortcut!("Z"))
                     .clicked()
                 {
@@ -376,10 +397,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     );
     let mut alike_folder: BTreeMap<u64, Option<String>> = BTreeMap::new();
     for group in &alike_groups {
-        let labels: Vec<String> = group
-            .iter()
-            .map(|id| tree.path_label(tree.folder_of(*id)))
-            .collect();
+        let labels: Vec<String> = group.iter().map(|id| tree.paths_label(*id)).collect();
         let differ = labels.iter().any(|label| label != &labels[0]);
         for (id, label) in group.iter().zip(labels) {
             alike_folder.insert(*id, differ.then_some(label));
@@ -391,10 +409,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let duplicate_groups = sets_among(&duplicate_sets, &listed_ids);
     if filter == Filter::Duplicates {
         for group in &duplicate_groups {
-            let labels: Vec<String> = group
-                .iter()
-                .map(|id| tree.path_label(tree.folder_of(*id)))
-                .collect();
+            let labels: Vec<String> = group.iter().map(|id| tree.paths_label(*id)).collect();
             let differ = labels.iter().any(|label| label != &labels[0]);
             for (id, label) in group.iter().zip(labels) {
                 alike_folder
@@ -470,10 +485,11 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             })
             .collect()
     } else if grouped {
-        // The top level first, then each folder by its path.
+        // The top level first, then each folder by its path. A credential in several
+        // folders is in the group of the folder of the list, else of its first folder.
         let mut by_folder: BTreeMap<(bool, String), Vec<ListedItem>> = BTreeMap::new();
         for item in &items {
-            let folder = tree.folder_of(item.id);
+            let folder = tree.group_folder(&place, item.id);
             by_folder
                 .entry((folder.is_some(), tree.path_label(folder)))
                 .or_default()
@@ -530,6 +546,26 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
                     )
                 })
                 .inner;
+            // ADR 0047 §2: a drag onto a folder of the sidebar moves the row, or the
+            // selection that holds it; with Option (Alt on Linux) it adds.
+            let response = response.interact(egui::Sense::drag());
+            if response.drag_started() {
+                let ids = if app.ui.selected_items.len() > 1
+                    && app.ui.selected_items.contains(&item.id)
+                {
+                    app.ui.selected_items.iter().copied().collect()
+                } else {
+                    vec![item.id]
+                };
+                let label = match ids.len() {
+                    1 => item.name.clone(),
+                    count => format!("{count} credentials"),
+                };
+                egui::DragAndDrop::set_payload(
+                    ui.ctx(),
+                    super::folders::DraggedItems { ids, label },
+                );
+            }
             if app.ui.reveal_item == Some(item.id) {
                 response.scroll_to_me(Some(Align::Center));
                 app.ui.reveal_item = None;
@@ -567,6 +603,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         },
     );
+    drag_label(ui.ctx());
     let list_can_select = list_focused
         && ui.is_enabled()
         && !ui.ctx().text_edit_focused()
@@ -609,6 +646,25 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui) {
         }
         app.ui.selected_items = selection;
     }
+}
+
+/// The name of the dragged credentials, next to the pointer while a drag goes on.
+fn drag_label(ctx: &egui::Context) {
+    let Some(dragged) = egui::DragAndDrop::payload::<super::folders::DraggedItems>(ctx) else {
+        return;
+    };
+    let Some(at) = ctx.pointer_latest_pos() else {
+        return;
+    };
+    egui::Area::new(egui::Id::new("credential-drag"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(at + Vec2::new(12.0, 8.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(kit::text(&dragged.label, Font::Callout).color(kit::palette().label));
+            });
+        });
 }
 
 /// Selection follows displayed order, including folder grouping.
@@ -1122,8 +1178,13 @@ fn history_key(id: u64) -> String {
 fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let history_open = app.ui.is_expanded(&history_key(id));
+    let tree = FolderTree::load(app);
+    let can_add = tree.can_add(id);
+    let this_folder = tree.directly_in(&app.place, id).map(str::to_owned);
     let mut edit = false;
     let mut move_to = false;
+    let mut add_to = false;
+    let mut remove_from = false;
     let mut add_detail = false;
     let mut history = false;
     let mut archive = false;
@@ -1133,7 +1194,19 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
             kit::toolbar_button(ui, Some(Icon::More), "", "More actions for this credential");
         egui::Popup::menu(&more).show(|ui| {
             ui.set_min_width(200.0);
-            move_to = ui.selectable_label(false, "Move to Folder…").clicked();
+            move_to = ui
+                .selectable_label(false, super::folders::MOVE_TO_FOLDER)
+                .clicked();
+            if can_add {
+                add_to = ui
+                    .selectable_label(false, super::folders::ADD_TO_FOLDER)
+                    .clicked();
+            }
+            if this_folder.is_some() {
+                remove_from = ui
+                    .selectable_label(false, super::folders::REMOVE_FROM_FOLDER)
+                    .clicked();
+            }
             if details.details.len() < MAX_DETAILS {
                 add_detail = ui.selectable_label(false, "Add Custom Detail…").clicked();
             }
@@ -1149,14 +1222,14 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
             }
             delete = ui.selectable_label(false, "Delete…").clicked();
             // A choice with Return or Space closes the menu, as a click does.
-            if move_to || add_detail || history || archive || delete {
+            if move_to || add_to || remove_from || add_detail || history || archive || delete {
                 ui.close();
             }
         });
         // A choice closes the menu. For a keyboard user the focus goes back to "⋯", so
         // a sheet or an alert that the choice opens gives it back there, not to an item
         // of the closed menu.
-        let chosen = move_to || add_detail || history || archive || delete;
+        let chosen = move_to || add_to || remove_from || add_detail || history || archive || delete;
         if chosen && kit::keyboard_mode(ui.ctx()) {
             more.request_focus();
         }
@@ -1166,6 +1239,10 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         open_edit(app, details, false);
     } else if move_to {
         super::folders::open_move(app, id);
+    } else if add_to {
+        super::folders::open_add(app, vec![id]);
+    } else if let (true, Some(folder)) = (remove_from, &this_folder) {
+        super::folders::remove_items(app, &[id], folder);
     } else if add_detail {
         open_edit(app, details, true);
     } else if history {
@@ -1988,13 +2065,19 @@ fn shared_vaults(_app: &DesktopApp, _item_id: u64) -> Vec<String> {
 fn place_group(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetails) {
     let id = details.id;
     let tree = FolderTree::load(app);
-    let folder = tree.path_label(tree.folder_of(id));
+    // ADR 0047 §2: every folder of the credential, first folder first.
+    let label = if tree.folders_of(id).len() > 1 {
+        super::folders::FOLDERS_LABEL
+    } else {
+        "Folder"
+    };
+    let folder = tree.paths_label(id);
     let shared = shared_vaults(app, id);
     let shared = shared.join(", ");
     let mut move_to = false;
     let mut share = false;
     rows::group(ui, |s| {
-        move_to = s.chevron("Folder", &folder).clicked();
+        move_to = s.chevron(label, &folder).clicked();
         if !shared.is_empty() {
             share = s.chevron("Shared in", &shared).clicked();
         }

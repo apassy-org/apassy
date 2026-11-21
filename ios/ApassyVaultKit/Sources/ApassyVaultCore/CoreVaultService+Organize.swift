@@ -35,6 +35,14 @@ extension CoreVaultService {
         try await call("item_folder_set", ["id": id, "folder": Self.nullable(folder)])
     }
 
+    public func addItemToFolder(id: UInt64, folder: String) async throws {
+        try await call("item_folder_add", ["id": id, "folder": folder])
+    }
+
+    public func removeItemFromFolder(id: UInt64, folder: String) async throws {
+        try await call("item_folder_remove", ["id": id, "folder": folder])
+    }
+
     public func detect(text: String) async throws -> [DetectedCredential] {
         try await call("detect", ["text": text], as: Detection.self).found
     }

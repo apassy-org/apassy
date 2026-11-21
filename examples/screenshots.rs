@@ -405,6 +405,9 @@ fn seed(home: &Path) {
         ids.insert(seed.title, id);
     }
     let id = |title: &str| ids[title];
+    // ADR 0047 §2: the live Stripe key is also in Infra, so its detail names both folders.
+    v.add_item_to_folder(id("Stripe live"), &infra)
+        .expect("second folder");
 
     // Agents as in the mockup. Claude Code asks in the tour.
     let (claude, token) = v.register_agent("Claude Code").expect("agent");
