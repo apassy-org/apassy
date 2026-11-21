@@ -36,6 +36,8 @@
     { "name": "TUNNEL_NODE_LIMITER", "namespace_id": "1008", "simple": { "limit": 60, "period": 60 } }
   ],
   // /guide explicitly fetches /guide.html; do not redirect that asset back to /guide.
+  // /s explicitly fetches /share.html (the viewer of public links, connect-share-v1 section 5);
+  // the Worker adds its CSP, no-store, no-referrer, and noindex headers to it, /share.js, and /share.css.
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true, "html_handling": "none" },
   // APNS_KEY_ID is set by the owner before the deploy. The Worker secrets are EDGE_SECRET,
   // PUSH_SECRET, and APNS_KEY: set them with `wrangler secret put`, never in this file.
