@@ -13,7 +13,7 @@ export const LEGAL: Record<string, string | null> = {
   /** The postal address of the seller. */
   address: "ul. Mokra 33, 03-562 Warszawa, Poland",
   /** The EU VAT id (NIP with the prefix PL). */
-  vatId: null,
+  vatId: "PL5242920020",
   /** The e-mail address for contracts, withdrawal, refunds, and privacy requests. */
   email: "apassy@wyderka.cc",
   /** The law that governs the contract, for example "the law of Poland". */
