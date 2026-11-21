@@ -199,8 +199,12 @@ pub struct Row {
     pub added_at: Option<u64>,
     pub changed_at: Option<u64>,
     pub used_at: Option<u64>,
-    /// The folder UUID of the item; null at the top level (section 5.11).
+    /// The first folder UUID of the item (by the time it was added); null at the top
+    /// level (section 5.11).
     pub folder: Option<String>,
+    /// Every folder UUID of the item, `folder` first; empty at the top level (schema 35,
+    /// ADR 0047 §2).
+    pub folders: Vec<String>,
     /// The label of the provider of its declaration, such as "Stripe" (the Mac's tile).
     pub provider: Option<String>,
     /// Production that the owner or a signal set: the one red mark of the Mac. A default
@@ -341,6 +345,7 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         ),
         _ => false,
     };
+    let folders = vault.item_folders(id)?;
     Ok(Row {
         id,
         revision: details.summary.revision,
@@ -357,7 +362,8 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         added_at: times.and_then(|times| times.added),
         changed_at: times.and_then(|times| times.changed),
         used_at: times.and_then(|times| times.used),
-        folder: vault.item_folder(id)?,
+        folder: folders.first().cloned(),
+        folders,
         provider: super::organize::provider_label(vault.declaration_provider(id)?.as_deref()),
         production,
     })

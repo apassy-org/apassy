@@ -802,3 +802,74 @@ fn folder_and_option_changes_on_the_iphone_sync_with_the_mac() {
             .any(|(name, _, _)| name == "Billing")
     );
 }
+
+#[test]
+fn a_credential_is_in_two_folders_and_leaves_one() {
+    let root = TempDir::new().unwrap();
+    let (phone, _) = phone(&root);
+    let folder = |name: &str| {
+        call(&phone, json!({"op": "folder_create", "name": name}))["folder"]["uuid"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let work = folder("Work");
+    let home = folder("Home");
+    let id = call(
+        &phone,
+        json!({"op": "add_pasted", "folder": work,
+               "text": format!("STRIPE_SECRET_KEY={}", fake("sk_live_", 24))}),
+    )["items"][0]["id"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(row(&phone, id)["folders"], json!([work]));
+
+    // "Add to Folder…": the first folder stays `folder`, and each folder counts it.
+    call(
+        &phone,
+        json!({"op": "item_folder_add", "id": id, "folder": home}),
+    );
+    let both = row(&phone, id);
+    assert_eq!(both["folder"], json!(work));
+    assert_eq!(both["folders"], json!([work, home]));
+    let detail = call(&phone, json!({"op": "item", "id": id}));
+    assert_eq!(detail["folders"], json!([work, home]));
+    assert_eq!(detail["folder_path"], json!(["Work"]));
+    let counts: Vec<u64> = folder_names(&phone).iter().map(|f| f.2).collect();
+    assert_eq!(counts, [1, 1]);
+    // Twice is the same.
+    call(
+        &phone,
+        json!({"op": "item_folder_add", "id": id, "folder": home}),
+    );
+    assert_eq!(row(&phone, id)["folders"], json!([work, home]));
+
+    // "Remove from This Folder": the other folder stays and becomes the first.
+    call(
+        &phone,
+        json!({"op": "item_folder_remove", "id": id, "folder": work}),
+    );
+    let one = row(&phone, id);
+    assert_eq!(one["folder"], json!(home));
+    assert_eq!(one["folders"], json!([home]));
+    call(
+        &phone,
+        json!({"op": "item_folder_remove", "id": id, "folder": home}),
+    );
+    let none = row(&phone, id);
+    assert_eq!(none["folder"], Value::Null);
+    assert_eq!(none["folders"], json!([]));
+
+    // A folder or an item that is not there.
+    for request in [
+        json!({"op": "item_folder_add", "id": id, "folder": "no-such-folder"}),
+        json!({"op": "item_folder_remove", "id": id, "folder": "no-such-folder"}),
+        json!({"op": "item_folder_add", "id": 9999, "folder": home}),
+    ] {
+        assert_eq!(fails(&phone, request), "not_found");
+    }
+    assert_eq!(
+        fails(&phone, json!({"op": "item_folder_add", "id": id})),
+        "invalid_input"
+    );
+}

@@ -96,6 +96,8 @@ fn a_watch_core_refuses_every_call_but_its_own() {
         "folders",
         "folder_create",
         "item_folder_set",
+        "item_folder_add",
+        "item_folder_remove",
         "detect",
         "add_pasted",
         "item_options_set",
