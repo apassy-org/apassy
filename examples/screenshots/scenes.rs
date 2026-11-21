@@ -13,7 +13,9 @@
 //!   vault is in Apassy Connect.
 //! - `connect-links`: this computer is Alex's, an account without a plan: the Share
 //!   sheet of a credential and of a folder, a public link made through the owner check,
-//!   and Settings › Connect › Public Links.
+//!   the refusals of the sheet (the most live links, a relay that sends no e-mail codes,
+//!   a relay without the links routes), and Settings › Connect › Public Links with two
+//!   links that another vault of this computer made ("Links not in this vault (2)").
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use apassy::broker::SharedVault;
 use apassy::broker::approvals::{OwnerAction, OwnerCheck, OwnerGate, OwnerProof};
 use apassy::connect::account::{JoinPoll, JoinRequest};
+use apassy::connect::link::{LinkOptions, LinkTarget, PendingLink};
 use apassy::connect::{
     ConnectAccount, ConnectClient, MemoryKeyStore, ShareLink, ShareNames, SharePeerJoin,
     account_file,
@@ -303,8 +306,33 @@ pub fn setup(name: &str) -> Option<Scene> {
             scene.other = Some(alex);
         }
         "connect-links" => {
-            let alex = this_account(connect, &data, "Alex", "Linux desktop");
-            scene.this_account = Some(alex.state().account_id.clone());
+            let mut alex = this_account(connect, &data, "Alex", "Linux desktop");
+            let account_id = alex.state().account_id.clone();
+            // Two live links of the account that another vault of this computer holds:
+            // Settings lists them under "Links not in this vault (2)".
+            let other = Owner::new();
+            let origin = alex.client().origin().to_owned();
+            for title in ["Old router", "Lab VPN"] {
+                let pending = {
+                    let mut guard = other.shared.lock().expect("vault");
+                    let vault = guard.as_mut().expect("vault");
+                    let id = vault.add(item_draft(title)).expect("item").id;
+                    PendingLink::prepare(
+                        vault,
+                        &LinkTarget::Item(id),
+                        &origin,
+                        &account_id,
+                        &LinkOptions::default(),
+                        now(),
+                    )
+                    .expect("link")
+                };
+                let (proof, epoch) = other.proof(pending.action());
+                alex.create_public_link(pending, proof, &epoch)
+                    .map_err(|(error, _)| error)
+                    .expect("link of another vault");
+            }
+            scene.this_account = Some(account_id);
         }
         "start-join" => scene.other = Some(peer(connect, "Alex", "Alex's MacBook Pro")),
         "start-connect" => {
@@ -471,6 +499,26 @@ impl Scene {
                 self.connect
                     .answer_route_error("GET /v1/account/vaults", 503, "unavailable");
             }
+            // The refusals of the Share sheet (`connect-links`): the account has its most
+            // live links (the one of the window and the two of another vault), ...
+            "links-limit" => self.connect.set_link_limit(Some(3)),
+            // ... the relay sends no e-mail codes, ...
+            "links-no-mail" => {
+                self.connect.set_link_limit(Some(25));
+                self.connect.set_link_mail(false);
+            }
+            // ... and a relay without the links routes (a plain 404 on each).
+            "links-off" => {
+                self.connect.set_link_mail(true);
+                self.connect.set_links_marker(false);
+                for prefix in ["GET /v1/account/links", "POST /v1/account/links"] {
+                    self.connect.answer_route_error(prefix, 404, "not_found");
+                }
+            }
+            "links-on" => {
+                self.connect.clear_route_errors();
+                self.connect.set_links_marker(true);
+            }
             // A device row that the signed list does not hold.
             "unlisted-device" => {
                 let id = self.this_account.clone().expect("account");
@@ -514,6 +562,10 @@ const SECURITY_ROW: f32 = 118.0;
 const DEVICES_ROW: f32 = 166.0;
 const CONNECT_ROW: f32 = 214.0;
 const TOOLS_ROW: f32 = 310.0;
+/// Settings › Connect of `connect-links`: the disclosure "Links not in this vault (2)"
+/// under the one link of the vault, and the Revoke of the first link in it, open.
+const LINKS_GROUP: (f32, f32) = (640.0, 586.0);
+const LINKS_REVOKE: (f32, f32) = (1031.0, 620.0);
 
 /// The steps of a scene after the unlock (or the start, for `start-*`). Positions are in
 /// points of the 1100 x 760 window of scripts/screenshots-linux.sh; they were read from
@@ -704,12 +756,44 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Shot("link-sheet-folder"),
                 escape(),
                 Wait(1.0),
+                // The refusals: each new sheet asks Connect for its list again.
+                Hook("links-limit"),
+                Connect("link-item"),
+                Wait(2.5),
+                Shot("link-error-limit"),
+                escape(),
+                Wait(1.0),
+                Hook("links-no-mail"),
+                Connect("link-folder"),
+                Wait(2.5),
+                Connect("link-form"),
+                Connect("link-emails"),
+                Wait(1.0),
+                Shot("link-error-no-email"),
+                escape(),
+                Wait(1.0),
+                Hook("links-off"),
+                Connect("link-item"),
+                Wait(2.5),
+                Shot("link-error-no-links"),
+                escape(),
+                Wait(1.0),
+                Hook("links-on"),
             ]);
             steps.extend(settings);
             steps.extend([
                 Click(SETTINGS_X, CONNECT_ROW),
                 Wait(3.0),
                 Pages("link-settings"),
+                top(),
+                Wait(1.0),
+                // "Links not in this vault (2)" open, then the Revoke of its first link.
+                Click(LINKS_GROUP.0, LINKS_GROUP.1),
+                Wait(1.0),
+                Shot("link-settings-unknown-open"),
+                Click(LINKS_REVOKE.0, LINKS_REVOKE.1),
+                Wait(1.0),
+                Shot("link-settings-revoke-confirm"),
             ]);
         }
         "connect-member" => {
