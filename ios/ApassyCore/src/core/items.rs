@@ -199,8 +199,12 @@ pub struct Row {
     pub added_at: Option<u64>,
     pub changed_at: Option<u64>,
     pub used_at: Option<u64>,
-    /// The folder UUID of the item; null at the top level (section 5.11).
+    /// The first folder UUID of the item (by the time it was added); null at the top
+    /// level (section 5.11).
     pub folder: Option<String>,
+    /// Every folder UUID of the item, `folder` first; empty at the top level (schema 35,
+    /// ADR 0047 §2).
+    pub folders: Vec<String>,
     /// The label of the provider of its declaration, such as "Stripe" (the Mac's tile).
     pub provider: Option<String>,
     /// Production that the owner or a signal set: the one red mark of the Mac. A default
@@ -246,6 +250,8 @@ pub struct Context {
     times: BTreeMap<u64, apassy::vault::ItemTimes>,
     conflicts: BTreeMap<u64, Option<u64>>,
     passkeys: BTreeMap<u64, apassy::vault::passkey::PasskeyInfo>,
+    /// The folders of every item, in one read of the folder tree.
+    folders: apassy::vault::FolderIndex,
 }
 
 impl Context {
@@ -258,6 +264,7 @@ impl Context {
                 .into_iter()
                 .map(|info| (info.item_id, info))
                 .collect(),
+            folders: vault.folder_index()?,
         })
     }
 }
@@ -341,6 +348,7 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         ),
         _ => false,
     };
+    let folders = context.folders.folders(id).to_vec();
     Ok(Row {
         id,
         revision: details.summary.revision,
@@ -357,7 +365,8 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         added_at: times.and_then(|times| times.added),
         changed_at: times.and_then(|times| times.changed),
         used_at: times.and_then(|times| times.used),
-        folder: vault.item_folder(id)?,
+        folder: folders.first().cloned(),
+        folders,
         provider: super::organize::provider_label(vault.declaration_provider(id)?.as_deref()),
         production,
     })
@@ -419,7 +428,11 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
             custom: custom_detail_label(&field.name).is_some(),
         });
     }
-    let folder_path = vault.folder_path(row.folder.as_deref())?;
+    let folder_path = row
+        .folder
+        .as_deref()
+        .map(|folder| context.folders.path(folder))
+        .unwrap_or_default();
     let declaration = vault.declaration(id)?;
     let environment_source = match declaration {
         Some(_) => Some(vault.declaration_sources(id)?.environment.as_str()),

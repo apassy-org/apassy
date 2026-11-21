@@ -565,6 +565,10 @@ fn catalog(vault: &Vault, agent_id: u64) -> Value {
                 "access": access,
                 "folder": entry.folder,
             });
+            // ADR 0047 §2: the other folders of a credential in several folders.
+            if !entry.more_folders.is_empty() {
+                entry_json["more_folders"] = json!(entry.more_folders);
+            }
             let code = vault.code_field(entry.item_id).ok().flatten();
             entry_json["has_code"] = json!(code.is_some());
             if code.is_some() {
