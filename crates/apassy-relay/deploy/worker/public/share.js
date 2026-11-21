@@ -139,7 +139,8 @@ function validResult(result) {
 // ---------------------------------------------------------------------------
 // The page. `env` holds what the page uses of the browser, so a test can give a fake one:
 // `location` (`hash`, `origin`, `pathname`), `history` (`replaceState`), `fetch`, `document`,
-// `clipboard` (optional), `now` (milliseconds), and `window` (optional, for `hashchange`).
+// `clipboard` (optional), `now` (milliseconds), `window` (optional, for `hashchange`), and
+// `crypto` (optional; the page's own `crypto` when it is not given).
 // ---------------------------------------------------------------------------
 
 export function start(env) {
@@ -182,6 +183,19 @@ export function start(env) {
     message("Too many tries", "Wait a minute, then try again.");
   }
 
+  // A 400 on an open: the page and the server do not agree. A new try cannot help.
+  function refusedRequest() {
+    message("This link does not open here", "Ask the person who sent it for a new link.");
+  }
+
+  // A 503 mail_unavailable: the server cannot send codes now, for any address. A new try now cannot help.
+  function mailOff() {
+    message(
+      "Apassy cannot send codes now",
+      "Try again tomorrow, or ask the person who sent the link for another way to get it.",
+    );
+  }
+
   async function post(path, body) {
     let response;
     try {
@@ -206,17 +220,29 @@ export function start(env) {
     if (response.status === 429) return { kind: "limited" };
     if (response.status === 403 && envelope?.error?.code === "code_invalid") return { kind: "code_invalid" };
     if (response.status === 400) return { kind: "invalid" };
+    if (response.status === 503 && envelope?.error?.code === "mail_unavailable") return { kind: "mail_off" };
+    // Another 4xx is a refusal that a new try does not change; a 5xx or a body that is not
+    // the envelope may change.
+    if (response.status >= 400 && response.status < 500) return { kind: "invalid" };
     if (!response.ok || envelope?.ok !== true) return { kind: "network" };
     return { kind: "ok", result: envelope.result };
   }
 
   async function run() {
     const key = keyFromFragment(env.location.hash);
-    // The key leaves the address bar before the first request, so it is not in the history
-    // entry, a bookmark, or a screen share of the address bar.
+    // Take the key out of the address bar before the first request. replaceState changes the
+    // URL of the current entry of this tab's history only: a reload, a bookmark made from now
+    // on, and the address bar no longer show the key. The browser may already have written the
+    // whole link to its global history, and to the sync of that history, when the tab opened it.
     if (env.location.hash) env.history.replaceState(null, "", env.location.pathname || "/s");
     if (!key) {
       message("This link is not complete", "Copy the whole link, with the part after #, and open it again.");
+      return;
+    }
+    // WebCrypto exists only in a secure context: HTTPS, or a page of localhost.
+    if (!(env.crypto ?? globalThis.crypto)?.subtle) {
+      key.fill(0);
+      message("This link opens only over HTTPS", "Open the link as it was sent: its address starts with HTTPS.");
       return;
     }
     show(h("p", { "data-state": "loading" }, "Opening…"));
@@ -229,10 +255,13 @@ export function start(env) {
     const answer = await post(`/v1/links/${link.linkId}/open`, body);
     if (answer.kind === "gone") return gone();
     if (answer.kind === "limited") return limited();
+    if (answer.kind === "invalid") return refusedRequest();
     if (answer.kind === "code_invalid") {
       return askCode(link, body.email, "The code is not right, or it ended. Check it, or send a new code.", link.meta);
     }
-    if (answer.kind !== "ok" || !validResult(answer.result)) return failed(() => open(link, body));
+    if (answer.kind !== "ok") return failed(() => open(link, body));
+    // An answer of another form: a new try gets the same.
+    if (!validResult(answer.result)) return refusedRequest();
     const result = answer.result;
     link.meta = result;
     const withCode = body.code !== null;
@@ -280,6 +309,7 @@ export function start(env) {
       if (answer.kind === "gone") return gone();
       if (answer.kind === "limited") return limited();
       if (answer.kind === "invalid") return askAddress(link, result, "This is not an e-mail address. Check it.");
+      if (answer.kind === "mail_off") return mailOff();
       if (answer.kind !== "ok") return failed(() => askAddress(link, result));
       askCode(link, email, null, result);
     });
@@ -304,14 +334,14 @@ export function start(env) {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       const code = String(input.value ?? "").replace(/\s+/g, "");
-      if (!/^[0-9]{6}$/.test(code)) return;
+      if (!/^[0-9]{8}$/.test(code)) return;
       open(link, { confirm: true, email, address_key: link.addressKey, code });
     });
     const again = h("button", { type: "button", class: "secondary", "data-action": "new-code" }, "Send a New Code");
     again.addEventListener("click", () => askAddress(link, result ?? { one_time: false }));
     show(
       h("h1", null, "Check your mail"),
-      h("p", null, `If ${email} may open this link, a code is on its way. It works for 10 minutes.`),
+      h("p", null, `If ${email} may open this link, a code of 8 digits is on its way. It works for 15 minutes.`),
       oneTime ? h("p", null, "This link shows its content once. After you open it, nobody can open it again.") : null,
       note ? h("p", { class: "note", "data-note": "" }, note) : null,
       form,
@@ -353,7 +383,8 @@ export function start(env) {
   }
 
   function content(snapshot, result) {
-    if (document.title !== undefined) document.title = `${snapshot.title} · Apassy`;
+    // The title of the page stays "Shared with Apassy": it goes to the browser's history, its
+    // sync, and the tab list, so it never holds the name of a secret.
     const items = snapshot.items.map((item) =>
       h(
         "section",
@@ -362,7 +393,7 @@ export function start(env) {
         h(
           "p",
           { class: "muted" },
-          [KINDS[item.kind] ?? "Item", ...(item.path.length ? [item.path.join(" › ")] : [])].join(" · "),
+          [Object.hasOwn(KINDS, item.kind) ? KINDS[item.kind] : "Item", ...(item.path.length ? [item.path.join(" › ")] : [])].join(" · "),
         ),
         ...item.fields.map((entry) => field(entry)),
         item.notes ? h("p", { class: "notes" }, item.notes) : null,

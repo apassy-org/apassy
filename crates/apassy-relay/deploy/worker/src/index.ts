@@ -19,6 +19,8 @@
 // nothing reaches the relay), and the agent proxy `/p/` has the JSON cap (the relay has no
 // proxy there and answers 410). `/dl/*`, `/guide`, `/install.sh`, and the viewer of public
 // links (`/s` with `/share.js` and `/share.css`, connect-share-v1 section 5) are the same in both.
+// In both, a request with `Service-Worker: script` is refused on every path, and an answer of
+// the agent proxy `/p/` loses `Service-Worker-Allowed` and gets the CSP `sandbox` (section 5.1).
 // Any other value is a configuration error: 503 on every relay route, 404 on
 // `/internal/*`; the static files stay. The deploy refuses a RELAY_MODE that differs from
 // the mode of the relay (scripts/check-relay-mode.mjs).
@@ -304,9 +306,26 @@ const VIEWER_FILES = new Map([
   ["/share.css", "/share.css"],
 ]);
 
+// Whoever runs a script at this origin can read the key in the fragment of a public link
+// (connect-share-v1 section 5.1). So no service worker is registered here: a browser fetches the
+// script of one with `Service-Worker: script`, and every such request is refused, on every
+// path. And a page of the agent proxy never runs with this origin's rights: its answers lose
+// `Service-Worker-Allowed` and get the CSP `sandbox`, an opaque origin.
+function isServiceWorkerScript(request: Request): boolean {
+  return (request.headers.get("service-worker") ?? "").trim().toLowerCase() === "script";
+}
+
+function proxyResponse(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.delete("service-worker-allowed");
+  headers.append("content-security-policy", "sandbox");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 /** The headers of the viewer's three answers: no other origin, no inline code, no cache, no referrer, no index. */
 const VIEWER_HEADERS: Record<string, string> = {
-  "content-security-policy": "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "content-security-policy":
+    "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
   "cache-control": "no-store",
   "referrer-policy": "no-referrer",
   "x-robots-tag": "noindex, nofollow",
@@ -357,6 +376,9 @@ function limiterFor(method: string, path: string, env: Env): CreateLimiter | und
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Check the raw path before URL parsing removes dot segments or backslashes.
+    if (isServiceWorkerScript(request)) {
+      return jsonError(400, "invalid_request", "This origin registers no service worker.");
+    }
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
     const url = new URL(request.url);
     const mode = relayMode(env);
@@ -521,7 +543,8 @@ export default {
       // The body and the answer stream. Nothing is buffered, and no URL is logged:
       // the path holds session keys. A tunnel upgrade keeps its headers, and the relay's
       // `101` (with its WebSocket) is returned as it is.
-      return await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
+      const response = await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
+      return url.pathname.startsWith(PROXY_PREFIX) ? proxyResponse(response) : response;
     } catch {
       return text(502, "relay unreachable");
     }

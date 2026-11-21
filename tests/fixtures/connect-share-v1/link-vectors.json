@@ -65,6 +65,50 @@
       }
     },
     {
+      "name": "one_time_anyone",
+      "key_b64u": "6bCotzjK0gJP-wbIm9I2bLoLX5MxwqlCFY32qZQ8K2E",
+      "link": "https://apassy-relay.wyderka.cc/s#v1.6bCotzjK0gJP-wbIm9I2bLoLX5MxwqlCFY32qZQ8K2E",
+      "link_id": "1ac01aa483a6423cd7c29886f228ad1f",
+      "seal_key_hex": "5e258f71e502707d47994b507aac08d5af0c7fbfe57bf8c9617070961b4f1aeb",
+      "address_key_b64u": "OCce_2trqLam3oVtYnPp3c3MclrxqaObSNMZUSVsErs",
+      "expires_at": 1764334800,
+      "one_time": true,
+      "access": "anyone",
+      "snapshot": {
+        "v": 1,
+        "title": "Deploy token",
+        "items": [
+          {
+            "title": "Deploy token",
+            "kind": "api_key",
+            "path": [],
+            "fields": [
+              {
+                "name": "Token",
+                "value": "synthetic-token-0004",
+                "secret": true
+              }
+            ],
+            "notes": ""
+          }
+        ]
+      },
+      "json_length": 176,
+      "plaintext_b64u": "eyJ2IjoxLCJ0aXRsZSI6IkRlcGxveSB0b2tlbiIsIml0ZW1zIjpbeyJ0aXRsZSI6IkRlcGxveSB0b2tlbiIsImtpbmQiOiJhcGlfa2V5IiwicGF0aCI6W10sImZpZWxkcyI6W3sibmFtZSI6IlRva2VuIiwidmFsdWUiOiJzeW50aGV0aWMtdG9rZW4tMDAwNCIsInNlY3JldCI6dHJ1ZX1dLCJub3RlcyI6IiJ9XX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA",
+      "associated_data_b64u": "YXBhc3N5LWNvbm5lY3QgcHVibGljLWxpbmsgdjEAaHR0cHM6Ly9hcGFzc3ktcmVsYXkud3lkZXJrYS5jYwAxYWMwMWFhNDgzYTY0MjNjZDdjMjk4ODZmMjI4YWQxZgAxNzY0MzM0ODAwADEAYW55b25l",
+      "nonce_hex": "1dc05adb23ba6291a897d8d8",
+      "sealed_b64u": "HcBa2yO6YpGol9jYbeaFGeF6sG7FcqcxansvGWSsKMDaIcoe-EcCshPZurVRBJllmudUuuhOURIdN6Z7INzpSwEDsXQUpaGurH1FWWBiYySZfVkMeCWUuPmOKA9JlGemKGJsFP4AU_xu8sHD3davTAQPxPm6AnYGmtzEQBeQuemX9kJxC_ULvKJCfwEKyySoVpGar_jcd8w9DrGKzpdTz3trfArgUmt6S5-k9zLIkp455pbm5-_glVt6rQFKfNx2j9w2SjYYQZjfOx_6sB8svCHdwwBwJ3nsNrgask3l8rHohC5eN2LKUXfSFF5dhMZRSWX_KsuUh2dh2gkSw_fwSkNKP0en5wZLvNbmYUiJD9ogl4Ut9VnD9SWLHvtF00IWmp1dgwyYz695SNSL0c9StOKHcWiUCGrytgNxo1W3MWsrgrMrm2J1mFLOo7mt4pKGSiiixSwCmdAV1g__E7XZltFulMfK9jDiYAnXGvIS_fwYcV6RrqNYDIQ8_8yxvTPa2vvCpLWdxS53QJB5eG3Qf8HzwkULVsutdIqHA9i3h9SDYzG75yLra_O6UjreZeYjoEppvVbal5JEgErEd5GXa1C2BpljCImq627qoSCmh6IQRO_hIHALJUqmiq4rceY6OyyuddFpBCS7DBQinqn00gDMptDYvT2IoCFlNSth9s__DcpGFGm8whiEN6AirY-ZNKHoKiX2UPI_baUbZPBufwPGO1HO5k_1cEI3mImZ3U3kl6My4xXKaJoCSiSO8psf-VUrkQrQEzIxglGmzZE1oAYviZq_2QxhHQcFPCtXWDL-D04QhRty_FbEWXiMPWcpUuPtxghQJnRJtUv6pWPNzyrF94LKmjz5PY3BFUQQ1MNV_sell5xJTkzhCTan5gVpgLcUObG-jhwzbPFlYT5sbSbACol8CmjilVqWDxNUjvq4FiQwEoHuSu0BdnjKRB6PnnL817b-m49ogf5Dy69v1fbmwIhGcLXwzCoXcd61DI6aMz6l_Fa169KbX3y9CO2gGF1OtjT43dgVyh7E57QIrTzcS4lBdKrcvQ5ArgbgoKVnHqucCdi4ExrExp0n2lCRU0OTEfGD1MMVYEOCXepx9MIMv6HGACtMWsjns8nQ77amV3J_97zUegE_uBLcA6-Os-ZYOz1-BaxBsvTFyGti82zGomN4qCFAHKuDagEUNyQGPaHebQkn-7_qrGTj1XuIfC7NA77ebLe-GnAa4LRDhpgfISA80jFY4JatzNgLmxxDfCg9k1QNgSxKVW-LEpzBAE4PbqUNheOj-jKwko0V5PF0LKIBpHltJPXvF_xNbysMlKaiQGjkwhZ4Pc_TVSuhdEajUs2SEv3lWflv3YEYlRoi7eVzOYiXOfSV1A2enF1_B-4ayb9CjVNd9vM",
+      "addresses": [],
+      "create": {
+        "link_id": "1ac01aa483a6423cd7c29886f228ad1f",
+        "sealed": "HcBa2yO6YpGol9jYbeaFGeF6sG7FcqcxansvGWSsKMDaIcoe-EcCshPZurVRBJllmudUuuhOURIdN6Z7INzpSwEDsXQUpaGurH1FWWBiYySZfVkMeCWUuPmOKA9JlGemKGJsFP4AU_xu8sHD3davTAQPxPm6AnYGmtzEQBeQuemX9kJxC_ULvKJCfwEKyySoVpGar_jcd8w9DrGKzpdTz3trfArgUmt6S5-k9zLIkp455pbm5-_glVt6rQFKfNx2j9w2SjYYQZjfOx_6sB8svCHdwwBwJ3nsNrgask3l8rHohC5eN2LKUXfSFF5dhMZRSWX_KsuUh2dh2gkSw_fwSkNKP0en5wZLvNbmYUiJD9ogl4Ut9VnD9SWLHvtF00IWmp1dgwyYz695SNSL0c9StOKHcWiUCGrytgNxo1W3MWsrgrMrm2J1mFLOo7mt4pKGSiiixSwCmdAV1g__E7XZltFulMfK9jDiYAnXGvIS_fwYcV6RrqNYDIQ8_8yxvTPa2vvCpLWdxS53QJB5eG3Qf8HzwkULVsutdIqHA9i3h9SDYzG75yLra_O6UjreZeYjoEppvVbal5JEgErEd5GXa1C2BpljCImq627qoSCmh6IQRO_hIHALJUqmiq4rceY6OyyuddFpBCS7DBQinqn00gDMptDYvT2IoCFlNSth9s__DcpGFGm8whiEN6AirY-ZNKHoKiX2UPI_baUbZPBufwPGO1HO5k_1cEI3mImZ3U3kl6My4xXKaJoCSiSO8psf-VUrkQrQEzIxglGmzZE1oAYviZq_2QxhHQcFPCtXWDL-D04QhRty_FbEWXiMPWcpUuPtxghQJnRJtUv6pWPNzyrF94LKmjz5PY3BFUQQ1MNV_sell5xJTkzhCTan5gVpgLcUObG-jhwzbPFlYT5sbSbACol8CmjilVqWDxNUjvq4FiQwEoHuSu0BdnjKRB6PnnL817b-m49ogf5Dy69v1fbmwIhGcLXwzCoXcd61DI6aMz6l_Fa169KbX3y9CO2gGF1OtjT43dgVyh7E57QIrTzcS4lBdKrcvQ5ArgbgoKVnHqucCdi4ExrExp0n2lCRU0OTEfGD1MMVYEOCXepx9MIMv6HGACtMWsjns8nQ77amV3J_97zUegE_uBLcA6-Os-ZYOz1-BaxBsvTFyGti82zGomN4qCFAHKuDagEUNyQGPaHebQkn-7_qrGTj1XuIfC7NA77ebLe-GnAa4LRDhpgfISA80jFY4JatzNgLmxxDfCg9k1QNgSxKVW-LEpzBAE4PbqUNheOj-jKwko0V5PF0LKIBpHltJPXvF_xNbysMlKaiQGjkwhZ4Pc_TVSuhdEajUs2SEv3lWflv3YEYlRoi7eVzOYiXOfSV1A2enF1_B-4ayb9CjVNd9vM",
+        "expires_at": 1764334800,
+        "one_time": true,
+        "access": "anyone",
+        "address_hashes": []
+      }
+    },
+    {
       "name": "one_time_emails",
       "key_b64u": "_lWDG7mEeg0v9gsGDimfWMKgJLNw-nFGF51uoAthjpc",
       "link": "https://apassy-relay.wyderka.cc/s#v1._lWDG7mEeg0v9gsGDimfWMKgJLNw-nFGF51uoAthjpc",
@@ -151,67 +195,163 @@
   "addresses": [
     {
       "input": " Ada.Lovelace@Example.COM ",
-      "normalized": "ada.lovelace@example.com"
+      "normalized": "ada.lovelace@example.com",
+      "note": "white space and case"
     },
     {
       "input": "\tgrace@BÜCHER.example.\n",
-      "normalized": "grace@xn--bcher-kva.example"
+      "normalized": "grace@xn--bcher-kva.example",
+      "note": "IDNA and a trailing dot"
     },
     {
       "input": "o'brien+tag@sub.example.org",
-      "normalized": "o'brien+tag@sub.example.org"
+      "normalized": "o'brien+tag@sub.example.org",
+      "note": "no provider rule for + or dots"
     },
     {
-      "input": "no-at-sign.example",
-      "normalized": null
+      "input": "user@straße.example",
+      "normalized": "user@xn--strae-oqa.example",
+      "note": "ß stays (non-transitional) and becomes Punycode"
     },
     {
-      "input": "two@at@example.com",
-      "normalized": null
+      "input": "user@STRASSE.example",
+      "normalized": "user@strasse.example",
+      "note": "ss is another domain than ß"
     },
     {
-      "input": "@example.com",
-      "normalized": null
+      "input": "user@example。com",
+      "normalized": "user@example.com",
+      "note": "the full-width dot maps to ."
     },
     {
-      "input": "dot.@example.com",
-      "normalized": null
+      "input": "user@ＥＸＡＭＰＬＥ.com",
+      "normalized": "user@example.com",
+      "note": "full-width letters map to ASCII"
     },
     {
-      "input": "a..b@example.com",
-      "normalized": null
+      "input": "user@example.com。",
+      "normalized": "user@example.com",
+      "note": "a trailing full-width dot is a trailing dot"
     },
     {
-      "input": "zoë@example.com",
-      "normalized": null
+      "input": "user@example.com..",
+      "normalized": null,
+      "note": "only one trailing dot goes"
     },
     {
-      "input": "space in@example.com",
-      "normalized": null
+      "input": "user@xn--bcher-kva.example",
+      "normalized": "user@xn--bcher-kva.example",
+      "note": "valid Punycode stays"
     },
     {
-      "input": "user@localhost",
-      "normalized": null
+      "input": "user@xn--a.example",
+      "normalized": null,
+      "note": "Punycode that is not valid"
+    },
+    {
+      "input": "user@a.0x10",
+      "normalized": null,
+      "note": "the last label starts with a letter"
     },
     {
       "input": "user@192.168.0.1",
-      "normalized": null
+      "normalized": null,
+      "note": "an all-digit top label"
+    },
+    {
+      "input": "user@example.c0m",
+      "normalized": "user@example.c0m",
+      "note": "a top label that starts with a letter"
+    },
+    {
+      "input": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "normalized": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "note": "a label of 63 bytes"
+    },
+    {
+      "input": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "normalized": null,
+      "note": "a label of 64 bytes"
+    },
+    {
+      "input": "u@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example",
+      "normalized": "u@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example",
+      "note": "a domain of 252 bytes: the address has 254"
+    },
+    {
+      "input": "u@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example",
+      "normalized": null,
+      "note": "a domain of 253 bytes: the address would have 255"
+    },
+    {
+      "input": "u@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example",
+      "normalized": null,
+      "note": "a domain of 254 bytes"
+    },
+    {
+      "input": "no-at-sign.example",
+      "normalized": null,
+      "note": "no @"
+    },
+    {
+      "input": "two@at@example.com",
+      "normalized": null,
+      "note": "two @"
+    },
+    {
+      "input": "@example.com",
+      "normalized": null,
+      "note": "no local part"
+    },
+    {
+      "input": "dot.@example.com",
+      "normalized": null,
+      "note": "a local part that ends with a dot"
+    },
+    {
+      "input": "a..b@example.com",
+      "normalized": null,
+      "note": "two dots in the local part"
+    },
+    {
+      "input": "zoë@example.com",
+      "normalized": null,
+      "note": "a local part that is not ASCII"
+    },
+    {
+      "input": "space in@example.com",
+      "normalized": null,
+      "note": "white space inside"
+    },
+    {
+      "input": "user@localhost",
+      "normalized": null,
+      "note": "one label"
     },
     {
       "input": "user@-bad-.example",
-      "normalized": null
+      "normalized": null,
+      "note": "a label that starts or ends with -"
     },
     {
       "input": "user@exa_mple.com",
-      "normalized": null
+      "normalized": null,
+      "note": "an underscore"
     },
     {
       "input": "user@[127.0.0.1]",
-      "normalized": null
+      "normalized": null,
+      "note": "an address literal"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "note": "a local part of 64 characters"
     },
     {
       "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
-      "normalized": null
+      "normalized": null,
+      "note": "a local part of 65 characters"
     }
   ]
 }

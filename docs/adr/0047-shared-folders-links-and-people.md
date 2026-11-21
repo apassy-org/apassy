@@ -80,13 +80,19 @@ e-mail address that shows in the other person's app until it is revoked, with ed
 - `link_id` is the first 16 bytes of HKDF-SHA256 of `K`. The snapshot is JSON, padded to a multiple
   of 1024 bytes, sealed with AES-256-GCM under a second HKDF key. The associated data binds the
   origin, the id, the expiry, the one-time flag, and the access mode. The plaintext is at most 32 KiB.
-- The link is `<Connect origin>/s#v1.<K>`. The key is only in the fragment. No server gets it.
+- The link is `<Connect origin>/s#v1.<K>`. The key is only in the fragment. No server gets it. The
+  origin is `https:` (`http://localhost` and `http://127.0.0.1` only for tests); the app makes no link
+  for another origin. A new content always gets a new `K`, and Connect stores each link id once: a
+  tombstone of every id it ever stored refuses its reuse.
 - **Two access modes**, as in 1Password:
   - "Anyone with the link".
   - "Only these e-mail addresses". The sharer names 1 to 20 addresses. Connect keeps only their
     hashes, under a key that comes from `K`. The viewer asks for the reader's address; Connect checks
-    it against the hashes and mails a one-time code to it; only after the code does Connect give the
-    sealed form. Connect answers the same whether or not the address is on the link.
+    it against the hashes and mails a one-time code of 8 digits to it; only after the code does
+    Connect give the sealed form. Connect answers a code request before it looks at the address, so
+    the answer is the same whether or not the address is on the link. A pair of link and address has
+    10 wrong tries over the life of the link and 5 codes a day; each sharing account has a daily cap
+    of code mails (50, or 200 on Team).
 - Connect keeps the sealed form in `links.db`, a file of its own that is not in the backups. A link
   that expired or was revoked is deleted there, and no backup brings it back.
 - The page `/s` is one static page with one script and one style file. It reads the fragment, takes
@@ -100,6 +106,14 @@ e-mail address that shows in the other person's app until it is revoked, with ed
 - Creating a link needs the owner check `CreatePublicLink`, which names the secrets, the expiry, the
   one-time flag, the access mode, and the addresses. Revoking needs none. The vault keeps each link
   in `public_link` (synced), so every device of the owner lists, copies, and revokes it.
+- **No other script of the origin.** Whoever serves a script at the link's origin can read `K`. So
+  a relay that serves links registers no service worker (it refuses every request with
+  `Service-Worker: script`), and the answers of its agent proxy `/p/` run sandboxed, in an opaque
+  origin. It never redirects `/s`.
+- The app checks the size of the snapshot (32 KiB) before the owner check and says how many of the
+  chosen secrets fit.
+- **For a secret that matters** the app recommends "Show once" or "Only these e-mail addresses": a
+  plain link stays readable for whoever finds it until it ends (section "What this does not protect").
 - A relay that you run yourself serves the same page and routes. The link works where that relay is
   reachable. "Only these e-mail addresses" needs a mail sender on that relay.
 
@@ -161,7 +175,7 @@ sharer can confirm: the share key syncs with the vault.
 #### 5.4 The e-mail address of an account
 
 - An address is optional. A person needs it only to accept an invitation.
-- `PUT /v1/account/email` sends a six-digit code to the address. The code lives 15 minutes and takes 5
+- `PUT /v1/account/email` sends a code of 8 digits to the address. The code lives 15 minutes and takes 5
   tries. One verified address for each account. An address that another account verified later moves
   to that account.
 - Connect sends this mail, the invitation mail, and the code mail of a public link (section 4). Each
@@ -315,6 +329,8 @@ Two releases of all six components.
   iPhone cannot accept a share in this version.
 - Sharer, recipient, and link reader use the same Connect origin.
 - Accounts without a plan become common. The caps for new accounts need a new look.
+- The Connect origin serves no script but the viewer's: no service worker, and the agent proxy `/p/`
+  only sandboxed.
 - Hard to undo: the schema steps, the link format while links live, the signed formats once logs
   exist at Connect, the stored addresses, and the published limits.
 
@@ -322,7 +338,16 @@ Two releases of all six components.
 
 - A person keeps what they saw or copied. An end removes the secrets from a cooperating app at its
   next sync. Change a secret that matters.
-- Anyone with a public link of "Anyone with the link" reads the secret until the link ends.
+- Anyone with a public link of "Anyone with the link" reads the secret until the link ends. A link
+  leaves copies where it travels: the browser's global history and the sync of that history (the
+  viewer takes the key out of the address bar, but the browser may have written the whole link
+  before), and the link rewriters and scanners of mail and chat services, which keep or open the
+  links in a message. For a secret that matters, use "Show once" (a scanner that opens the page does
+  not say yes) or "Only these e-mail addresses".
+- Whoever serves `/share.js` at the link's origin can read `K` and the secret: the operator of
+  Connect, its edge, or whoever controls the origin. The page is open source, and section 4 keeps
+  other scripts of the origin out, but a reader's browser runs the script that the origin serves at
+  that moment.
 - "Only these e-mail addresses" is a check of Connect. A Connect that does not keep its rules can give
   the sealed form to anyone who has the link. Without the link it opens nothing.
 - Whoever controls a named address (its mail account or its domain) can open a link of that address

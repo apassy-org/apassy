@@ -7488,7 +7488,6 @@ mod connect_share_v1 {
         if !local_ok || local.starts_with('.') || local.ends_with('.') || local.contains("..") {
             return None;
         }
-        let domain = domain.strip_suffix('.').unwrap_or(domain);
         if domain.is_empty()
             || domain
                 .chars()
@@ -7496,7 +7495,10 @@ mod connect_share_v1 {
         {
             return None;
         }
-        let domain = idna::domain_to_ascii(domain).ok()?;
+        // UTS #46 ToASCII, non-transitional; then one trailing dot goes, so a mapped
+        // full-width dot counts as one too.
+        let ascii = idna::domain_to_ascii(domain).ok()?;
+        let domain = ascii.strip_suffix('.').unwrap_or(&ascii);
         let labels: Vec<&str> = domain.split('.').collect();
         if domain.len() > 253 || labels.len() < 2 {
             return None;
@@ -7509,7 +7511,8 @@ mod connect_share_v1 {
                 && !label.starts_with('-')
                 && !label.ends_with('-')
         };
-        if !labels.iter().all(label_ok) || labels.last()?.bytes().all(|byte| byte.is_ascii_digit())
+        if !labels.iter().all(label_ok)
+            || !labels.last()?.starts_with(|c: char| c.is_ascii_lowercase())
         {
             return None;
         }
@@ -7541,7 +7544,7 @@ fn connect_share_v1_link_vector_opens() {
     assert_eq!(v["pad"], PAD);
     let origin = v["origin"].as_str().unwrap();
     let links = v["links"].as_array().unwrap();
-    assert_eq!(links.len(), 2);
+    assert_eq!(links.len(), 3);
     for link in links {
         let name = link["name"].as_str().unwrap();
         let key = unb64u(link["key_b64u"].as_str().unwrap());
@@ -7714,9 +7717,45 @@ fn connect_share_v1_address_hash_vectors() {
         assert_eq!(
             normalize(input).as_deref(),
             case["normalized"].as_str(),
-            "{input:?}"
+            "{input:?}: the Rust implementation is the reference (contract section 6)"
         );
     }
+    // The edge cases of section 9 are all in the vectors.
+    let normal = |input: &str| {
+        cases
+            .iter()
+            .find(|case| case["input"] == input)
+            .unwrap_or_else(|| panic!("{input:?} is not in the vectors"))["normalized"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        normal("user@straße.example").as_deref(),
+        Some("user@xn--strae-oqa.example")
+    );
+    assert_eq!(
+        normal("user@example。com").as_deref(),
+        Some("user@example.com")
+    );
+    assert_eq!(normal("user@xn--a.example"), None);
+    assert_eq!(normal("user@a.0x10"), None);
+    let label = |length: usize| format!("user@{}.example", "a".repeat(length));
+    assert!(normal(&label(63)).is_some());
+    assert_eq!(normal(&label(64)), None);
+    let lengths: Vec<(usize, bool)> = cases
+        .iter()
+        .filter(|case| {
+            case["note"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("a domain of")
+        })
+        .map(|case| {
+            let input = case["input"].as_str().unwrap();
+            (input.len() - "u@".len(), case["normalized"].is_string())
+        })
+        .collect();
+    assert_eq!(lengths, [(252, true), (253, false), (254, false)]);
     let mut seen = std::collections::BTreeSet::new();
     for link in v["links"].as_array().unwrap() {
         let key = unb64u(link["key_b64u"].as_str().unwrap());
@@ -7765,6 +7804,10 @@ fn connect_share_v1_defines_its_codes_and_limits() {
         "| Live links on a relay that you run yourself | no plan limit |",
         "| Expiry | 10 minutes to 30 days; the app's default is 7 days |",
         "| Padded plaintext | 1 KiB to 32 KiB, a multiple of 1 KiB |",
+        "| A code | 8 digits, 15 minutes, 5 tries, one live code for each link and address |",
+        "| Wrong tries of a link and address | 10 over the life of the link;",
+        "| Codes of a link and address | 5 each UTC day,",
+        "| Code mails of a sharing account, each UTC day | 50 for an account without a plan, on Connect Personal, or on Connect Family; 200 for a Connect Team member;",
     ] {
         assert!(
             CONTRACT.contains(row),
@@ -7775,4 +7818,18 @@ fn connect_share_v1_defines_its_codes_and_limits() {
         PLANS.contains("| Public links, live at once | 25 | 25 | 25 | 100 | no limit |"),
         "plans.md lacks the link row"
     );
+    // The requirements on a relay that unit R builds against (sections 4.1, 4.5, 5, 5.1).
+    for text in [
+        "`Service-Worker: script`, on every path, with `400 invalid_request`",
+        "has no `Service-Worker-Allowed` header",
+        "carries `Content-Security-Policy: sandbox`",
+        "a relay MUST NOT redirect these three paths",
+        "Connect MUST NOT store or log `address_key`",
+        "`link_id_used` in `links.db`: the id only, no account, no time, never deleted",
+        "require-trusted-types-for 'script'; trusted-types 'none'",
+        "The answer comes before any look at the addresses.",
+        "The scheme is `https:`; `http:` only for `http://localhost` and `http://127.0.0.1`",
+    ] {
+        assert!(CONTRACT.contains(text), "connect-share-v1 lacks {text:?}");
+    }
 }

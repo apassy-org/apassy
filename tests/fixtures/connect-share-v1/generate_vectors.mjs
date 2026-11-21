@@ -8,7 +8,10 @@
 //     node tests/fixtures/connect-share-v1/generate_vectors.mjs
 //
 // The output is deterministic: the link keys and nonces are fixed, so a new run gives the
-// same file. tests/contracts.rs checks it with `ring`, and the viewer test
+// same file. For the address normal form the Rust implementation (`idna::domain_to_ascii`,
+// `connect_share_v1::normalize` in tests/contracts.rs) is the reference (contract section 6):
+// the WHATWG URL parser here gives the same results for every case below, and the Rust test
+// fails if one of them differs. tests/contracts.rs checks it with `ring`, and the viewer test
 // (crates/apassy-relay/deploy/worker/test/share.test.ts) opens it with WebCrypto.
 
 import { createHash } from "node:crypto";
@@ -62,18 +65,20 @@ export function normalizeAddress(text) {
   const [local, rawDomain] = parts;
   if (!/^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~.]{1,64}$/.test(local)) return null;
   if (local.startsWith(".") || local.endsWith(".") || local.includes("..")) return null;
-  let domain = rawDomain.endsWith(".") ? rawDomain.slice(0, -1) : rawDomain;
   // ASCII is limited to letters, digits, dots and hyphens before the IDNA step.
-  if (domain === "" || /[\u0000-,/:-@[-`{-\u007f]/.test(domain)) return null;
+  if (rawDomain === "" || /[\u0000-,/:-@[-`{-\u007f]/.test(rawDomain)) return null;
+  let domain;
   try {
-    domain = new URL("http://" + domain + "/").hostname;
+    domain = new URL("http://" + rawDomain + "/").hostname;
   } catch {
     return null;
   }
+  // One trailing dot goes after the ASCII step, so a mapped full-width dot counts too.
+  if (domain.endsWith(".")) domain = domain.slice(0, -1);
   const labels = domain.split(".");
   if (domain.length > 253 || labels.length < 2) return null;
   if (!labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
-  if (/^[0-9]+$/.test(labels[labels.length - 1])) return null;
+  if (!/^[a-z]/.test(labels[labels.length - 1])) return null;
   const address = local.toLowerCase() + "@" + domain;
   return address.length <= 254 ? address : null;
 }
@@ -156,6 +161,26 @@ const links = [
     },
   }),
   await link({
+    name: "one_time_anyone",
+    expires_at: 1764334800,
+    one_time: true,
+    access: "anyone",
+    addresses: [],
+    snapshot: {
+      v: 1,
+      title: "Deploy token",
+      items: [
+        {
+          title: "Deploy token",
+          kind: "api_key",
+          path: [],
+          fields: [{ name: "Token", value: "synthetic-token-0004", secret: true }],
+          notes: "",
+        },
+      ],
+    },
+  }),
+  await link({
     name: "one_time_emails",
     expires_at: 1764331800,
     one_time: true,
@@ -190,23 +215,51 @@ const links = [
   }),
 ];
 
+/** A domain of exactly `length` bytes: labels of 63 bytes, then the rest, then `example`. */
+function domainOf(length) {
+  const labels = [];
+  let left = length - "example".length;
+  while (left > 64) {
+    labels.push("a".repeat(63));
+    left -= 64;
+  }
+  labels.push("b".repeat(left - 1));
+  return [...labels, "example"].join(".");
+}
+
 const addressCases = [
-  " Ada.Lovelace@Example.COM ",
-  "\tgrace@BÜCHER.example.\n",
-  "o'brien+tag@sub.example.org",
-  "no-at-sign.example",
-  "two@at@example.com",
-  "@example.com",
-  "dot.@example.com",
-  "a..b@example.com",
-  "zoë@example.com",
-  "space in@example.com",
-  "user@localhost",
-  "user@192.168.0.1",
-  "user@-bad-.example",
-  "user@exa_mple.com",
-  "user@[127.0.0.1]",
-  "a".repeat(65) + "@example.com",
+  [" Ada.Lovelace@Example.COM ", "white space and case"],
+  ["\tgrace@BÜCHER.example.\n", "IDNA and a trailing dot"],
+  ["o'brien+tag@sub.example.org", "no provider rule for + or dots"],
+  ["user@straße.example", "ß stays (non-transitional) and becomes Punycode"],
+  ["user@STRASSE.example", "ss is another domain than ß"],
+  ["user@example。com", "the full-width dot maps to ."],
+  ["user@ＥＸＡＭＰＬＥ.com", "full-width letters map to ASCII"],
+  ["user@example.com。", "a trailing full-width dot is a trailing dot"],
+  ["user@example.com..", "only one trailing dot goes"],
+  ["user@xn--bcher-kva.example", "valid Punycode stays"],
+  ["user@xn--a.example", "Punycode that is not valid"],
+  ["user@a.0x10", "the last label starts with a letter"],
+  ["user@192.168.0.1", "an all-digit top label"],
+  ["user@example.c0m", "a top label that starts with a letter"],
+  ["user@" + "a".repeat(63) + ".example", "a label of 63 bytes"],
+  ["user@" + "a".repeat(64) + ".example", "a label of 64 bytes"],
+  ["u@" + domainOf(252), "a domain of 252 bytes: the address has 254"],
+  ["u@" + domainOf(253), "a domain of 253 bytes: the address would have 255"],
+  ["u@" + domainOf(254), "a domain of 254 bytes"],
+  ["no-at-sign.example", "no @"],
+  ["two@at@example.com", "two @"],
+  ["@example.com", "no local part"],
+  ["dot.@example.com", "a local part that ends with a dot"],
+  ["a..b@example.com", "two dots in the local part"],
+  ["zoë@example.com", "a local part that is not ASCII"],
+  ["space in@example.com", "white space inside"],
+  ["user@localhost", "one label"],
+  ["user@-bad-.example", "a label that starts or ends with -"],
+  ["user@exa_mple.com", "an underscore"],
+  ["user@[127.0.0.1]", "an address literal"],
+  ["a".repeat(64) + "@example.com", "a local part of 64 characters"],
+  ["a".repeat(65) + "@example.com", "a local part of 65 characters"],
 ];
 
 const vectors = {
@@ -216,7 +269,7 @@ const vectors = {
   tags: { id: TAG_ID, key: TAG_KEY, address: TAG_ADDRESS, seal: TAG_SEAL },
   pad: PAD,
   links,
-  addresses: addressCases.map((input) => ({ input, normalized: normalizeAddress(input) })),
+  addresses: addressCases.map(([input, note]) => ({ input, normalized: normalizeAddress(input), note })),
 };
 
 writeFileSync(OUT, JSON.stringify(vectors, null, 2) + "\n");

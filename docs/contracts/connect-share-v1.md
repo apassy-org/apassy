@@ -1,6 +1,6 @@
 # Connect share contract v1
 
-Date: 2026-11-21. Status: frozen for implementation of release A of [ADR 0047](../adr/0047-shared-folders-links-and-people.md) (public links); not built. Release B (shares with a person) adds its sections later; section 12 reserves their names.
+Date: 2026-11-21, revised on 2026-11-21 before any code (review of PR #165: codes of 8 digits and a life budget of wrong tries, mail caps of each account, service workers and the agent proxy, a tombstone of each link id, `https:` origins, the uniform code answer, the size check and the retry of a creation, the address normal form with the Rust implementation as its reference). Status: frozen for implementation of release A of [ADR 0047](../adr/0047-shared-folders-links-and-people.md) (public links); not built. Release B (shares with a person) adds its sections later; section 12 reserves their names.
 Fixtures: [`tests/fixtures/connect-share-v1/`](../../tests/fixtures/connect-share-v1/), made by `generate_vectors.mjs` with WebCrypto and checked with `ring` by `contracts::connect_share_v1_*` in `tests/contracts.rs`, and by the viewer test `crates/apassy-relay/deploy/worker/test/share.test.ts`.
 Decision: [ADR 0047](../adr/0047-shared-folders-links-and-people.md) sections 4 and 6; [ADR 0037](../adr/0037-own-relay-open-source.md) section 1, D2, D3; [plans](../product/plans.md) section 3.
 
@@ -11,10 +11,11 @@ This contract defines the public link: what the Mac or Linux computer seals, the
 - **The key is only in the link.** The device that makes a link makes a key `K` of 32 random bytes. `K` is in the fragment of the link and nowhere at Connect. Connect keeps the sealed form, the link id, the times, the flags, the address hashes, and counts. It never gets `K`, the seal key, a value, or a name of the snapshot.
 - **A link is a snapshot.** A later change of a secret does not reach a link. A new link is a new key.
 - Every account may make links, also an account without a plan (ADR 0047 section 6). The limits are in section 7.
-- **One answer for a link that does not open.** An unknown, expired, revoked, or opened one-time link is `404 not_found`, with the same body, on every public route.
+- **One answer for a link that does not open.** An unknown, expired, revoked, or opened one-time link is `404 not_found`, with the same body, on every public route. So is a link id that Connect stored once and no longer has (section 4.1).
 - Connect deletes the sealed form at the expiry, at a revoke, at the first open of a one-time link, and with the account. Links are in a file of their own (`links.db`) that is not in the backups of the relay, so no backup brings a link back.
 - Requests are strict, as in connect-account-v1 section 1: unknown, duplicate, and missing fields are `400 invalid_request`. A client ignores unknown fields in a result.
 - The routes of this contract exist where the account routes of connect-account-v1 exist. Elsewhere they answer `404 not_found`. A relay that you run yourself serves the same routes and the same page.
+- **No script of the origin but the viewer's.** Whoever serves a script at the origin of a link can read `K` from the fragment. So a relay that serves links MUST keep any other script of its origin from running with that origin's rights (section 5.1): no service worker, and no page of the agent proxy `/p/` with the origin's rights.
 
 ## 2. Encodings
 
@@ -23,14 +24,14 @@ The encodings of connect-account-v1 section 2 apply: b64u without padding, lower
 | Value | Form |
 | --- | --- |
 | Link key `K` | 32 random bytes; in the link as b64u (43 characters) |
-| Link | `<origin>/s#v1.<K>`. `origin` is the Connect origin of the account, as the app stores it (relay-sync-v1 section 3) and as a browser shows it in `location.origin`: lowercase scheme and host, the port only when it is not the default, no path, no trailing slash. The hosted link is `https://apassy-relay.wyderka.cc/s#v1.<K>` |
+| Link | `<origin>/s#v1.<K>`. `origin` is the Connect origin of the account, as the app stores it (relay-sync-v1 section 3) and as a browser shows it in `location.origin`: lowercase scheme and host, the port only when it is not the default, no path, no trailing slash. The scheme is `https:`; `http:` only for `http://localhost` and `http://127.0.0.1` with or without a port, for tests. The app makes no link for another origin (a node origin, an address of a LAN, a `.onion` name): a browser has no WebCrypto there, or the origin is not the one that the reader can reach. The hosted link is `https://apassy-relay.wyderka.cc/s#v1.<K>` |
 | Link id | 32 lowercase hex: the first 16 bytes of HKDF (section 3) with the info `apassy-connect public-link id v1` |
 | Sealed form | b64u of the 12-byte nonce followed by the AES-256-GCM ciphertext and its 16-byte tag |
 | Access mode | `anyone` ("Anyone with the link") or `emails` ("Only these e-mail addresses") |
 | One-time flag | JSON `true` or `false`; in the associated data `1` or `0` |
 | Address key | b64u of 32 bytes of HKDF with the info `apassy-connect public-link address v1` (43 characters) |
 | Address hash | b64u of HMAC-SHA256 under the address key of the link over the normal form of the address (section 6), 43 characters |
-| Code | 6 decimal digits, made by Connect |
+| Code | 8 decimal digits, made by Connect from a uniform random number |
 | Link state | `live`, or `opened` for a one-time link after its open |
 
 ## 3. Keys, associated data, and the sealed form
@@ -43,8 +44,8 @@ The encodings of connect-account-v1 section 2 apply: b64u without padding, lower
   | `apassy-connect public-link key v1` | 32 bytes | the AES-256-GCM seal key |
   | `apassy-connect public-link address v1` | 32 bytes | the address key (section 6) |
 
-- **The associated data** is these parts joined with one `0x00` byte, no trailing `0x00`: `apassy-connect public-link v1`, the origin, the link id (hex), the expiry (decimal), the one-time flag (`1` or `0`), and the access mode. A viewer builds it from the answer of the open (section 4.4) and from `location.origin`. So a Connect that changes the expiry, the flag, or the mode of a link, or a link that is opened at another origin, does not open.
-- **The nonce** is 12 random bytes. A device seals once with one key.
+- **The associated data** is these parts joined with one `0x00` byte, no trailing `0x00`: `apassy-connect public-link v1`, the origin, the link id (hex), the expiry (decimal), the one-time flag (`1` or `0`), and the access mode. A viewer builds it from the answer of the open (section 4.4) and from `location.origin`. So a Connect that changes the expiry, the flag, or the mode of a link, or a link that is opened at another origin, does not open. The origin stays in the associated data although the viewer reads it from the page: a relay MUST NOT redirect `/s`, `/share.js`, or `/share.css` (section 5), and a copy of the page at another origin opens no link.
+- **The nonce** is 12 random bytes. A device seals once with one key: new content, also the same secret after a change, always gets a new `K`, so a new link id and a new nonce.
 - **The snapshot** is one JSON object in UTF-8:
 
   ```json
@@ -65,6 +66,7 @@ The encodings of connect-account-v1 section 2 apply: b64u without padding, lower
   A snapshot never holds a one-time-code seed, a passkey field, an archived credential, the history, an item id, a folder outside the shared folder, or a secret that the account received from someone else.
 - **Padding.** The plaintext is the JSON text followed by spaces (`0x20`) up to the next multiple of 1024 bytes, at least 1024 and at most 32768. JSON allows the spaces, so a reader parses the whole plaintext. Without the padding Connect would see the length of the names and values.
 - The sealed form of 32768 bytes of plaintext is 32796 bytes, 43728 characters of b64u, so the creation body stays below the JSON limit of 64 KiB with the address hashes.
+- **The app checks the size before the owner check.** A snapshot whose padded plaintext would exceed 32768 bytes is refused before `CreatePublicLink` is asked, and the app says how many of the chosen secrets fit (the most, in the order of the list, whose snapshot fits). It never cuts a value.
 
 ## 4. Routes
 
@@ -89,7 +91,8 @@ The public routes refuse an `Authorization` header with `400 invalid_request`. E
 - `expires_at` is at least 540 and at most 2592060 seconds after Connect's clock (10 minutes to 30 days, with 60 seconds for the clocks). Else `400 invalid_request`.
 - `access` `anyone` has `address_hashes` `[]`. `access` `emails` has 1 to 20 distinct address hashes. Else `400 invalid_request`. A relay without a mail sender (section 10) refuses `emails` with `503 mail_unavailable`.
 - Over the live links of the account (section 7) the answer is `403 link_limit`, and nothing is kept. An opened one-time link does not count.
-- The same `link_id` with the same body from the same account answers the stored view again, so a lost answer can be sent again. Any other body with a known id is `409 conflict`.
+- **A link id is used once.** Connect keeps a tombstone of every link id that it ever stored (`link_id_used` in `links.db`: the id only, no account, no time, never deleted). A creation with a used id is `409 conflict`, also after the link expired or was revoked. The public routes answer `404 not_found` for it.
+- **Retry.** The device that sends a creation keeps the exact body (the same `K`, the same sealed form) until it gets an answer. The same `link_id` with the same body from the same account, while the link lives, answers the stored view again, so a lost answer can be sent again. Any other body with a used id is `409 conflict`. A device that gets `409 conflict` for its own retry reads `GET /v1/account/links`: a link that is listed was made; one that is not was not, and the device makes a new `K` for another try.
 - The answer is the view of the link (section 4.2).
 
 The device that makes a link keeps it in the vault table `public_link` ([vault-v1](vault-v1.md), schema 35) with `K`, so each device of the owner lists it, copies the link again, and revokes it. The app makes a link only after the owner check `CreatePublicLink`, which names the secrets, the expiry, the one-time flag, the access mode, and the addresses (ADR 0047 section 4).
@@ -115,7 +118,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 {"confirm":false,"email":null,"address_key":null,"code":null}
 ```
 
-- `email`, `address_key`, and `code` are all `null` or all set. They are set only for a link with the access `emails`, after a code (section 4.5); else `400 invalid_request`.
+- `email`, `address_key`, and `code` are all `null` or all set. They are set only for a link with the access `emails`, after a code (section 4.5); else `400 invalid_request`. When set, `email` has a normal form (section 6), `address_key` is 32 bytes, and `code` is 8 decimal digits; else `400 invalid_request`. Connect MUST NOT store or log `address_key` here either.
 - The answer:
 
   ```json
@@ -135,7 +138,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
   | `emails`, one-time | a valid code and `confirm` `true` | the sealed form; the code is used and Connect deletes the sealed form in the same transaction |
 
 - So a link of `anyone` that is not one-time opens with one request, and a one-time link opens only after the reader said yes. Of two opens of a one-time link at the same moment, one gets the sealed form and the other `404 not_found`.
-- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, and a code that ended are `403 code_invalid`. Each `403 code_invalid` of a live code counts a try; the fifth ends the code.
+- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, a code that ended, and a pair of link and address that used its wrong tries (section 7) are `403 code_invalid`, after the same work. Each `403 code_invalid` for an address of the link counts a try of the live code (the fifth ends the code) and a wrong try of the pair over the life of the link (the tenth ends codes for that pair: no new code is sent to that address for that link, and the answers stay the same).
 - An unknown, expired, revoked, or opened link is `404 not_found` (section 1), before any other check of the body except its form.
 
 ### 4.5 `POST /v1/links/{link_id}/code`
@@ -144,25 +147,33 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 {"email":"ada.lovelace@example.com","address_key":"<b64u>"}
 ```
 
-- For a live link with the access `emails`. Any other link is `404 not_found`.
-- `email` is the text that the reader typed. Connect makes its normal form (section 6); a text that has none is `400 invalid_request`. `address_key` is the address key of the link (32 bytes).
-- When the address hash is one of the link, Connect makes a code, ends the code before for that link and address, and sends the mail of section 10. When it is not, Connect sends nothing.
-- **The answer is the same in both cases**: `{"expires_in":600}`, after the same work. Only the person who reads the mail learns that the address may open the link.
-- The limits of section 7 count every request, with or without a mail, so a `429 rate_limited` tells nothing about an address either.
-- A relay without a mail sender answers `503 mail_unavailable`.
+- **The answer comes before any look at the addresses.** Connect checks, in this order and only these: the form of the body; that `email` has a normal form (section 6; else `400 invalid_request`) and `address_key` is 32 bytes; that the link is live and has the access `emails` (else `404 not_found`); that the relay has a mail sender and that neither the daily mail cap of the sharing account nor the one of the relay is reached (else `503 mail_unavailable`); and the code requests of the link (section 7; else `429 rate_limited`). None of these depends on the address. It then answers `{"expires_in":900}` and hands the normal form, the address key, and the link id in memory to the mail thread.
+- **The mail thread** makes the address hash and compares it with the hashes of the link. When it is one of them, and the pair of link and address has codes left for the UTC day and wrong tries left over the life of the link (section 7), it makes a code, ends the code before for that pair, writes the code row and the outbox row (section 10) in one transaction, and counts the mail for the account and the relay. Otherwise it writes nothing and sends nothing. The request has its answer before any of this, so both paths are the same on the wire and in time.
+- Only the person who reads the mail learns that the address may open the link.
+- Above a mail cap, every code request of that link gets `503 mail_unavailable`, whatever the address, until the UTC day ends.
+- Connect MUST NOT store or log `address_key`: it lives in the memory of the request and of the mail thread only, and goes when the thread has handled it.
 
 ## 5. The viewer page `/s`
 
-- Connect serves the page at `<origin>/s`, with its script at `/share.js` and its style at `/share.css`. Only `GET` and `HEAD`. The hosted page comes from the edge Worker (`crates/apassy-relay/deploy/worker/public/`); a relay that you run yourself serves the same three files.
-- Headers of the three answers: `Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex, nofollow`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`. The page has no inline script, no inline style, and no event attribute.
-- The script has no dependency and no build step. It uses WebCrypto only.
+- Connect serves the page at `<origin>/s`, with its script at `/share.js` and its style at `/share.css`. Only `GET` and `HEAD`, each answered with the file itself: a relay MUST NOT redirect these three paths. The hosted page comes from the edge Worker (`crates/apassy-relay/deploy/worker/public/`); a relay that you run yourself serves the same three files.
+- Headers of the three answers: `Content-Security-Policy: default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex, nofollow`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`. The page has no inline script, no inline style, and no event attribute.
+- The page has one fixed title, "Shared with Apassy". It never shows the name of a secret or a folder in the title, which goes to the browser's history, its sync, and the tab list.
+- The script has no dependency and no build step. It uses WebCrypto only. Without `crypto.subtle` (a page that is not in a secure context) it says that the link opens only over HTTPS, and sends nothing.
 - Its steps:
-  1. It reads the fragment and takes it out of the address bar (`history.replaceState` to `/s`) before any request.
+  1. It reads the fragment and takes it out of the address bar (`history.replaceState` to `/s`) before any request. This changes the URL of the current entry of the tab's history only: the browser may have written the whole link to its global history, and to the sync of that history, when the tab opened it.
   2. It derives the link id, the seal key, and the address key, and sends `POST /v1/links/{link_id}/open` to its own origin with `confirm` `false`. It loads nothing from another origin; for a link of `anyone` that is not one-time, this is its only request.
   3. A one-time link: it says that the content shows once, and opens with `confirm` `true` only after the reader's yes.
   4. A link of `emails`: it asks for the address, sends `POST /v1/links/{link_id}/code`, asks for the code, and opens with the code (and `confirm` `true`; for a one-time link it says first that the content shows once).
   5. It builds the associated data from the answer and `location.origin`, opens the sealed form, refuses a snapshot whose expiry has passed by the reader's clock, and shows the items. Secret values stay hidden until the reader asks; "Copy" writes one value to the clipboard.
-- One text for every `404`: the link does not open; it may have expired, been revoked, or been opened already. A sealed form that does not open gets the same text. The page never names which case it was.
+- One text for every `404`: the link does not open; it may have expired, been revoked, or been opened already. A sealed form that does not open gets the same text. The page never names which case it was. A `400` (an address without a normal form) and a `503 mail_unavailable` have texts of their own, and only an answer that a new try can change (no answer, a `5xx` other than `mail_unavailable`) offers "Try Again".
+
+### 5.1 Other scripts of the origin
+
+A relay that serves links MUST hold these, on its own listener and at its edge:
+
+- It refuses every request that carries the header `Service-Worker: script`, on every path, with `400 invalid_request`. A browser sends that header only to fetch the script of a service worker; so no service worker is registered at the origin, and none can answer for `/s` or `/share.js`.
+- Every answer of the agent proxy `/p/` (relay SPEC section 12) has no `Service-Worker-Allowed` header (the relay removes one that the upstream sent) and carries `Content-Security-Policy: sandbox` in addition to any policy of the upstream. So a page that the proxy relays runs in an opaque origin, never with the rights of the link's origin.
+- It serves no other HTML or script at that origin with the origin's rights. The routes of relay-sync-v1 and connect-account-v1 answer JSON or bytes.
 - It writes every text of the snapshot as text, never as markup. It keeps nothing: no storage, no cookie. It never asks for a password, a passphrase, or an account.
 
 ## 6. Addresses
@@ -172,12 +183,15 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 1. Remove white space (space, tab, CR, LF) at the start and at the end.
 2. The text holds exactly one `@`. Before it is the local part, after it the domain.
 3. The local part has 1 to 64 characters of `` A-Z a-z 0-9 ! # $ % & ' * + - / = ? ^ _ ` { | } ~ . ``, does not start or end with `.`, and has no `..`. It becomes lowercase (ASCII). Nothing else changes: no dot or `+` rule of one mail provider.
-4. The domain loses one trailing `.`. Its ASCII characters are only `A-Z a-z 0-9 . -`. It becomes its ASCII form by UTS #46 (non-transitional, as URL hosts: `idna::domain_to_ascii`, `new URL("http://" + domain).hostname`). The result has at most 253 bytes and at least two labels, each label 1 to 63 of `a-z 0-9 -` and not starting or ending with `-`, and the last label is not all digits (no address literal).
-5. The result `local@domain` has at most 254 bytes.
+4. The ASCII characters of the domain are only `A-Z a-z 0-9 . -`. The domain becomes its ASCII form by UTS #46 ToASCII, non-transitional (so `ß` stays and becomes `xn--…`, and `。` becomes `.`), as `idna::domain_to_ascii` of the crate `idna` 1.1 does. A domain that it refuses (for example a label `xn--a` that is not valid Punycode) has no normal form. Then the ASCII form loses one trailing `.`.
+5. The result has at most 253 bytes and at least two labels, each label 1 to 63 bytes of `a-z 0-9 -` that does not start or end with `-`, and the last label starts with a letter `a-z` (so no address literal, no `a.0x10`, no all-digit top label).
+6. The result `local@domain` has at most 254 bytes. So the longest domain that has a normal form is 252 bytes long, with a local part of one character.
 
 A text without a normal form is not an address: the app does not take it, and Connect answers `400 invalid_request`.
 
-**The address hash** is the HMAC-SHA256 of the normal form (UTF-8) under the address key of the link, as b64u. The address key comes from `K`, so the hashes of two links differ for one address, and the hashes in `links.db` do not give an address to someone without the link. Connect learns the address key of a link when a reader asks for a code (section 4.5), and the address in that request.
+**The reference is the Rust implementation** of these steps, with `idna::domain_to_ascii` (the test helper `connect_share_v1::normalize` in `tests/contracts.rs` and the code of the app and the relay). The vectors of section 9 give its results. Another implementation (the generator's WHATWG URL parser) MUST give the same results for the vectors, and on a difference the Rust result is the normal form.
+
+**The address hash** is the HMAC-SHA256 of the normal form (UTF-8) under the address key of the link, as b64u. The address key comes from `K`, so the hashes of two links differ for one address, and the hashes in `links.db` do not give an address to someone without the link. Connect learns the address key of a link when a reader asks for a code (section 4.5), and the address in that request. Connect MUST NOT store or log the address key. A Connect that keeps it anyway can test guessed addresses against the hashes of that one link (trust model, "Public links").
 
 ## 7. Limits
 
@@ -189,9 +203,12 @@ A text without a normal form is not an address: the app does not take it, and Co
 | Expiry | 10 minutes to 30 days; the app's default is 7 days |
 | Padded plaintext | 1 KiB to 32 KiB, a multiple of 1 KiB |
 | Addresses of a link | 1 to 20 |
-| A code | 10 minutes, 5 tries, one live code for each link and address |
-| Code requests | 3 in 15 minutes for each link and address hash, 20 an hour for each link, also without a mail |
-| Code mails of a relay | a daily cap of the operator (default 500); above it `503 mail_unavailable` until the day ends |
+| A code | 8 digits, 15 minutes, 5 tries, one live code for each link and address |
+| Wrong tries of a link and address | 10 over the life of the link; then no new code for that address and that link, and every answer stays the same |
+| Codes of a link and address | 5 each UTC day, counted by the mail thread; above it no mail, and the answer stays the same |
+| Code requests of a link | 20 an hour, every request counted, before any look at the address; then `429 rate_limited` |
+| Code mails of a sharing account, each UTC day | 50 for an account without a plan, on Connect Personal, or on Connect Family; 200 for a Connect Team member; a setting of the operator on a relay with open plans. Counted before the cap of the relay; above it `503 mail_unavailable` for every code request of the account's links |
+| Code mails of a relay, each UTC day | a cap of the operator (default 500); above it `503 mail_unavailable` until the day ends |
 | Worker, for each IPv4 address or IPv6 /64 (`LINK_LIMITER`) | 30 opens and 5 code requests a minute, then `429 rate_limited` with `Retry-After: 60` |
 
 The plan limits are Connect's settings with these defaults. The live links of an account count in the transaction that adds one. When a plan ends, the links stay until their expiry; a new link counts against the new limit.
@@ -204,18 +221,19 @@ The codes of relay-sync-v1 and connect-account-v1 section 4 keep their meaning: 
 | --- | --- | --- |
 | 403 | `link_limit` | `POST /v1/account/links` over the live links of the account (section 7) |
 | 403 | `code_invalid` | `POST /v1/links/{link_id}/open` with a code that is not the live code of this link and address, also for an address that is not on the link and a code that ended |
-| 503 | `mail_unavailable` | A link of `emails` or a code request on a relay without a mail sender, or above its daily mail cap |
+| 503 | `mail_unavailable` | A link of `emails` or a code request on a relay without a mail sender; a code request above the daily mail cap of the sharing account or of the relay, the same for every address |
 
 A `403 link_limit` names the limit and never a price or a purchase hint: the iPhone shows no plan change (connect-billing-v1 section 10).
 
 ## 9. Test vectors
 
-`tests/fixtures/connect-share-v1/link-vectors.json` holds two links of the origin `https://apassy-relay.wyderka.cc`, synthetic keys only:
+`tests/fixtures/connect-share-v1/link-vectors.json` holds three links of the origin `https://apassy-relay.wyderka.cc`, synthetic keys only:
 
 - `anyone`: one secret, not one-time, access `anyone`.
+- `one_time_anyone`: one secret, one-time, access `anyone`.
 - `one_time_emails`: a folder of two secrets, one of them in a subfolder, one-time, access `emails`, with two addresses.
 
-Each link has its key, the link text, the link id, the seal key, the address key, the snapshot, the JSON length, the padded plaintext, the associated data, the nonce, the sealed form, its addresses with their normal forms and hashes, and the body of `POST /v1/account/links`. The list `addresses` holds texts with their normal form, or `null` when there is none. `generate_vectors.mjs` makes the file with WebCrypto in Node and gives the same file at each run.
+Each link has its key, the link text, the link id, the seal key, the address key, the snapshot, the JSON length, the padded plaintext, the associated data, the nonce, the sealed form, its addresses with their normal forms and hashes, and the body of `POST /v1/account/links`. The list `addresses` holds texts with their normal form, or `null` when there is none, and a `note` for the edge cases: white space and case, `ß` (non-transitional), `。`, a trailing dot, Punycode that is not valid (`xn--a`), `a.0x10`, an all-digit top label, labels of 63 and 64 bytes, and domains of 252, 253, and 254 bytes. `generate_vectors.mjs` makes the file with WebCrypto in Node and gives the same file at each run.
 
 ## 10. Connect mail
 
@@ -227,12 +245,12 @@ Connect sends one kind of mail in this release: the code of section 4.5.
   ```text
   Subject: Your Apassy code
 
-  Your code to open a shared Apassy item: 123456
+  Your code to open a shared Apassy item: 12345678
 
-  It works for 10 minutes. If you did not ask for it, ignore this mail.
+  It works for 15 minutes. If you did not ask for it, ignore this mail.
   ```
 
-- The relay writes the mail to an outbox in `links.db` and a sender hands it to the SMTP server of the operator (submission with TLS). A sent mail leaves the outbox at once; a mail that cannot be sent within one hour is deleted. The address is in the outbox only, never in a log.
+- The mail thread of section 4.5 writes the mail to an outbox in `links.db`, and a sender hands it to the SMTP server of the operator (submission with TLS). A sent mail leaves the outbox at once; a mail that cannot be sent within one hour is deleted. The address is in the outbox only, never in a log.
 - A relay without a mail sender has no `emails` links (section 4.1).
 
 ## 11. What Connect stores
@@ -241,11 +259,14 @@ Connect sends one kind of mail in this release: the code of section 4.5.
 | --- | --- | --- |
 | `links.db`, link row | The link id, the account id, the times, the one-time flag, the access mode, `opens`, `last_opened_at`, the sealed form | Until the expiry, the revoke, or the account's deletion. A one-time link loses its sealed form and its address hashes at its open; its row stays until its expiry, for the list of section 4.2 |
 | `links.db`, address hashes | The address hashes of a link of `emails` | With the link |
-| `links.db`, codes | A hash of each code with the link id, the address hash, its expiry, and its tries | 10 minutes, or the fifth wrong try, or its use |
+| `links.db`, codes | A hash of each code with the link id, the address hash, its expiry, and its tries | 15 minutes, or the fifth wrong try, or its use |
+| `links.db`, pairs | For each link and address hash that got a code: the wrong tries over the life of the link, and the codes of the UTC day | With the link |
+| `links.db`, used ids | Every link id that Connect ever stored, alone | Never deleted |
+| `links.db`, mail counts | The code mails of each account and of the relay for the UTC day | Until the day ends |
 | `links.db`, outbox | The address and the text of a code mail | Until it is sent, at most 1 hour |
-| Memory | The counts of section 7 | Their window |
+| Memory | The other counts of section 7; the address key and the normal form of a code request, until the mail thread has handled it | Their window |
 
-`links.db` is not in the backups of the relay. Connect never stores `K`, the seal key, or a client address with a link id.
+`links.db` is not in the backups of the relay. Connect never stores `K`, the seal key, an address key, or a client address with a link id.
 
 ## 12. Reserved for release B
 
