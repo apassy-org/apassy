@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::ConnectError;
 use super::trust::ListEntry;
-use crate::sync::relay::{ApiError, call, call_in_scope, call_without_busy_retries, json_request};
+use crate::sync::relay::{
+    ApiError, call, call_in_scope, call_marked, call_without_busy_retries, json_request,
+};
 use crate::sync::relay_http::Request;
 use crate::sync::{RelayUrl, SyncError};
 
@@ -1010,6 +1012,49 @@ impl ConnectClient {
             format!("/v1/account/vaults/{team_id}"),
             Some(token),
         ))
+    }
+
+    // ---- Public links (connect-share-v1 sections 4.1 to 4.3, `super::link`). ----
+
+    /// `POST /v1/account/links` with the exact body of the pending link.
+    pub(super) fn create_link(
+        &self,
+        token: &str,
+        body: &super::link::CreateBody,
+    ) -> Result<super::link::LinkView, ConnectError> {
+        self.post("/v1/account/links", Some(token), body)
+    }
+
+    /// `GET /v1/account/links`.
+    pub(super) fn links(&self, token: &str) -> Result<super::link::LinkList, ConnectError> {
+        self.get("/v1/account/links", Some(token))
+    }
+
+    /// `DELETE /v1/account/links/{link_id}`, and whether the answer carried the marker
+    /// of the links routes (`x-apassy-links: 1`): only a `404` with it says that the link
+    /// is gone; a `404` without it may come from a relay without the route. A link id of
+    /// another form is never sent.
+    pub(super) fn delete_link(
+        &self,
+        token: &str,
+        link_id: &str,
+    ) -> (Result<super::link::LinkDeleted, ConnectError>, bool) {
+        if link_id.len() != 32
+            || !link_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return (Err(ConnectError::Invalid), false);
+        }
+        let mut request = json_request(
+            "DELETE",
+            &format!("/v1/account/links/{link_id}"),
+            Some(token),
+            &Empty {},
+        );
+        request.deadline = Some(Instant::now() + CALL_DEADLINE);
+        let (result, marked) = call_marked(&self.url, &request, super::link::LINKS_MARKER);
+        (result.map_err(connect_error), marked)
     }
 
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {

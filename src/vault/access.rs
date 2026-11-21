@@ -60,9 +60,13 @@ pub struct CatalogEntry {
     pub details: Vec<(String, String)>,
     /// The item has a usable process field, so an agent can ask for process access.
     pub can_use_in_process: bool,
-    /// The names of the folders from the root to the folder of the item. Empty at the
-    /// root, and for an item whose folder is unknown or deleted (schema 18).
+    /// The names of the folders from the root to the folder of the item: its first
+    /// folder, by the time it was added (schema 35). Empty at the root, and for an item
+    /// whose folders are unknown or deleted (schema 18).
     pub folder: Vec<String>,
+    /// The paths of the other folders of the item, in the order of adding (schema 35,
+    /// ADR 0047 §2). Empty for an item in one folder or none.
+    pub more_folders: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +222,8 @@ impl Vault {
                  ORDER BY position",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        // The folders of every credential in one read of the tree.
+        let index = self.folder_index()?;
         let mut catalog = Vec::new();
         for row in rows {
             let (id, name, kind) = row.map_err(|_| err(VaultErrorKind::Storage))?;
@@ -237,14 +243,19 @@ impl Vault {
                 details.push((label, value));
             }
             let item_id = to_public_id(id)?;
-            let folder = self.item_folder(item_id)?;
+            let mut paths = index
+                .folders(item_id)
+                .iter()
+                .map(|folder| index.path(folder));
+            let folder = paths.next().unwrap_or_default();
             catalog.push(CatalogEntry {
                 item_id,
                 name,
                 kind: kind_from_str(&kind)?,
                 details,
                 can_use_in_process: process_binding_in(conn, id)?.is_some(),
-                folder: self.folder_path(folder.as_deref()).unwrap_or_default(),
+                folder,
+                more_folders: paths.collect(),
             });
         }
         Ok(catalog)
@@ -551,5 +562,40 @@ mod tests {
     fn reasons_lose_control_characters_and_long_tails() {
         assert_eq!(clean("  a\nb\tc  ", 10), "a b c");
         assert_eq!(clean("ąąą", 3), "ą");
+    }
+
+    #[test]
+    fn the_catalog_names_the_first_folder_and_the_others() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pass = "synthetic-catalog-folders";
+        let mut vault = Vault::create(&dir.path().join("c.db"), pass).unwrap();
+        vault.unlock(pass).unwrap();
+        let item = vault
+            .add(crate::vault::ItemDraft {
+                title: "Mail".to_owned(),
+                kind: CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: Vec::new(),
+                fields: vec![crate::vault::Field {
+                    name: "token".to_owned(),
+                    value: crate::vault::SecretValue::new("SYNTH-catalog".to_owned()),
+                    secret: true,
+                }],
+            })
+            .unwrap()
+            .id;
+        let work = vault.create_folder(None, "Work").unwrap().uuid;
+        let acme = vault.create_folder(Some(&work), "Acme").unwrap().uuid;
+        let home = vault.create_folder(None, "Home").unwrap().uuid;
+        let entry = |vault: &Vault| vault.catalog().unwrap().remove(0);
+        assert!(entry(&vault).folder.is_empty());
+        assert!(entry(&vault).more_folders.is_empty());
+        vault.add_item_to_folder(item, &acme).unwrap();
+        assert_eq!(entry(&vault).folder, ["Work", "Acme"]);
+        assert!(entry(&vault).more_folders.is_empty());
+        vault.add_item_to_folder(item, &home).unwrap();
+        let both = entry(&vault);
+        assert_eq!(both.folder, ["Work", "Acme"]);
+        assert_eq!(both.more_folders, [vec!["Home".to_owned()]]);
     }
 }

@@ -145,6 +145,13 @@ struct ItemFolder {
     folder: Option<String>,
 }
 
+/// One folder of a credential: `item_folder_add` and `item_folder_remove`.
+#[derive(Deserialize)]
+struct ItemFolderOne {
+    id: u64,
+    folder: String,
+}
+
 #[derive(Deserialize)]
 struct Paste {
     text: Secret,
@@ -548,6 +555,22 @@ impl Core {
                     vault
                         .set_item_folder(id, folder.as_deref())
                         .map_err(|error| folder_error(error, bad_name))?;
+                    Ok(ok(&Empty {}))
+                })
+            }
+            // ADR 0047 §2: a credential in several folders. "Add to Folder…" and "Remove
+            // from This Folder" keep its other folders; `item_folder_set` replaces them.
+            "item_folder_add" | "item_folder_remove" => {
+                let ItemFolderOne { id, folder } = params(request)?;
+                self.with_vault_mut(|vault| {
+                    vault.details(id)?;
+                    require_folder(vault, &folder)?;
+                    let result = if op == "item_folder_add" {
+                        vault.add_item_to_folder(id, &folder)
+                    } else {
+                        vault.remove_item_from_folder(id, &folder)
+                    };
+                    result.map_err(|error| folder_error(error, bad_name))?;
                     Ok(ok(&Empty {}))
                 })
             }

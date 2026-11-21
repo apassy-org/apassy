@@ -368,13 +368,39 @@ fn call_with_busy_retries<T: DeserializeOwned>(
     busy_retries: usize,
     scope: Option<&str>,
 ) -> Result<T, ApiError> {
+    call_marked_with(url, request, busy_retries, scope, None).0
+}
+
+/// [`call`], and whether the last answer carried the header `marker` with the value `1`:
+/// the marker of an answer that a route of that relay gave, so a `404` of it is the
+/// route's own answer and not one of a relay that does not have the route
+/// (connect-share-v1, `x-apassy-links`). No answer is no marker.
+pub(crate) fn call_marked<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    marker: &str,
+) -> (Result<T, ApiError>, bool) {
+    call_marked_with(url, request, BUSY_RETRIES, None, Some(marker))
+}
+
+fn call_marked_with<T: DeserializeOwned>(
+    url: &RelayUrl,
+    request: &Request<'_>,
+    busy_retries: usize,
+    scope: Option<&str>,
+    marker: Option<&str>,
+) -> (Result<T, ApiError>, bool) {
     let key = scope.map_or_else(|| url.as_str().to_owned(), |scope| scope_key(url, scope));
     let mut attempt = 0;
     loop {
         if let Some(left) = rate_limited(url).or_else(|| limited(&key)) {
-            return Err(rate_limit_error(left));
+            return (Err(rate_limit_error(left)), false);
         }
-        let answer = relay_http::exchange(url, request).map_err(http_error)?;
+        let answer = match relay_http::exchange(url, request) {
+            Ok(answer) => answer,
+            Err(error) => return (Err(http_error(error)), false),
+        };
+        let marked = marker.is_some_and(|name| answer.header(name).map(str::trim) == Some("1"));
         let result = decode(&answer);
         if let Err(ApiError::Relay {
             status: 503,
@@ -385,7 +411,7 @@ fn call_with_busy_retries<T: DeserializeOwned>(
         {
             let wait = Duration::from_secs(retry_after.unwrap_or(2)).min(MAX_BUSY_WAIT);
             if !pause(request, wait) {
-                return result;
+                return (result, marked);
             }
             attempt += 1;
             continue;
@@ -399,9 +425,9 @@ fn call_with_busy_retries<T: DeserializeOwned>(
                 let wait =
                     Duration::from_secs(retry_after.unwrap_or(RATE_WAIT).clamp(1, MAX_RATE_WAIT));
                 lock(rate_limits()).insert(key, Instant::now() + wait);
-                return Err(rate_limit_error(wait));
+                return (Err(rate_limit_error(wait)), marked);
             }
-            other => return other,
+            other => return (other, marked),
         }
     }
 }

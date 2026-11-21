@@ -166,8 +166,10 @@ mod tests {
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
-        // Schema 34 (the account key source, `schema34.rs`) and 32 (short-lived
-        // credentials, `schema32.rs`) first.
+        // Schema 35 (several folders, `schema35.rs`), 34 (the account key source,
+        // `schema34.rs`), and 32 (short-lived credentials, `schema32.rs`) first.
+        conn.execute_batch(&crate::vault::schema35::downgrade_sql())
+            .unwrap();
         conn.execute_batch(&crate::vault::schema34::downgrade_sql())
             .unwrap();
         conn.execute_batch(&crate::vault::schema32::downgrade_sql())

@@ -37,6 +37,7 @@ pub mod overview;
 pub mod passkey;
 mod policy;
 pub mod providers;
+mod public_link;
 pub mod questions;
 mod relay_device;
 mod run_bindings;
@@ -51,6 +52,7 @@ mod schema28;
 mod schema29;
 mod schema32;
 mod schema34;
+mod schema35;
 mod short_lived;
 pub mod stats;
 pub use connect::PendingConnect;
@@ -114,7 +116,9 @@ pub use dedup::{
     DuplicateGroup, DuplicateMember, MERGED_INTO_DETAIL, MERGED_PREFIX, MergeOutcome, MergeRefusal,
     merged_count,
 };
-pub use folders::{Folder, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
+pub use folders::{
+    Folder, FolderChange, FolderIndex, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES,
+};
 pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
 };
@@ -135,6 +139,10 @@ pub use passkey::{
     PasskeyPrfInput, PasskeyPrfOutput, PasskeyPrfSecrets, PasskeyTarget,
 };
 pub use policy::{DeclarationSource, DeclarationSources};
+#[cfg(test)]
+pub(crate) use public_link::public_link_for_test;
+pub use public_link::{LinkRoot, MAX_LINK_ADDRESSES, MAX_LINK_NAME_BYTES, PublicLink};
+pub(crate) use public_link::{NewPublicLink, valid_link_origin};
 pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
 pub use run_bindings::{
@@ -1195,6 +1203,7 @@ fn verify_user_version(conn: &Connection) -> VaultResult<i64> {
         | schema28::NODE_TRUST_SCHEMA_VERSION
         | schema29::BOUNCER_HOST_SCHEMA_VERSION
         | schema32::SHORT_LIVED_SCHEMA_VERSION
+        | schema34::ACCOUNT_KEY_SCHEMA_VERSION
         | SCHEMA_VERSION) => Ok(version),
         _ => Err(err(VaultErrorKind::UnsupportedSchema)),
     }
@@ -1397,6 +1406,11 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
     } else {
         &[]
     };
+    let v35: &[&str] = if version >= schema35::MULTI_FOLDER_SCHEMA_VERSION {
+        &schema35::COLUMNS
+    } else {
+        &[]
+    };
     for sql in v1
         .iter()
         .chain(v2)
@@ -1426,6 +1440,7 @@ fn verify_expected_columns_in(conn: &Connection, schema: &str, version: i64) -> 
         .chain(v29)
         .chain(v32)
         .chain(v34)
+        .chain(v35)
     {
         let sql = sql.replacen(" FROM ", &format!(" FROM {schema}."), 1);
         drop(
@@ -1554,6 +1569,9 @@ fn migrate_to_current(conn: &mut Connection, from: i64) -> VaultResult<()> {
     if from < schema34::ACCOUNT_KEY_SCHEMA_VERSION {
         schema34::add_schema_v34(&tx)?;
     }
+    if from < schema35::MULTI_FOLDER_SCHEMA_VERSION {
+        schema35::add_schema_v35(&tx)?;
+    }
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     verify_expected_columns(conn, SCHEMA_VERSION)
 }
@@ -1620,6 +1638,7 @@ fn initialize_new_db(path: &Path, passphrase: &str) -> VaultResult<()> {
     schema29::add_schema_v29(&tx)?;
     schema32::add_schema_v32(&tx)?;
     schema34::add_schema_v34(&tx)?;
+    schema35::add_schema_v35(&tx)?;
     tx.commit().map_err(|_| err(VaultErrorKind::Storage))?;
     close_conn(conn)
 }

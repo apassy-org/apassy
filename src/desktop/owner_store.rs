@@ -929,6 +929,17 @@ impl OwnerSession {
             .map_err(folder_operation_error)
     }
 
+    /// Move, add, or remove folders of the specified credentials in one transaction, and
+    /// return an Undo receipt (ADR 0047 §2).
+    pub fn change_items_folders(
+        &mut self,
+        changes: &[(u64, crate::vault::FolderChange)],
+    ) -> ModelResult<Vec<crate::vault::ItemFolderMove>> {
+        self.unlocked()?
+            .change_items_folders(changes)
+            .map_err(folder_operation_error)
+    }
+
     /// Restore a batch only while every credential remains at its recorded move.
     pub fn undo_item_folder_moves(
         &mut self,

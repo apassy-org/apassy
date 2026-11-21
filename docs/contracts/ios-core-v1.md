@@ -255,8 +255,10 @@ Swift refuses unresolved provider conflict versions before publication. It keeps
  "websites": ["https://github.com"], "tags": ["work"], "archived": false,
  "has_totp": true, "has_passkey": false, "has_password": true, "conflict_of": null,
  "added_at": 1791100000, "changed_at": 1791200000, "used_at": null,
- "folder": "5b0e…", "provider": "GitHub", "production": false}
+ "folder": "5b0e…", "folders": ["5b0e…"], "provider": "GitHub", "production": false}
 ```
+
+- `folder`: the first folder of the item (by the time it was added); null at the top level. `folders`: every folder of the item, `folder` first; `[]` at the top level (schema 35: a credential is in any number of folders).
 
 - `kind`: `login`, `api_key`, `ssh_key`, `database`, or `custom`.
 - `subtitle`: the username of a login or a database, the host of a database without a username, the public key label of an SSH key, else the service, else empty.
@@ -591,15 +593,17 @@ Each change goes through the vault in its own transaction, so it syncs as `save`
 | `folder_create` | `parent` (a folder UUID; null or absent: the top level), `name` | `{"folder": Folder}` with `count` 0. |
 | `folder_rename` | `uuid`, `name` | `{}`. The same name changes nothing. |
 | `folder_move` | `uuid`, `parent` (null or absent: the top level) | `{}`. The folder moves with its subfolders and credentials, after the last subfolder of `parent`. |
-| `folder_delete` | `uuid` | `{"moved": n}`: the count of credentials that moved to the parent folder (the top level when it has none). Its subfolders move there too. No credential is deleted. |
-| `item_folder_set` | `id`, `folder` (null or absent: the top level) | `{}`. Moving changes nothing else (sharing, rules, and history stay); the history gets "Moved to Acme / Billing". |
+| `folder_delete` | `uuid` | `{"moved": n}`: the count of credentials that moved to the parent folder (the top level when it has none). A credential in other folders too stays in them. Its subfolders move there too. No credential is deleted. |
+| `item_folder_set` | `id`, `folder` (null or absent: the top level) | `{}`. The item is in that folder alone (it leaves its other folders). Moving changes nothing else (sharing, rules, and history stay); the history gets "Moved to Acme / Billing". |
+| `item_folder_add` | `id`, `folder` | `{}`. "Add to Folder…": the item is also in `folder`, after its other folders. A folder that it is in already changes nothing. |
+| `item_folder_remove` | `id`, `folder` | `{}`. "Remove from This Folder": the item leaves `folder` and stays in its other folders; without folders it is at the top level. A folder that it is not in changes nothing. |
 | `detect` | `text` | `{"found": [Found]}`. No secret value is in the answer. Nothing found is `[]`. |
 | `add_pasted` | `text`, `folder` (optional), `pick` (optional: indexes of `found`), `titles` (optional: `[{"index": n, "title": "…"}]`) | `{"items": [{"id": 12, "revision": 1, "title": "Stripe live", "summary": "Stripe live · STRIPE_SECRET_KEY · production"}]}` |
 | `item_options_set` | `id`, `always_ask` (optional bool), `environment` (optional: `production`, `staging`, `development`, or `local`) | `{}` |
 
 `Folder`: `{"uuid": "5b0e…", "parent": "…" or null, "name": "Billing", "position": 0, "count": 3}`. `count`: the credentials directly in the folder that are not archived. A parent that another device deleted, or a cycle that two moves on two devices made, reads as the top level.
 
-Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 to 64 bytes and no control character, and is unique among its siblings without regard to case (`exists`, "A folder with this name is already there."). Folders nest at most 4 levels. A name that breaks a rule, a folder that would go below level 4, and a move into the folder itself or one of its subfolders are `invalid_input`. A folder or a parent that is not there (another device deleted it) is `not_found`. `item_folder_set` of an item that is not there is `not_found` with the message of an item.
+Folder rules (`Vault::create_folder` and the others): a name is trimmed, has 1 to 64 bytes and no control character, and is unique among its siblings without regard to case (`exists`, "A folder with this name is already there."). Folders nest at most 4 levels. A name that breaks a rule, a folder that would go below level 4, and a move into the folder itself or one of its subfolders are `invalid_input`. A folder or a parent that is not there (another device deleted it) is `not_found`. `item_folder_set`, `item_folder_add`, and `item_folder_remove` of an item that is not there are `not_found` with the message of an item.
 
 `Found`:
 

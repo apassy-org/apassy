@@ -99,6 +99,13 @@ pub enum ItemEventKind {
     /// The owner moved the item to another folder (schema 18). The detail is the folder
     /// path, empty for the top level.
     Moved,
+    /// The owner made a public link that shows the item (schema 35, ADR 0047 section 4).
+    /// The detail is the name of the link, never its key. The event stays on the device
+    /// that made the link; the link row itself syncs.
+    LinkCreated,
+    /// The owner revoked a public link that showed the item. The detail is the name of
+    /// the link.
+    LinkRevoked,
 }
 
 impl ItemEventKind {
@@ -125,6 +132,8 @@ impl ItemEventKind {
             Self::Restored => "restored",
             Self::ReviewConfirmed => "review_confirmed",
             Self::Moved => "moved",
+            Self::LinkCreated => "link_created",
+            Self::LinkRevoked => "link_revoked",
         }
     }
 
@@ -151,6 +160,8 @@ impl ItemEventKind {
             "restored" => Self::Restored,
             "review_confirmed" => Self::ReviewConfirmed,
             "moved" => Self::Moved,
+            "link_created" => Self::LinkCreated,
+            "link_revoked" => Self::LinkRevoked,
             _ => return Err(err(VaultErrorKind::Storage)),
         })
     }
@@ -581,6 +592,8 @@ mod tests {
             ItemEventKind::Restored,
             ItemEventKind::ReviewConfirmed,
             ItemEventKind::Moved,
+            ItemEventKind::LinkCreated,
+            ItemEventKind::LinkRevoked,
         ] {
             assert_eq!(ItemEventKind::parse(kind.as_str()).expect("parse"), kind);
         }

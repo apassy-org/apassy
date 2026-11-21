@@ -93,6 +93,8 @@ pub const PLAIN_DIRECTORY_FILE: &str = "relay.db.plain";
 /// The keyed working copy of `relay.db`: edited and vacuumed under the master key, then
 /// exported to `relay.db.plain` and deleted, before the commit point.
 pub const WORK_DIRECTORY_FILE: &str = "relay.db.work";
+/// The plain copy of `links.db` before it replaces the keyed file.
+pub const PLAIN_LINKS_FILE: &str = "links.db.plain";
 /// The suffix of the plain copy of a store's file before it replaces the file.
 const PLAIN_SUFFIX: &str = ".plain";
 /// The folder of the archived audits of swept Connect teams (`Hub::archive_swept_team`).
@@ -272,6 +274,15 @@ pub struct Report {
     /// a file of the inventory and of the backup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_delete: Vec<String>,
+    /// `links.db` (the public links, docs/SPEC.md section 38) as the plan found it, keyed
+    /// with the master key: it becomes plain with every row, its tombstones of link ids
+    /// included, as a kept store does. It is in no backup, so not in `files_before`; the
+    /// plan hash binds its size and SHA-256. `None`: the relay has no `links.db`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<FileEntry>,
+    /// `links.db` after the cutover, plain (`None` before the end, or without one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_after: Option<FileEntry>,
     /// True when this run changed a file (never written to `cutover.json`).
     #[serde(skip)]
     pub changed: bool,
@@ -1100,7 +1111,7 @@ fn write_record(config: &RelayConfig, report: &Report) -> RelayResult<()> {
 /// and build give the same value, and a new image needs a new dry run. A resumed run
 /// computes it again from `cutover.json`, so a record changed by hand is refused.
 fn plan_hash(report: &Report) -> String {
-    let plan = json!({
+    let mut plan = json!({
         "version": report.version,
         "relay": {"version": report.relay_version, "commit": report.relay_commit},
         "backup": {"dir": report.backup.dir, "manifest_sha256": report.backup.manifest_sha256},
@@ -1111,6 +1122,10 @@ fn plan_hash(report: &Report) -> String {
         "files_before": report.files_before,
         "left": report.left,
     });
+    // Only with a `links.db`, so the plan of a relay without one keeps its hash.
+    if let Some(links) = &report.links {
+        plan["links"] = json!(links);
+    }
     let bytes = serde_json::to_vec(&plan).unwrap_or_default();
     crate::sync_head::hex(&Sha256::digest(&bytes))
 }
@@ -1191,6 +1206,8 @@ fn root_side_files() -> Vec<String> {
         format!("{KEYED_DIRECTORY_FILE}.tmp"),
         CUTOVER_FILE.to_string(),
         format!("{CUTOVER_FILE}.tmp"),
+        PLAIN_LINKS_FILE.to_string(),
+        format!("{PLAIN_LINKS_FILE}-journal"),
     ]
 }
 
@@ -1259,6 +1276,7 @@ fn plan(config: &RelayConfig, options: &Options, now: u64) -> RelayResult<Report
         }
     }
     converted.sort();
+    let links = links_entry(config)?;
     let files = inventory(config, &stores)?;
     let named: BTreeSet<&TeamId> = rows.iter().map(|row| &row.id).collect();
     let orphans: Vec<TeamId> = files
@@ -1306,10 +1324,100 @@ fn plan(config: &RelayConfig, options: &Options, now: u64) -> RelayResult<Report
         side_files: side_files(config, &stores),
         to_convert: Vec::new(),
         to_delete: Vec::new(),
+        links,
+        links_after: None,
         changed: false,
     };
     report.plan_sha256 = plan_hash(&report);
     Ok(report)
+}
+
+/// `links.db` of a keyed relay for the plan: it opens with the master key, is of
+/// `links::LINKS_VERSION`, passes `integrity_check`, and has no write journal; else the
+/// cutover does not start. `None` without the file.
+fn links_entry(config: &RelayConfig) -> RelayResult<Option<FileEntry>> {
+    let path = config.links_path();
+    if !exists(&path) {
+        return Ok(None);
+    }
+    let refused = |why: &str| {
+        RelayError::internal(format!(
+            "links.db {why}: nothing was changed. Start this relay once and stop it, then run the dry run again."
+        ))
+    };
+    if exists(&journal_of(&path)) {
+        return Err(refused("has a write journal"));
+    }
+    if plain_header(&path) {
+        return Err(refused("is plain on a relay with a master key"));
+    }
+    let store = Store::open_read_only(&path, &config.master_key)
+        .map_err(|_| refused("does not open with the master key"))?;
+    if store.user_version()? != crate::server::links::LINKS_VERSION || !store.with(integrity_ok)? {
+        return Err(refused("is not whole, or of another version"));
+    }
+    let (bytes, sha256) = hash_file(&path)?;
+    Ok(Some(FileEntry {
+        name: crate::config::LINKS_FILE.to_string(),
+        bytes,
+        sha256,
+    }))
+}
+
+/// A plain `links.db` that is of `links::LINKS_VERSION` and passes `integrity_check`.
+fn check_plain_links(path: &Path) -> RelayResult<()> {
+    let store = Store::open_plain_read_only_unchecked(path)?;
+    if store.user_version()? != crate::server::links::LINKS_VERSION || !store.with(integrity_ok)? {
+        return Err(RelayError::internal(format!(
+            "The plain file {} is not whole.",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The keyed `links.db` is the file of the plan, byte for byte.
+fn check_links_unchanged(config: &RelayConfig, entry: &FileEntry) -> RelayResult<()> {
+    if hash_file(&config.links_path())? != (entry.bytes, entry.sha256.clone()) {
+        return Err(RelayError::internal(
+            "links.db changed since the plan: nothing more was changed. Run the dry run again.",
+        ));
+    }
+    Ok(())
+}
+
+/// Exports the keyed `links.db` of the plan to its checked plain copy (`links.db.plain`).
+fn stage_links(config: &RelayConfig, entry: &FileEntry) -> RelayResult<PathBuf> {
+    let plain = config.data_dir.join(PLAIN_LINKS_FILE);
+    remove_if_there(&plain)?;
+    remove_if_there(&journal_of(&plain))?;
+    check_links_unchanged(config, entry)?;
+    // As for a kept store: `sqlcipher_export` attaches the plain file, which a read-only
+    // connection could not write. Nothing writes the keyed file.
+    let source = Store::open_at(&config.links_path(), &config.master_key)?;
+    source.export_plain(&plain)?;
+    check_copy(&source, &plain)?;
+    check_plain_links(&plain)?;
+    Ok(plain)
+}
+
+/// Step 5 for `links.db`: a plain file is checked and left; a keyed one (still the file
+/// of the plan) is exported again under the master key, checked, and renamed over it.
+fn move_links(config: &RelayConfig, entry: &FileEntry) -> RelayResult<()> {
+    let path = config.links_path();
+    if plain_header(&path) {
+        let plain = config.data_dir.join(PLAIN_LINKS_FILE);
+        remove_if_there(&plain)?;
+        remove_if_there(&journal_of(&plain))?;
+        return check_plain_links(&path);
+    }
+    let plain = stage_links(config, entry)?;
+    if exists(&journal_of(&path)) {
+        return Err(RelayError::internal(
+            "links.db has a write journal: restore the backup named in cutover.json.",
+        ));
+    }
+    fs::rename(&plain, &path).map_err(|_| io_error("move the plain links.db into place"))
 }
 
 fn clone_row(row: &TeamRow) -> TeamRow {
@@ -1344,6 +1452,7 @@ fn left_entries(config: &RelayConfig) -> RelayResult<Vec<String>> {
     let side = root_side_files();
     let mut known: Vec<&str> = vec![
         DIRECTORY_FILE,
+        crate::config::LINKS_FILE,
         TEAMS_DIR,
         AUDIT_ARCHIVE_DIR,
         ADMIN_SOCKET,
@@ -1427,6 +1536,10 @@ fn stage_copies(
         if index == 0 {
             interrupt(options, Interrupt::StagedOneStore)?;
         }
+    }
+    // `links.db`: its checked plain copy, under the master key, beside the keyed file.
+    if let Some(entry) = &report.links {
+        stage_links(config, entry)?;
     }
     // `relay.db`: a keyed working copy of the bytes of the inventory, edited and vacuumed
     // under the master key. Only the result is exported, so no team key and no deleted row
@@ -1907,6 +2020,29 @@ fn check_committed(config: &RelayConfig, report: &Report) -> RelayResult<Pending
             convert.push(name);
         }
     }
+    if let Some(entry) = &report.links {
+        let path = config.links_path();
+        if plain_header(&path) {
+            check_plain_links(&path)?;
+        } else {
+            check_links_unchanged(config, entry)?;
+            if exists(&journal_of(&path)) {
+                return Err(RelayError::internal(
+                    "links.db has a write journal: this run deleted nothing. Restore the backup named in cutover.json.",
+                ));
+            }
+            if Store::open_read_only(&path, &config.master_key).is_err() {
+                return Err(RelayError::internal(
+                    "links.db does not open with the master key: this run deleted nothing.",
+                ));
+            }
+            convert.push(crate::config::LINKS_FILE.to_string());
+        }
+    } else if exists(&config.links_path()) {
+        return Err(RelayError::internal(
+            "links.db is not in the plan of cutover.json (it was made after the dry run): this run deleted nothing. Restore the backup named in cutover.json.",
+        ));
+    }
     Ok(Pending {
         kept,
         keys,
@@ -1975,6 +2111,11 @@ fn finish(
         }
     }
     sync_dir_if_there(&config.teams_dir())?;
+    // `links.db` becomes plain with every row: the links that live and the ids of every
+    // link ever made, so a revoked id stays used.
+    if let Some(entry) = &report.links {
+        move_links(config, entry)?;
+    }
     // Step 5b: every other team's files, by team id; never a file of a kept store.
     remove_other_teams(config, &kept_set, options)?;
     // The old single-team files, the files of a stopped migration, the audit archives
@@ -2021,6 +2162,16 @@ fn finish(
     left.sort();
     left.dedup();
     report.left = left;
+    if report.links.is_some() {
+        let path = config.links_path();
+        check_plain_links(&path)?;
+        let (bytes, sha256) = hash_file(&path)?;
+        report.links_after = Some(FileEntry {
+            name: crate::config::LINKS_FILE.to_string(),
+            bytes,
+            sha256,
+        });
+    }
     // Step 6: the record, and last the file with the keys of the team files, once it is
     // proven to be the relay.db that the backup holds.
     check_keyed_copy(config, &report)?;
@@ -2367,6 +2518,8 @@ mod tests {
             side_files: Vec::new(),
             to_convert: Vec::new(),
             to_delete: Vec::new(),
+            links: None,
+            links_after: None,
             changed: false,
         };
         let base = plan_hash(&report);

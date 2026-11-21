@@ -2193,3 +2193,406 @@ fn the_vault_place_reads_in_short_words() {
     );
     assert_eq!(place(Path::new("/srv/vaults/v.db")), "/srv/vaults");
 }
+
+/// One window for the folder tests of ADR 0047 §2: a context across frames, as the real
+/// window has, with the painted texts and the AccessKit names of the controls.
+struct FolderWindow {
+    ctx: egui::Context,
+    text: String,
+    placed: Vec<(String, Pos2)>,
+    named: Vec<(String, Pos2)>,
+}
+
+impl FolderWindow {
+    fn new() -> Self {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        Self {
+            ctx,
+            text: String::new(),
+            placed: Vec::new(),
+            named: Vec::new(),
+        }
+    }
+
+    fn frame_with(&mut self, app: &mut DesktopApp, events: Vec<egui::Event>) {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SIZE)),
+            events,
+            ..Default::default()
+        };
+        let output = self.ctx.run_ui(input, |ui| draw(app, ui));
+        self.text.clear();
+        self.placed.clear();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut self.text);
+            collect_placed(&clipped.shape, &mut self.placed);
+        }
+        if let Some(update) = &output.platform_output.accesskit_update {
+            self.named.clear();
+            for (_, node) in &update.nodes {
+                if let (Some(label), Some(bounds)) = (node.label(), node.bounds()) {
+                    let center = Pos2::new(
+                        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                    );
+                    self.named.push((label.to_owned(), center));
+                }
+            }
+        }
+        output.drop_without_applying_deltas();
+        assert!(!self.text.contains(CANARY), "a secret is on the screen");
+    }
+
+    fn idle(&mut self, app: &mut DesktopApp) {
+        for _ in 0..3 {
+            self.frame_with(app, Vec::new());
+        }
+    }
+
+    /// A painted text is exactly `line`.
+    fn has_line(&self, line: &str) -> bool {
+        self.text.lines().any(|text| text == line)
+    }
+
+    fn press_at(&mut self, app: &mut DesktopApp, at: Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.frame_with(app, vec![egui::Event::PointerMoved(at)]);
+        self.frame_with(app, vec![button(true)]);
+        self.frame_with(app, vec![button(false)]);
+        self.idle(app);
+    }
+
+    /// Where the last painted text `needle` is (the top layer draws last).
+    fn last(&self, needle: &str) -> Pos2 {
+        self.placed
+            .iter()
+            .rev()
+            .find(|(text, _)| text == needle)
+            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+            .unwrap_or_else(|| panic!("{needle} is not on the screen: {}", self.text))
+    }
+
+    /// Where the leftmost painted text `needle` is: the sidebar, then the list.
+    fn leftmost(&self, needle: &str) -> Pos2 {
+        self.placed
+            .iter()
+            .filter(|(text, _)| text == needle)
+            .map(|(_, pos)| *pos + Vec2::new(4.0, 4.0))
+            .min_by(|a, b| a.x.total_cmp(&b.x))
+            .unwrap_or_else(|| panic!("{needle} is not on the screen: {}", self.text))
+    }
+
+    fn click(&mut self, app: &mut DesktopApp, needle: &str) {
+        self.idle(app);
+        let at = self.last(needle);
+        self.press_at(app, at);
+    }
+
+    /// Click the control that VoiceOver names `name`.
+    fn click_named(&mut self, app: &mut DesktopApp, name: &str) {
+        self.idle(app);
+        let at = self
+            .named
+            .iter()
+            .find(|(label, _)| label == name)
+            .map(|(_, at)| *at)
+            .unwrap_or_else(|| panic!("no control is named {name}"));
+        self.press_at(app, at);
+    }
+
+    /// Drag the leftmost text `from` (a row of the list) onto the leftmost text `to` (a
+    /// folder of the sidebar), with `modifiers` held.
+    fn drag(&mut self, app: &mut DesktopApp, from: &str, to: &str, modifiers: egui::Modifiers) {
+        self.idle(app);
+        let start = self.leftmost(from);
+        let end = self.leftmost(to);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        self.frame_with(
+            app,
+            vec![
+                egui::Event::ModifiersChanged(modifiers),
+                egui::Event::PointerMoved(start),
+            ],
+        );
+        self.frame_with(app, vec![button(start, true)]);
+        for step in 1..=8 {
+            let at = start + (end - start) * (step as f32 / 8.0);
+            self.frame_with(app, vec![egui::Event::PointerMoved(at)]);
+        }
+        self.frame_with(app, Vec::new());
+        self.frame_with(app, vec![button(end, false)]);
+        self.frame_with(
+            app,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+        );
+        self.idle(app);
+    }
+}
+
+/// The folders of `id`, first folder first.
+fn folders_of(app: &DesktopApp, id: u64) -> Vec<String> {
+    app.owner_ui
+        .session
+        .with_vault(|vault| vault.item_folders(id))
+        .expect("open")
+        .expect("item")
+}
+
+/// ADR 0047 §2: "Add to Folder…" in the ⋯ menu adds a folder and keeps the first one;
+/// the detail names every folder; the credential is in the list of each; Undo takes the
+/// add back; an Option drag onto a folder of the sidebar adds, a plain drag moves; the
+/// history names every folder after the change.
+#[test]
+fn add_to_folder_keeps_the_first_folder() {
+    use super::folders::{self, FolderUndo};
+    use crate::desktop::Place;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Filed key");
+    let work = folders::create(&mut app, None, "Work")
+        .expect("folder")
+        .uuid;
+    let home = folders::create(&mut app, None, "Home")
+        .expect("folder")
+        .uuid;
+    assert!(folders::move_item(&mut app, id, Some(&work)));
+    app.place = Place::Folder(Some(work.clone()));
+    app.select_item(id.to_string());
+
+    let mut window = FolderWindow::new();
+    window.click_named(&mut app, "More actions for this credential");
+    for action in [
+        folders::MOVE_TO_FOLDER,
+        folders::ADD_TO_FOLDER,
+        folders::REMOVE_FROM_FOLDER,
+    ] {
+        assert!(window.has_line(action), "{action}: {}", window.text);
+    }
+    window.click(&mut app, folders::ADD_TO_FOLDER);
+    assert_eq!(
+        app.ui.sheet,
+        Some(Sheet::AddToFolder { item_ids: vec![id] })
+    );
+    assert!(
+        window.has_line("Add “Filed key” to Folder"),
+        "{}",
+        window.text
+    );
+    assert!(
+        window.has_line("Its other folders stay."),
+        "{}",
+        window.text
+    );
+    window.click(&mut app, "Home");
+    window.click(&mut app, "Add");
+    assert_eq!(app.ui.sheet, None, "{}", app.status_text);
+    assert_eq!(app.status_text, "Added 1 credential to Home.");
+    assert_eq!(folders_of(&app, id), [work.clone(), home.clone()]);
+    assert_eq!(
+        app.owner_ui
+            .session
+            .with_vault(|vault| vault.item_folder(id))
+            .expect("open")
+            .expect("item"),
+        Some(work.clone()),
+        "the first folder stays first"
+    );
+
+    // The detail names both folders, the first first.
+    window.idle(&mut app);
+    assert!(window.has_line(folders::FOLDERS_LABEL), "{}", window.text);
+    assert!(window.has_line("Work, Home"), "{}", window.text);
+    // The undo strip names the add.
+    assert!(window.has_line("1 credential added"), "{}", window.text);
+
+    // It is in the list of each folder, and the sidebar counts it in each.
+    for folder in [&work, &home] {
+        app.place = Place::Folder(Some(folder.clone()));
+        window.idle(&mut app);
+        assert!(window.has_line("Filed key"), "{}", window.text);
+    }
+    let tree = folders::FolderTree::load(&app);
+    assert!(tree.contains(&Place::Folder(Some(work.clone())), id));
+    assert!(tree.contains(&Place::Folder(Some(home.clone())), id));
+
+    // Undo Add: only Work again.
+    window.click(&mut app, "Undo Add");
+    assert_eq!(folders_of(&app, id), std::slice::from_ref(&work));
+    assert_eq!(app.status_text, "Add undone.");
+
+    // An Option (Alt) drag from the list of Work onto Home in the sidebar adds.
+    app.place = Place::Folder(Some(work.clone()));
+    app.selected_item_id = None;
+    window.drag(&mut app, "Filed key", "Home", egui::Modifiers::ALT);
+    assert_eq!(
+        folders_of(&app, id),
+        [work.clone(), home.clone()],
+        "{}",
+        app.status_text
+    );
+    assert_eq!(app.ui.move_undo_kind, FolderUndo::Added);
+    // The history names every folder after the change.
+    let events = app
+        .owner_ui
+        .session
+        .with_vault(|vault| vault.item_events(id, 10))
+        .expect("open")
+        .expect("events");
+    assert_eq!(events[0].kind, crate::vault::ItemEventKind::Moved);
+    assert_eq!(events[0].detail, "Work; Home");
+    assert_eq!(
+        super::timeline::moved_detail(&events[0].detail),
+        "Work, Home"
+    );
+    assert_eq!(super::timeline::moved_detail(""), "No folder");
+    assert_eq!(
+        super::timeline::moved_detail("Work / Acme; Home"),
+        "Work › Acme, Home"
+    );
+
+    // A plain drag from the list of Home onto Bills moves: Home becomes Bills, and
+    // Work stays first.
+    let bills = folders::create(&mut app, None, "Bills")
+        .expect("folder")
+        .uuid;
+    app.place = Place::Folder(Some(home.clone()));
+    window.drag(&mut app, "Filed key", "Bills", egui::Modifiers::NONE);
+    assert_eq!(
+        folders_of(&app, id),
+        [work.clone(), bills.clone()],
+        "{}",
+        app.status_text
+    );
+    assert_eq!(app.ui.move_undo_kind, FolderUndo::Moved);
+    assert_eq!(app.status_text, "Moved 1 credential to Bills.");
+    window.idle(&mut app);
+    assert!(window.has_line("Undo Move"), "{}", window.text);
+}
+
+/// ADR 0047 §2: "Remove from This Folder" is in the ⋯ menu only in the list of a folder
+/// that holds the credential itself; it keeps the other folders, the credential leaves
+/// the list, and Undo gives the folder back in its place. "Move to Folder…" in a folder
+/// list replaces only the folder of the list.
+#[test]
+fn remove_from_this_folder_shows_only_in_a_folder() {
+    use super::folders;
+    use crate::desktop::Place;
+    use crate::desktop::native_menu::Command;
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut app = app_in(&dir);
+    create(&mut app, "Personal", PASS_A);
+    let id = add_item(&mut app, "Filed key");
+    let work = folders::create(&mut app, None, "Work")
+        .expect("folder")
+        .uuid;
+    let home = folders::create(&mut app, None, "Home")
+        .expect("folder")
+        .uuid;
+    let bills = folders::create(&mut app, None, "Bills")
+        .expect("folder")
+        .uuid;
+    assert!(folders::move_item(&mut app, id, Some(&work)));
+    assert!(folders::add_items(&mut app, &[id], &home));
+
+    // "All credentials": no folder to remove from.
+    app.place = Place::CREDENTIALS;
+    app.select_item(id.to_string());
+    let mut window = FolderWindow::new();
+    window.click_named(&mut app, "More actions for this credential");
+    assert!(window.has_line(folders::ADD_TO_FOLDER), "{}", window.text);
+    assert!(
+        !window.has_line(folders::REMOVE_FROM_FOLDER),
+        "{}",
+        window.text
+    );
+    let menu = super::native_menu_context(&app, &egui::Context::default());
+    assert!(menu.allows(Command::AddToFolder));
+    assert!(!menu.allows(Command::RemoveFromFolder));
+
+    // The list of Work: Remove from This Folder keeps Home.
+    app.place = Place::Folder(Some(work.clone()));
+    app.select_item(id.to_string());
+    let mut window = FolderWindow::new();
+    window.idle(&mut app);
+    let menu = super::native_menu_context(&app, &window.ctx);
+    assert!(menu.in_folder && menu.allows(Command::RemoveFromFolder));
+    window.click_named(&mut app, "More actions for this credential");
+    window.click(&mut app, folders::REMOVE_FROM_FOLDER);
+    assert_eq!(folders_of(&app, id), std::slice::from_ref(&home));
+    assert_eq!(app.status_text, "Removed 1 credential from Work.");
+    assert_eq!(app.selected_item_id, None, "it left the list");
+    window.idle(&mut app);
+    assert!(!window.has_line("Filed key"), "{}", window.text);
+    assert!(window.has_line("1 credential removed"), "{}", window.text);
+    window.click(&mut app, "Undo Remove");
+    assert_eq!(app.status_text, "Remove undone.");
+    assert_eq!(
+        folders_of(&app, id),
+        [work.clone(), home.clone()],
+        "Work is back, first"
+    );
+
+    // Move to Folder… from the list of Home replaces Home only.
+    app.place = Place::Folder(Some(home.clone()));
+    assert!(folders::move_item(&mut app, id, Some(&bills)));
+    assert_eq!(folders_of(&app, id), [work.clone(), bills.clone()]);
+    // Move to Folder… from "All credentials" replaces every folder.
+    app.place = Place::CREDENTIALS;
+    assert!(folders::move_item(&mut app, id, Some(&home)));
+    assert_eq!(folders_of(&app, id), std::slice::from_ref(&home));
+
+    // In a subfolder only: the list of the parent shows it, without the remove.
+    let acme = folders::create(&mut app, Some(&work), "Acme")
+        .expect("folder")
+        .uuid;
+    assert!(folders::move_item(&mut app, id, Some(&acme)));
+    app.place = Place::Folder(Some(work.clone()));
+    app.select_item(id.to_string());
+    let mut window = FolderWindow::new();
+    window.idle(&mut app);
+    assert!(window.has_line("Filed key"), "{}", window.text);
+    window.click_named(&mut app, "More actions for this credential");
+    assert!(window.has_line(folders::MOVE_TO_FOLDER), "{}", window.text);
+    assert!(
+        !window.has_line(folders::REMOVE_FROM_FOLDER),
+        "{}",
+        window.text
+    );
+}
+
+/// The new folder texts of ADR 0047 §2 are short and name nothing of one platform.
+#[test]
+fn the_folder_texts_are_short() {
+    use super::folders::{FolderUndo, TEXTS};
+    for text in TEXTS {
+        assert!(text.split_whitespace().count() <= 9, "too long: {text}");
+        for word in [
+            "Touch ID", "Keychain", "macOS", "Finder", "⌘", "⌥", "Option", "Alt",
+        ] {
+            assert!(!text.contains(word), "{word}: {text}");
+        }
+    }
+    for kind in [FolderUndo::Moved, FolderUndo::Added, FolderUndo::Removed] {
+        assert!(
+            TEXTS.contains(&kind.button()) || kind == FolderUndo::Moved,
+            "{}",
+            kind.button()
+        );
+        assert_eq!(kind.note(1).split_whitespace().count(), 3);
+        assert!(kind.note(2).starts_with("2 credentials "));
+    }
+}

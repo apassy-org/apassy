@@ -333,7 +333,8 @@ fn personal_section(app: &mut DesktopApp, ui: &mut egui::Ui) {
 }
 
 /// The folder tree under "All credentials". A folder shows its subfolders when it is
-/// open. A secondary click has New Folder, Rename, and Delete.
+/// open. A secondary click has New Folder, Rename, and Delete. Credentials dragged from
+/// the list onto a folder move there; with Option (Alt on Linux) they are added.
 #[cfg(feature = "vault")]
 fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let tree = super::folders::FolderTree::load(app);
@@ -357,6 +358,8 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Rename(String),
         Move(String),
         Delete(String),
+        Drop(String, Vec<u64>, bool),
+        Share(String),
     }
     let mut act = None;
     // Depth first: a folder shows when each folder above it is open.
@@ -373,11 +376,7 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         if !visible {
             continue;
         }
-        let subtree = tree.subtree(&folder.uuid);
-        let count = active
-            .iter()
-            .filter(|id| tree.folder_of(**id).is_some_and(|f| subtree.contains(f)))
-            .count();
+        let count = tree.count(&folder.uuid, &active);
         let disclosure = tree
             .has_children(&folder.uuid)
             .then(|| app.ui.open_folders.contains(&folder.uuid));
@@ -403,6 +402,26 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
             SidebarClick::Disclose => act = Some(Act::Toggle(folder.uuid.clone())),
             SidebarClick::None => {}
         }
+        let add = ui.input(|input| input.modifiers.alt);
+        if response
+            .dnd_hover_payload::<super::folders::DraggedItems>()
+            .is_some()
+        {
+            ui.painter().rect_stroke(
+                response.rect.shrink(1.0),
+                6.0,
+                egui::Stroke::new(2.0, kit::palette().accent),
+                egui::StrokeKind::Inside,
+            );
+            ui.ctx().set_cursor_icon(if add {
+                egui::CursorIcon::Copy
+            } else {
+                egui::CursorIcon::Grabbing
+            });
+        }
+        if let Some(dragged) = response.dnd_release_payload::<super::folders::DraggedItems>() {
+            act = Some(Act::Drop(folder.uuid.clone(), dragged.ids.clone(), add));
+        }
         response.context_menu(|ui| {
             if ui.button("New Folder…").clicked() {
                 act = Some(Act::New(folder.uuid.clone()));
@@ -412,6 +431,9 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
             if ui.button("Move Folder…").clicked() {
                 act = Some(Act::Move(folder.uuid.clone()));
+            }
+            if ui.button("Share…").clicked() {
+                act = Some(Act::Share(folder.uuid.clone()));
             }
             ui.separator();
             if ui.button("Delete…").clicked() {
@@ -426,6 +448,10 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(Act::Rename(uuid)) => super::folders::open_rename(app, &uuid),
         Some(Act::Move(uuid)) => super::folders::open_move_folder(app, uuid),
         Some(Act::Delete(uuid)) => super::folders::open_delete(app, &uuid),
+        Some(Act::Drop(uuid, ids, add)) => {
+            super::folders::drop_on_folder(app, &ids, &uuid, add);
+        }
+        Some(Act::Share(uuid)) => app.ui.sheet = Some(super::Sheet::ShareFolder { uuid }),
         None => {}
     }
 }

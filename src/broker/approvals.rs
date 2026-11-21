@@ -73,7 +73,8 @@ use crate::vault::{
 pub use owner_auth::{
     CheckMethod, ConnectGroupChange, OwnerAction, OwnerAuthError, OwnerCheck, OwnerGate,
     OwnerProof, PROOF_LIFETIME, ProofRefusal, ShareEntry, action_words, grant_declarations,
-    grant_has_production, remote_key, touch_id_detail, verify_remote_action, verify_remote_answer,
+    grant_has_production, link_lasts, remote_key, touch_id_detail, verify_remote_action,
+    verify_remote_answer,
 };
 #[cfg(feature = "desktop")]
 pub(crate) use owner_auth::{LocalWindowSource, OwnerDeliveryFence, PasskeyExtras};

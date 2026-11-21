@@ -50,6 +50,20 @@ fn edit_text(detail: &str) -> String {
     }
 }
 
+/// The detail of a "Moved" event: every folder after the change (ADR 0047 §2), as the
+/// list names them ("Work › Acme, Home"), or "No folder". The vault stores "Work / Acme;
+/// Home".
+pub(super) fn moved_detail(detail: &str) -> String {
+    if detail.is_empty() {
+        return super::folders::NO_FOLDER.to_owned();
+    }
+    detail
+        .split("; ")
+        .map(|path| path.split(" / ").collect::<Vec<_>>().join(" › "))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The text, the detail line, and the tone of one history event.
 fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
     let detail = || Some(event.detail.clone()).filter(|detail| !detail.is_empty());
@@ -119,7 +133,13 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             Tone::Warning,
         ),
         ItemEventKind::ReviewConfirmed => ("Agent settings confirmed".to_owned(), None, Tone::Good),
-        ItemEventKind::Moved => ("Moved".to_owned(), detail(), Tone::Neutral),
+        ItemEventKind::Moved => (
+            "Moved".to_owned(),
+            Some(moved_detail(&event.detail)),
+            Tone::Neutral,
+        ),
+        ItemEventKind::LinkCreated => ("Public link made".to_owned(), detail(), Tone::Accent),
+        ItemEventKind::LinkRevoked => ("Public link revoked".to_owned(), detail(), Tone::Neutral),
     }
 }
 

@@ -1070,7 +1070,9 @@ fn folders_merge_last_writer_wins_and_tombstone_wins() {
         .expect("sync b")
         .merge
         .expect("merge");
-    assert_eq!((merge.folders, merge.updated), (2, 1));
+    // Two folder rows and one membership row (schema 35: each membership syncs on its own
+    // and does not change the version of the credential, so no credential is updated).
+    assert_eq!((merge.folders, merge.updated), (3, 0));
     assert!(merge.changed_local());
     let alpha_b = id_of(&vault_b, "Alpha");
     assert_eq!(

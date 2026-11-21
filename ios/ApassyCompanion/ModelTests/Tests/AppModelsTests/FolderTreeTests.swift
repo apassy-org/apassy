@@ -113,6 +113,25 @@ struct FolderTreeTests {
         #expect(groups[0].id == "")
     }
 
+    @Test("a credential in two folders counts once and is listed and grouped in each")
+    func twoFolders() {
+        let both = ItemRow(
+            id: 1, revision: 1, title: "Stripe", kind: .apiKey, subtitle: "", websites: [], tags: [],
+            archived: false, hasTotp: false, conflictOf: nil, addedAt: nil, changedAt: nil, usedAt: nil,
+            folder: billing, folders: [billing, personal, "gone"])
+        let items = [both, row(2, "Loose")]
+        #expect(tree.folders(of: both) == [billing, personal])
+        #expect(tree.folder(of: both) == billing)
+        #expect(tree.places(of: both).map(\.title) == ["Acme › Billing", "Personal"])
+        #expect(tree.places(of: items[1]) == [FolderPlace(folder: nil, title: "No folder")])
+        #expect(tree.count(acme, in: items) == 1)
+        #expect(tree.count(personal, in: items) == 1)
+        #expect(tree.items(in: billing, of: items).map(\.id) == [1])
+        #expect(tree.items(in: personal, of: items).map(\.id) == [1])
+        #expect(tree.items(in: nil, of: items).map(\.id) == [2])
+        #expect(tree.groups(items).map(\.folder) == [nil, billing, personal])
+    }
+
     @Test("a folder without credentials has no group")
     func emptyFoldersHaveNoGroup() {
         let groups = tree.groups([row(1, "Netflix", folder: personal)])

@@ -36,10 +36,28 @@ use tempfile::TempDir;
 const PASS: &str = "synthetic-upgrade-pass";
 const NEW_PASS: &str = "synthetic-upgrade-new-pass";
 const WRONG: &str = "synthetic-upgrade-wrong";
-const CURRENT: i64 = 34;
+const CURRENT: i64 = 35;
 /// Schema 18: folders, before trusted devices. Never released.
 const MID: i64 = 18;
 const OLD: i64 = 17;
+
+/// What a file of schema 35 has and a file of schema 34 has not (`src/vault/schema35.rs`):
+/// the public links, and several folders per credential with tombstones. The way back
+/// keeps the first live folder of each credential. The rebuilt `item_folder` has no triggers; the step to 35
+/// makes them again when the file migrates.
+const SCHEMA35_ONLY: &str = "
+DROP TABLE public_link;
+CREATE TABLE item_folder_v34 (item_id INTEGER PRIMARY KEY, folder_uuid TEXT NOT NULL);
+INSERT INTO item_folder_v34 (item_id, folder_uuid)
+    SELECT f.item_id, f.folder_uuid FROM item_folder f
+    WHERE f.removed_at IS NULL AND NOT EXISTS (
+        SELECT 1 FROM item_folder g
+        WHERE g.item_id = f.item_id AND g.removed_at IS NULL
+            AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
+    );
+DROP TABLE item_folder;
+ALTER TABLE item_folder_v34 RENAME TO item_folder;
+";
 
 /// What a copy of schema 19 has and a copy of schema 18 has not; `relay_device` comes
 /// back (empty in a pushed copy) with the DDL of schema 16.
@@ -193,6 +211,10 @@ fn set_schema(path: &Path, passphrase: &str, version: i64, digest: bool) {
         content_digest(&conn),
         "the test digest is the algorithm of the app"
     );
+    if version < 35 {
+        // Schema 35: several folders per credential and public links.
+        conn.execute_batch(SCHEMA35_ONLY).unwrap();
+    }
     if version < 34 {
         // Schema 34: the key source of relay memberships (`src/vault/schema34.rs`).
         conn.execute_batch("ALTER TABLE relay_membership DROP COLUMN key_source;")

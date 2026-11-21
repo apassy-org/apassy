@@ -520,8 +520,9 @@ impl DesktopApp {
     /// `saved` presses "I Saved It". `revoke` presses Revoke… of the first other device,
     /// `go` the button of the open alert or sheet (an owner check opens), `new-recovery`
     /// "New Code…" of the Recovery Code row, and `share-…` a button of Shared Vaults
-    /// ([`DesktopApp::tour_share`]): the rows of the section have no fixed place. Returns
-    /// false when the step does not fit the window.
+    /// ([`DesktopApp::tour_share`]): the rows of the section have no fixed place; `link-…`
+    /// a step of the Share sheet (`DesktopApp::tour_link`). Returns false when the step
+    /// does not fit the window.
     #[doc(hidden)]
     pub fn tour_connect(&mut self, ctx: &egui::Context, step: &str, text: Option<&str>) -> bool {
         match step {
@@ -585,6 +586,7 @@ impl DesktopApp {
                 self.owner.check.is_some()
             }
             step if step.starts_with("share-") => self.tour_share(ctx, step),
+            step if step.starts_with("link-") => self.tour_link(ctx, step),
             _ => false,
         }
     }
@@ -659,6 +661,7 @@ impl DesktopApp {
         live.epoch = None;
         self.ui.connect.sheet = None;
         self.ui.connect.share.reset();
+        self.ui.connect.links.reset();
     }
 
     /// A link for the origin of this device's Connect account on the start screen, while
@@ -889,6 +892,7 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if matches!(view.shown, Shown::Account(_)) && !view.locked {
         super::share::section(app, ui);
+        super::super::share_sheet::settings_section(app, ui);
     }
     sheets(app, &ctx);
 }
@@ -952,6 +956,7 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     // only with an unlocked vault (not for the start-screen step of the session).
     if app.ui.connect.live.session.is_open() && app.owner_ui.session.epoch().is_some() {
         super::share::step(app, ctx);
+        super::super::share_sheet::step(app, ctx);
     }
 }
 

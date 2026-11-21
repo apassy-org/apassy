@@ -853,6 +853,24 @@ fn schema_marks(path: &Path) -> (i64, i64) {
     marks
 }
 
+/// What a file of schema 35 has and a file of schema 34 has not (`src/vault/schema35.rs`):
+/// the public links, and several folders per credential with tombstones. The way back
+/// keeps the first live folder of each credential. The rebuilt `item_folder` has no triggers; the step to 35
+/// makes them again when the file migrates.
+const SCHEMA35_ONLY: &str = "
+DROP TABLE public_link;
+CREATE TABLE item_folder_v34 (item_id INTEGER PRIMARY KEY, folder_uuid TEXT NOT NULL);
+INSERT INTO item_folder_v34 (item_id, folder_uuid)
+    SELECT f.item_id, f.folder_uuid FROM item_folder f
+    WHERE f.removed_at IS NULL AND NOT EXISTS (
+        SELECT 1 FROM item_folder g
+        WHERE g.item_id = f.item_id AND g.removed_at IS NULL
+            AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
+    );
+DROP TABLE item_folder;
+ALTER TABLE item_folder_v34 RENAME TO item_folder;
+";
+
 /// What a snapshot of schema 19 has and a snapshot of schema 18 has not; `relay_device`
 /// comes back (empty) with the DDL of schema 16.
 const SCHEMA19_ONLY: &str = "
@@ -895,6 +913,10 @@ fn set_schema(path: &Path, version: i64) {
         )
         .unwrap();
     assert_eq!(stored, content_digest(&conn), "the algorithm of the app");
+    if version < 35 {
+        // Schema 35: several folders per credential and public links.
+        conn.execute_batch(SCHEMA35_ONLY).unwrap();
+    }
     if version < 34 {
         // Schema 34: the key source of relay memberships (`src/vault/schema34.rs`).
         conn.execute_batch("ALTER TABLE relay_membership DROP COLUMN key_source;")

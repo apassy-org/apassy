@@ -2617,6 +2617,9 @@ pub(crate) struct State {
     /// Settings › Connect › Shared Vaults (connect-account-v1 section 16).
     #[cfg(feature = "vault")]
     pub(crate) share: share::ShareUi,
+    /// The Share sheet and Settings › Connect › Public Links (connect-share-v1).
+    #[cfg(feature = "vault")]
+    pub(crate) links: super::share_sheet::LinksUi,
     /// The demo build: the mockup frame that the section shows.
     #[cfg(not(feature = "vault"))]
     pub(crate) demo: demo::Frame,
