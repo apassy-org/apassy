@@ -1277,9 +1277,11 @@ fn view_steps() -> Vec<Step> {
         // Folder), then the sheets Move to Folder and Add to Folder.
         Click(LAYOUT.infra_row.0, LAYOUT.infra_row.1),
         Wait(1.0),
-        Shot("folder-infra"),
         Click(LAYOUT.stripe_live_in_infra.0, LAYOUT.stripe_live_in_infra.1),
-        Wait(1.5),
+        Wait(1.0),
+        // The detail keeps the scroll of credential-options: back to its top.
+        Scroll(820.0, 450.0, 2000.0),
+        Wait(1.0),
         Shot("credential-two-folders"),
         Click(LAYOUT.more.0, LAYOUT.more.1),
         Wait(1.0),

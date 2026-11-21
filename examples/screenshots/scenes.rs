@@ -515,10 +515,6 @@ impl Scene {
                     self.connect.answer_route_error(prefix, 404, "not_found");
                 }
             }
-            "links-on" => {
-                self.connect.clear_route_errors();
-                self.connect.set_links_marker(true);
-            }
             // A device row that the signed list does not hold.
             "unlisted-device" => {
                 let id = self.this_account.clone().expect("account");
@@ -772,13 +768,6 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Shot("link-error-no-email"),
                 escape(),
                 Wait(1.0),
-                Hook("links-off"),
-                Connect("link-item"),
-                Wait(2.5),
-                Shot("link-error-no-links"),
-                escape(),
-                Wait(1.0),
-                Hook("links-on"),
             ]);
             steps.extend(settings);
             steps.extend([
@@ -794,6 +783,16 @@ pub(crate) fn steps(name: &str) -> Vec<super::Step> {
                 Click(LINKS_REVOKE.0, LINKS_REVOKE.1),
                 Wait(1.0),
                 Shot("link-settings-revoke-confirm"),
+                // Last: a relay without the links routes. The window asks such a relay
+                // again only after a while, so nothing after this needs the list.
+                Key(egui::Key::Num1, cmd),
+                Wait(1.0),
+                Hook("links-off"),
+                Connect("link-item"),
+                Wait(2.5),
+                Shot("link-error-no-links"),
+                escape(),
+                Wait(1.0),
             ]);
         }
         "connect-member" => {
