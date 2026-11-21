@@ -435,12 +435,28 @@ fn the_link_errors_are_clear() {
     );
     assert!(error_text(&LinkError::LinkLimit, None).contains("Revoke one first"));
     assert!(LinkError::MailUnavailable.to_string().contains(ANYONE));
+    // The daily budget of new links is its own refusal, with no retry before the day ends
+    // (connect-share-v1 section 7), not "wait N seconds".
+    let daily = LinkError::from(ConnectError::Refused {
+        status: 429,
+        code: "link_create_limit".into(),
+    });
+    assert_eq!(daily, LinkError::CreateLimit);
+    assert!(!daily.can_retry());
+    assert_eq!(
+        daily.to_string(),
+        "This account has made its most links for today."
+    );
     assert_eq!(
         LinkError::TooLarge { fit: 12, total: 40 }.to_string(),
         "Too large for one link: 12 of 40 secrets fit. Share fewer."
     );
     // No price and no purchase hint in a limit (connect-share-v1 section 8).
-    for error in [LinkError::LinkLimit, LinkError::MailUnavailable] {
+    for error in [
+        LinkError::LinkLimit,
+        LinkError::CreateLimit,
+        LinkError::MailUnavailable,
+    ] {
         let text = error_text(&error, Some(25));
         for word in ["€", "plan", "Plan", "upgrade", "buy", "price"] {
             assert!(!text.contains(word), "{word}: {text}");

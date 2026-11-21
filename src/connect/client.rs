@@ -84,6 +84,9 @@ pub(super) fn connect_error(error: ApiError) -> ConnectError {
             (409, "conflict") => ConnectError::Conflict,
             (409, "account_id_taken") => ConnectError::AccountIdTaken,
             (409, "seat_limit") => ConnectError::SeatLimit,
+            // The daily budget of new links (connect-share-v1 section 7): its `Retry-After`
+            // is the end of the UTC day, not a short wait, so it is a refusal of its own.
+            (429, "link_create_limit") => ConnectError::Refused { status, code },
             (429, _) => ConnectError::RateLimited(retry_after.unwrap_or(60).max(1)),
             _ => ConnectError::Refused { status, code },
         },

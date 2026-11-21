@@ -134,6 +134,8 @@ pub enum LinkError {
     BadAddress(String),
     /// `403 link_limit`: the account has its most live links.
     LinkLimit,
+    /// `429 link_create_limit`: the account made its most new links for this UTC day.
+    CreateLimit,
     /// `503 mail_unavailable`: this relay has no mail sender for the code mails.
     MailUnavailable,
     /// The relay has no links routes: a `404` without [`LINKS_MARKER`].
@@ -180,6 +182,7 @@ impl fmt::Display for LinkError {
             Self::LinkLimit => {
                 f.write_str("This account has its most live links. Revoke one first.")
             }
+            Self::CreateLimit => f.write_str("This account has made its most links for today."),
             Self::MailUnavailable => f.write_str(
                 "This relay cannot send e-mail codes. Choose \u{201c}Anyone with the link\u{201d}.",
             ),
@@ -209,6 +212,9 @@ impl From<ConnectError> for LinkError {
     fn from(error: ConnectError) -> Self {
         match &error {
             ConnectError::Refused { status: 403, code } if code == "link_limit" => Self::LinkLimit,
+            ConnectError::Refused { status: 429, code } if code == "link_create_limit" => {
+                Self::CreateLimit
+            }
             ConnectError::Refused { status: 503, code } if code == "mail_unavailable" => {
                 Self::MailUnavailable
             }
