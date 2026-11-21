@@ -468,6 +468,8 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
             super::folders::move_many_sheet(app, ctx, &item_ids)
         }
         #[cfg(feature = "vault")]
+        Sheet::AddToFolder { item_ids } => super::folders::add_sheet(app, ctx, &item_ids),
+        #[cfg(feature = "vault")]
         Sheet::MoveFolder { uuid } => super::folders::move_folder_sheet(app, ctx, &uuid),
         #[cfg(feature = "vault")]
         Sheet::NewFolder { parent } => {

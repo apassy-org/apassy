@@ -115,7 +115,9 @@ pub use dedup::{
     DuplicateGroup, DuplicateMember, MERGED_INTO_DETAIL, MERGED_PREFIX, MergeOutcome, MergeRefusal,
     merged_count,
 };
-pub use folders::{Folder, FolderIndex, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES};
+pub use folders::{
+    Folder, FolderChange, FolderIndex, ItemFolderMove, MAX_FOLDER_DEPTH, MAX_FOLDER_NAME_BYTES,
+};
 pub use history::{
     EditChange, FILL_DETAIL_PREFIX, ItemEvent, ItemEventKind, ItemTimes, MAX_ITEM_EVENTS,
 };
