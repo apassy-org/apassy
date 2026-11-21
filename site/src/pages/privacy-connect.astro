@@ -17,8 +17,9 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
   updated={UPDATED}
 >
   <Fragment slot="lead">
-    Apassy needs no account. Apassy Connect, the optional paid service, has accounts. This text says what Connect
-    stores, why, and for how long. It is part of the <a href="/privacy">privacy policy</a>.
+    Apassy needs no account. Apassy Connect, the optional hosted service, has accounts. With Connect you can also make
+    public links to a secret or a folder; a person who opens one needs no account. This text says what Connect stores,
+    why, and for how long. It is part of the <a href="/privacy">privacy policy</a>.
   </Fragment>
 
   <h2>Who is responsible</h2>
@@ -91,29 +92,34 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
         <td>13 months</td>
       </tr>
       <tr>
-        <td>Public links: the link id, the sealed copy of what you share, the expiry, the mode, "Show once", and the count of opens</td>
-        <td>To give the sealed copy to whoever opens the link. Connect never gets the key: it is only in the link.</td>
-        <td>Until the link expires, you revoke it, or you delete the account. "Show once" deletes the copy at the first open.</td>
+        <td>Public links: the sealed snapshot of what you share, which Connect cannot read, with the link id, the expiry, the mode, and "Show once"</td>
+        <td>To give the sealed snapshot to whoever opens the link. Connect never gets the key: it is only in the link.</td>
+        <td>Until the link expires (at most 30 days), you revoke it, or you delete the account. A "Show once" link loses it at the first open.</td>
       </tr>
       <tr>
-        <td>A link of "Only these e-mail addresses": a keyed hash of each address, never the address; a hash of each code, and its tries</td>
-        <td>To check the address and the code of a reader, and to limit guesses</td>
-        <td>With the link. A code: at most 15 minutes.</td>
+        <td>A link of "Only these e-mail addresses": a keyed hash of each allowed address, never the address. The key comes from the link, and Connect does not hold it.</td>
+        <td>To check the address of a reader</td>
+        <td>With the snapshot of the link</td>
       </tr>
       <tr>
-        <td>The id of every link ever made, alone: no account, no time</td>
-        <td>So that a link id is never used twice</td>
-        <td>Permanently</td>
-      </tr>
-      <tr>
-        <td>A code mail: the reader's address and the code</td>
+        <td>An e-mail code: the reader's plain address and the code, in the mail queue</td>
         <td>To send the code</td>
-        <td>Until our mail server takes it, at most 1 hour. Never in a log.</td>
+        <td>Until the mail is sent, at most 1 hour. Never in a log.</td>
       </tr>
       <tr>
-        <td>The number of code mails of each account and of Connect</td>
-        <td>For the daily caps of code mails</td>
-        <td>Until the end of the day (UTC)</td>
+        <td>For each keyed hash of an address: the codes of the day, a hash of the live code, and the wrong tries</td>
+        <td>To cap the code mails one address can get (5 a day for each link) and to limit guesses</td>
+        <td>The codes of the day: until the end of the day (UTC). A code: at most 15 minutes. The rest: with the link.</td>
+      </tr>
+      <tr>
+        <td>Link counters: the opens and the time of the last open, the code requests, the codes that did not open, and the code mails of each account and of Connect for the day</td>
+        <td>To show you the opens, and for the limits and the daily caps of code mails</td>
+        <td>With the link. The mail counts: until the end of the day (UTC).</td>
+      </tr>
+      <tr>
+        <td>The id of every link that was used, alone: no account, no time</td>
+        <td>So that a link id is never used again</td>
+        <td>Permanently</td>
       </tr>
       <tr>
         <td>The hosted bouncer brain, only if you turn it on: the command and the task of each question to the brain, never a credential value</td>
@@ -137,10 +143,10 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
   <p>
     A person who opens a public link needs no account and no app. A link is a copy of the moment you made it: a later
     change does not reach it. Links are not in the backups of Connect, so a link that expired or was revoked is gone. For a link of "Only these e-mail addresses", the reader types their address,
-    and if it is on the link, Connect mails them a code of 8 digits. This is the only mail that Connect sends. It is
-    plain text, from <code>connect@apassy.wyderka.cc</code>, through our mail server, which hands it to Brevo for
-    delivery. Connect keeps the address only until the mail is sent, and caps the code mails of each account and of the
-    whole service each day.
+    and if it is on the link, Connect mails them a code of 8 digits. The reader is often not a customer of Connect. This
+    is the only mail that Connect sends. It is plain text, from <code>connect@apassy.wyderka.cc</code>, and Connect's own
+    mail server delivers it straight to the reader's mail provider. Connect keeps the address only until the mail is
+    sent, and caps the code mails of each account and of the whole service each day.
   </p>
 
   <h2>Payments by Stripe</h2>
@@ -158,8 +164,11 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
       <strong>Cloudflare</strong>: this site and the front of Connect. It keeps the usual request logs (IP address, time,
       address, browser) to run and protect the service.
     </li>
-    <li><strong><OwnerFact name="hosting" what="hosting provider" /></strong>: the server of Connect and of our mail server.</li>
-    <li><strong>Brevo</strong> (France): delivers the code mails of public links. It gets the reader's address and the code.</li>
+    <li><strong><OwnerFact name="hosting" what="hosting provider" /></strong>: the server of Connect and of its mail server.</li>
+    <li>
+      <strong>The reader's mail provider</strong>: Connect's own mail server sends the code mail of a public link
+      straight to it, with the reader's address and the code. No other mail service gets them.
+    </li>
   </ul>
   <p>
     Some of these providers can process data outside the European Economic Area. They do so under the standard
