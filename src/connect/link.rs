@@ -22,8 +22,11 @@
 //! 4. The answer is a [`LinkCreated`] receipt; [`LinkCreated::apply`] writes the vault
 //!    row (with `K` and the account) and the history. Only a receipt writes a row.
 //! 5. [`ConnectAccount::revoke_public_link`] deletes the link at Connect for the account
-//!    that made it. A `200`, or a `404` for its own link, is a [`LinkRevoked`] receipt;
-//!    only [`LinkRevoked::apply`] writes the revoke. Without an answer nothing is written.
+//!    that made it. A `200`, or a `404` for its own link that carries the marker of the
+//!    links routes ([`LINKS_MARKER`]), is a [`LinkRevoked`] receipt; only
+//!    [`LinkRevoked::apply`] writes the revoke. A `404` without the marker (a relay
+//!    without the routes, such as an older image after a rollback), any other answer,
+//!    and no answer write nothing ([`LinkError::NotConfirmed`], "Try Again").
 //!
 //! `K` is erased on drop, never in a `Debug` text or a log, and leaves this module only
 //! in the link text ([`link_text`]).
@@ -63,6 +66,9 @@ pub const MAX_FIELDS: usize = 64;
 pub const MIN_EXPIRY: u64 = 10 * 60;
 /// The longest expiry: 30 days.
 pub const MAX_EXPIRY: u64 = 30 * 24 * 60 * 60;
+/// The header that every answer of the links routes carries with the value `1`. A `404`
+/// of a revoke is "gone" only with it.
+pub const LINKS_MARKER: &str = "x-apassy-links";
 /// The default expiry: 7 days.
 pub const DEFAULT_EXPIRY: u64 = 7 * 24 * 60 * 60;
 
@@ -128,6 +134,10 @@ pub enum LinkError {
     NotMade,
     /// The link was made by another account; only that account revokes it.
     NotMaker,
+    /// Connect answered a revoke with `404` without the marker of the links routes (for
+    /// example a relay image without them): the revoke is not done, and the link may
+    /// still open.
+    NotConfirmed,
     /// Another failure of the call.
     Connect(ConnectError),
     /// The vault could not be read or written.
@@ -153,6 +163,7 @@ impl fmt::Display for LinkError {
             Self::MailUnavailable => f.write_str("Connect cannot send e-mail codes now. Choose \u{201c}Anyone with the link\u{201d}, or try later."),
             Self::NotMade => f.write_str("The link was not made. Create it again."),
             Self::NotMaker => f.write_str("Another account made this link. Only that account can revoke it."),
+            Self::NotConfirmed => f.write_str("Connect did not confirm the revoke. The link may still open. Try again."),
             Self::Connect(error) => error.fmt(f),
             Self::Vault => f.write_str("Apassy could not read or write the vault."),
         }
@@ -177,6 +188,7 @@ impl LinkError {
     /// Whether a new try of the same step may work (no answer, or a busy Connect).
     pub fn can_retry(&self) -> bool {
         match self {
+            Self::NotConfirmed => true,
             Self::Connect(error) => {
                 matches!(
                     error,
@@ -907,6 +919,14 @@ impl PendingLink {
     }
 }
 
+/// What a `DELETE` of a link came to.
+enum Deleted {
+    /// `200`.
+    Done(LinkDeleted),
+    /// `404` with the marker of the links routes: the link is gone at Connect.
+    Gone,
+}
+
 /// A link that Connect took. Only [`Self::apply`] writes its row.
 #[derive(Debug)]
 pub struct LinkCreated {
@@ -1055,8 +1075,9 @@ impl ConnectAccount {
     }
 
     /// Revoke `link` at Connect. Only the account that made it may: a link of another
-    /// account is [`LinkError::NotMaker`], and nothing is sent. A `200`, or a `404` (the
-    /// link is gone at Connect already), is the receipt that writes the revoke; any other
+    /// account is [`LinkError::NotMaker`], and nothing is sent. A `200`, or a `404` with
+    /// [`LINKS_MARKER`] (the link is gone at Connect already), is the receipt that writes
+    /// the revoke; a `404` without the marker is [`LinkError::NotConfirmed`]; any other
     /// answer, and no answer, writes nothing.
     pub fn revoke_public_link(&mut self, link: &PublicLink) -> Result<LinkRevoked, LinkError> {
         if link.account_id != self.state().account_id {
@@ -1069,20 +1090,30 @@ impl ConnectAccount {
             uuid: link.uuid.clone(),
             account_id: link.account_id.clone(),
         };
-        match self.with_token(|client, token| client.delete_link(token, &link.link_id)) {
-            Ok(answer) if answer.link_id == link.link_id => Ok(receipt),
-            Ok(_) => Err(LinkError::Connect(ConnectError::BadAnswer)),
-            Err(ConnectError::NotFound) => Ok(receipt),
-            Err(error) => Err(LinkError::from(error)),
+        match self.delete_marked(&link.link_id)? {
+            Deleted::Done(answer) if answer.link_id == link.link_id => Ok(receipt),
+            Deleted::Done(_) => Err(LinkError::Connect(ConnectError::BadAnswer)),
+            Deleted::Gone => Ok(receipt),
         }
+    }
+
+    /// `DELETE` of `link_id`: done on `200`, gone on a `404` that carries
+    /// [`LINKS_MARKER`]; a `404` without it is [`LinkError::NotConfirmed`].
+    fn delete_marked(&mut self, link_id: &str) -> Result<Deleted, LinkError> {
+        let answer = self.with_token(|client, token| match client.delete_link(token, link_id) {
+            (Ok(answer), _) => Ok(Some(Deleted::Done(answer))),
+            (Err(ConnectError::NotFound), true) => Ok(Some(Deleted::Gone)),
+            (Err(ConnectError::NotFound), false) => Ok(None),
+            (Err(error), _) => Err(error),
+        });
+        answer
+            .map_err(LinkError::from)?
+            .ok_or(LinkError::NotConfirmed)
     }
 
     /// Revoke at Connect a link id that the vault does not hold (a link whose row was
     /// never written).
     pub fn revoke_unknown_link(&mut self, link_id: &str) -> Result<(), LinkError> {
-        match self.with_token(|client, token| client.delete_link(token, link_id)) {
-            Ok(_) | Err(ConnectError::NotFound) => Ok(()),
-            Err(error) => Err(LinkError::from(error)),
-        }
+        self.delete_marked(link_id).map(|_| ())
     }
 }

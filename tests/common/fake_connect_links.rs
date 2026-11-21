@@ -21,6 +21,8 @@ pub(super) struct LinkState {
     pub(super) used: std::collections::BTreeSet<String>,
     pub(super) limit: Option<u64>,
     pub(super) mail: bool,
+    /// The answers of the links routes carry `x-apassy-links: 1`.
+    pub(super) marker: bool,
 }
 
 impl Default for LinkState {
@@ -30,6 +32,7 @@ impl Default for LinkState {
             used: Default::default(),
             limit: Some(25),
             mail: true,
+            marker: true,
         }
     }
 }
@@ -141,11 +144,27 @@ impl FakeConnect {
         lock(&self.shared).public_links.mail = mail;
     }
 
+    /// The answers of the links routes carry their marker (`true`), or not (`false`: a
+    /// relay image without the routes, which answers `404` without it).
+    pub fn set_links_marker(&self, on: bool) {
+        lock(&self.shared).public_links.marker = on;
+    }
+
     /// A reader opened the link `link_id`.
     pub fn open_link(&self, link_id: &str) {
         if let Some(link) = lock(&self.shared).public_links.links.get_mut(link_id) {
             link.opens += 1;
         }
+    }
+}
+
+/// The marker header line of an answer to `path`: on the links routes, while it is on.
+pub(super) fn marked(state: &State, path: &str) -> &'static str {
+    let links = path.starts_with("/v1/account/links") || path.starts_with("/v1/links/");
+    if links && state.public_links.marker {
+        "x-apassy-links: 1\r\n"
+    } else {
+        ""
     }
 }
 

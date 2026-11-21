@@ -937,6 +937,54 @@ fn a_revoke_is_written_only_after_connect_confirms() {
     assert!(!live(&computer));
 }
 
+/// A `404` of a revoke is "gone" only with the marker of the links routes
+/// (`x-apassy-links: 1`). A `404` without it (an older relay image after a rollback,
+/// which has no such route) is not done: the link stays live in the vault, the error
+/// offers "Try Again", and the repeat at a relay with the routes revokes it.
+#[test]
+fn a_revoke_404_without_the_links_marker_is_not_done() {
+    let connect = FakeConnect::start();
+    let computer = Computer::new();
+    let mut account = create(&connect, &computer, "Ada");
+    let item = computer.vault(|vault| api_key(vault, "Deploy", "synthetic-deploy-token"));
+    let (_, row) = make_link(
+        &computer,
+        &mut account,
+        &LinkTarget::Item(item),
+        &LinkOptions::default(),
+    );
+    let live = |computer: &Computer| {
+        let link = computer.vault(|vault| vault.public_link(&row.uuid).unwrap().unwrap());
+        link.revoked_at.is_none() && link.key().is_some()
+    };
+    // A relay without the links routes: every link path is a plain 404.
+    connect.set_links_marker(false);
+    connect.answer_route_error("DELETE /v1/account/links", 404, "not_found");
+    let refused = account.revoke_public_link(&row).expect_err("not done");
+    assert_eq!(refused, LinkError::NotConfirmed);
+    assert!(refused.can_retry());
+    assert!(refused.to_string().contains("Try again"), "{refused}");
+    assert!(live(&computer));
+    assert!(
+        connect.link_bodies().contains_key(&row.link_id),
+        "the link still opens"
+    );
+    // A link the vault does not hold is not taken as revoked either.
+    assert_eq!(
+        account.revoke_unknown_link(&row.link_id),
+        Err(LinkError::NotConfirmed)
+    );
+    // The relay with the routes again: "Try Again" revokes it (200).
+    connect.clear_route_errors();
+    connect.set_links_marker(true);
+    let receipt = account.revoke_public_link(&row).expect("revoked");
+    assert!(connect.link_bodies().is_empty());
+    assert!(computer.vault(|vault| receipt.apply(vault)).unwrap());
+    assert!(!live(&computer));
+    // Its 404 with the marker, for the link that is gone now, is done.
+    assert!(account.revoke_unknown_link(&row.link_id).is_ok());
+}
+
 /// A lost answer of a creation is sent again with the exact body; Connect keeps one link.
 /// `409` of a repeat reads the list. The limit is `link_limit`, also for an account
 /// without a plan, which may make links.
