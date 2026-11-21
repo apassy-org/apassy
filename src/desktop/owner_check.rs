@@ -91,6 +91,48 @@ pub(crate) fn page_text(text: &str) -> String {
     dialog_cut(clean.trim())
 }
 
+/// The text of the owner check of a public link: what it shows (the first three names),
+/// how long it lasts, who opens it, and "show once".
+pub(crate) fn public_link_text(
+    name: &str,
+    secrets: &[String],
+    expires_at: u64,
+    one_time: bool,
+    addresses: &[String],
+) -> String {
+    let now = crate::desktop::companion::now();
+    let lasts = crate::broker::approvals::link_lasts(expires_at, now);
+    let names: Vec<String> = secrets
+        .iter()
+        .take(3)
+        .map(|s| format!("\u{201c}{}\u{201d}", page_text(s)))
+        .collect();
+    let more = secrets.len().saturating_sub(3);
+    let what = if secrets.len() == 1 && secrets[0] == name {
+        String::new()
+    } else if more > 0 {
+        format!(" It holds {} and {more} more.", names.join(", "))
+    } else {
+        format!(" It holds {}.", names.join(", "))
+    };
+    let who = match addresses.len() {
+        0 => "Anyone with the link can open it.".to_owned(),
+        _ => format!(
+            "Only {} can open it, with a code by e-mail.",
+            addresses
+                .iter()
+                .map(|a| page_text(a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    format!(
+        "Make a public link to \u{201c}{}\u{201d} for {lasts}?{what} {who}{}",
+        page_text(name),
+        if one_time { " It shows once." } else { "" }
+    )
+}
+
 /// The owner action of a request of a shared vault ([`OwnerRequest::from_share_action`]).
 fn share_request_action(request: OwnerRequest) -> OwnerAction {
     match request {
@@ -830,6 +872,17 @@ pub enum OwnerRequest {
         /// The short fingerprint of the key that the signed removal names.
         fingerprint: String,
         this_device: bool,
+    },
+    /// "Create Link" of the Share sheet: a public link (connect-share-v1). The fields are
+    /// those of `OwnerAction::CreatePublicLink`.
+    CreatePublicLink {
+        account_id: String,
+        link_id: String,
+        name: String,
+        secrets: Vec<String>,
+        expires_at: u64,
+        one_time: bool,
+        addresses: Vec<String>,
     },
     /// Delete the Apassy Connect account (section 6).
     DeleteConnectAccount {
@@ -1588,6 +1641,23 @@ impl OwnerRequest {
                 device_name: device_name.clone(),
                 fingerprint: fingerprint.clone(),
             },
+            Self::CreatePublicLink {
+                account_id,
+                link_id,
+                name,
+                secrets,
+                expires_at,
+                one_time,
+                addresses,
+            } => OwnerAction::CreatePublicLink {
+                account_id: account_id.clone(),
+                link_id: link_id.clone(),
+                name: name.clone(),
+                secrets: secrets.clone(),
+                expires_at: *expires_at,
+                one_time: *one_time,
+                addresses: addresses.clone(),
+            },
             Self::DeleteConnectAccount { account_id } => OwnerAction::DeleteConnectAccount {
                 account_id: account_id.clone(),
             },
@@ -2141,6 +2211,14 @@ impl OwnerRequest {
                 page_text(device_name),
                 page_text(fingerprint).replace(' ', "\u{a0}")
             ),
+            Self::CreatePublicLink {
+                name,
+                secrets,
+                expires_at,
+                one_time,
+                addresses,
+                ..
+            } => public_link_text(name, secrets, *expires_at, *one_time, addresses),
             Self::DeleteConnectAccount { .. } => "Delete your Apassy Connect account? The plan ends now, and every vault copy, device, and link of the account is deleted at Connect. Your vaults stay on your devices.".to_owned(),
             Self::NewRecoveryCode { .. } => "Make a new recovery code? Apassy shows it once. The old code stops working.".to_owned(),
             Self::RecoverConnectAccount { account_id } => format!(
@@ -2739,7 +2817,7 @@ pub struct OwnerFlows {
     /// takes it ([`OwnerFlows::take_connect_proof`]): the account call takes the proof
     /// by value, so it works once. A lock drops it; it is bound to the vault session and
     /// lives 60 s.
-    connect_proof: Option<OwnerProof>,
+    pub(crate) connect_proof: Option<OwnerProof>,
 }
 
 impl OwnerFlows {
@@ -3551,6 +3629,7 @@ impl DesktopApp {
             // account checks it again against the exact action before it calls Connect.
             OwnerRequest::ConfirmConnectDevice { .. }
             | OwnerRequest::RevokeConnectDevice { .. }
+            | OwnerRequest::CreatePublicLink { .. }
             | OwnerRequest::DeleteConnectAccount { .. }
             | OwnerRequest::NewRecoveryCode { .. }
             | OwnerRequest::RecoverConnectAccount { .. }

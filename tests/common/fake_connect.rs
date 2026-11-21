@@ -386,10 +386,15 @@ struct State {
     pending_without_signature: bool,
     /// The share codes and the lying hooks of section 16 (`fake_connect_share.rs`).
     share: share::ShareState,
+    /// The public links of connect-share-v1 (`fake_connect_links.rs`).
+    public_links: links::LinkState,
 }
 
 #[path = "fake_connect_share.rs"]
 mod share;
+
+#[path = "fake_connect_links.rs"]
+mod links;
 
 /// A running fake Connect.
 pub struct FakeConnect {
@@ -1196,8 +1201,11 @@ fn handle(shared: &Arc<Mutex<State>>, mut stream: TcpStream) {
     if lost {
         return;
     }
+    // Every answer of the links routes carries their marker (connect-share-v1), unless
+    // the fake plays a relay without those routes.
+    let marker = links::marked(&lock(shared), &request.path);
     let head = format!(
-        "HTTP/1.1 {} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} X\r\nContent-Length: {}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n{marker}Connection: close\r\n\r\n",
         answer.status,
         answer.body.len()
     );
@@ -1973,6 +1981,9 @@ fn authenticated(
     origin: &str,
 ) -> Outgoing {
     if let Some(answer) = share::route(state, method, rest, body, account, device, origin) {
+        return answer;
+    }
+    if let Some(answer) = links::route(state, method, rest, body, account) {
         return answer;
     }
     match (method, rest) {

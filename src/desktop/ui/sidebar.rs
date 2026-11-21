@@ -359,6 +359,7 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Move(String),
         Delete(String),
         Drop(String, Vec<u64>, bool),
+        Share(String),
     }
     let mut act = None;
     // Depth first: a folder shows when each folder above it is open.
@@ -431,6 +432,9 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
             if ui.button("Move Folder…").clicked() {
                 act = Some(Act::Move(folder.uuid.clone()));
             }
+            if ui.button("Share…").clicked() {
+                act = Some(Act::Share(folder.uuid.clone()));
+            }
             ui.separator();
             if ui.button("Delete…").clicked() {
                 act = Some(Act::Delete(folder.uuid.clone()));
@@ -447,6 +451,7 @@ fn folder_rows(app: &mut DesktopApp, ui: &mut egui::Ui) {
         Some(Act::Drop(uuid, ids, add)) => {
             super::folders::drop_on_folder(app, &ids, &uuid, add);
         }
+        Some(Act::Share(uuid)) => app.ui.sheet = Some(super::Sheet::ShareFolder { uuid }),
         None => {}
     }
 }

@@ -480,7 +480,13 @@ pub(super) fn sheets(app: &mut DesktopApp, ctx: &egui::Context) {
         #[cfg(feature = "vault")]
         Sheet::DeleteFolder { uuid } => super::folders::delete_sheet(app, ctx, &uuid),
         #[cfg(feature = "vault")]
-        Sheet::Share { item_id } => super::items::share_sheet(app, ctx, item_id),
+        Sheet::Share { item_id } => {
+            super::share_sheet::sheet(app, ctx, crate::connect::link::LinkTarget::Item(item_id))
+        }
+        #[cfg(feature = "vault")]
+        Sheet::ShareFolder { uuid } => {
+            super::share_sheet::sheet(app, ctx, crate::connect::link::LinkTarget::Folder(uuid))
+        }
         #[cfg(feature = "vault")]
         Sheet::BrainHosting => crate::desktop::brain_hosting_ui::sheet(app, ctx),
         #[cfg(not(feature = "vault"))]

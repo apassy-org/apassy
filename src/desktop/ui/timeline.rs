@@ -138,6 +138,8 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
             Some(moved_detail(&event.detail)),
             Tone::Neutral,
         ),
+        ItemEventKind::LinkCreated => ("Public link made".to_owned(), detail(), Tone::Accent),
+        ItemEventKind::LinkRevoked => ("Public link revoked".to_owned(), detail(), Tone::Neutral),
     }
 }
 
