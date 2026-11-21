@@ -3,7 +3,7 @@
 //! It records every request it gets, and it answers with an echo of the request, so
 //! a test can check what the relay sent and what came back.
 //!
-//! Special targets: `/chunked`, `/big?n=N`, `/close`, `/gzip`, `/redirect`. Every
+//! Special targets: `/chunked`, `/big?n=N`, `/close`, `/gzip`, `/redirect`, `/worker`. Every
 //! other target gets the echo.
 #![allow(dead_code)]
 
@@ -283,6 +283,16 @@ fn answer(stream: &mut Tls, recorded: &Recorded) -> std::io::Result<()> {
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(body)
+        }
+        // A page that asks for a service worker scope and has its own policy.
+        "/worker" => {
+            let body = b"<script>navigator.serviceWorker.register('/sw.js')</script>";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nService-Worker-Allowed: /\r\nContent-Security-Policy: default-src 'self'\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )?;
             stream.write_all(body)

@@ -24,3 +24,7 @@
 !crates/apassy-relay/vendor/
 !crates/apassy-relay/examples/
 !crates/apassy-relay/tests/
+# The viewer of public links: the relay embeds it for a relay without the edge Worker.
+!crates/apassy-relay/deploy/worker/public/share.html
+!crates/apassy-relay/deploy/worker/public/share.js
+!crates/apassy-relay/deploy/worker/public/share.css

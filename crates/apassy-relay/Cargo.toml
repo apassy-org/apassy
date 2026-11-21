@@ -29,6 +29,9 @@ base64 = "=0.23.1"
 ring = "=0.17.14"
 # Response heads from upstream hosts.
 httparse = "=1.10.1"
+# The normal form of an e-mail address of a public link (connect-share-v1 section 6): the
+# domain by UTS #46, as the app and the viewer make it. The core's pin.
+idna = "=1.1.0"
 # The public suffix list (compiled in): an item host that is a public suffix or a
 # whole registrable domain covers subdomains that other people may own.
 psl = "=2.1.238"

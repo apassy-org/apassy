@@ -5,14 +5,17 @@
 //!   of folders, or in none. Each row is one membership and merges on its own
 //!   ([`super::merge`]): `updated_at` (Unix milliseconds) and `updated_by` (the device)
 //!   are its version, and `removed_at` (Unix milliseconds) marks a membership that ended,
-//!   a tombstone that stays so the removal reaches every device. The later version wins,
-//!   a removal wins a tie, and `added_at` (Unix milliseconds) takes the earliest value
-//!   that any device has, so every device agrees on the first folder of a credential.
-//!   Only rows without `removed_at` count. The rows stay child rows of the credential
-//!   ([`super::merge::CHILD_TABLES`]): a change marks a change of the credential. The
-//!   step rebuilds the table, so it makes its triggers again (the sync triggers of schema
-//!   14 and the bouncer scope triggers of schema 20, [`item_folder_triggers_sql`]), and
-//!   an index on `folder_uuid` serves the list of one folder. Every row of schema 34
+//!   a tombstone that stays so the removal reaches every device. The later version wins
+//!   with all its values, `added_at` (Unix milliseconds) included, and a removal wins a
+//!   tie, so every device ends with the same rows and the same first folder of a
+//!   credential. Only rows without `removed_at` count. The rows stay child rows of the
+//!   credential ([`super::merge::CHILD_TABLES`]): they go with it. A change of a row does
+//!   not change the version of the credential (it has a version of its own, and the
+//!   synced digest counts the rows), so a folder change never makes a conflict with an
+//!   edit of the credential on another device. The step rebuilds the table, so it makes
+//!   the bouncer scope triggers of schema 20 again ([`item_folder_triggers_sql`]; the
+//!   update ends the scopes only for a change of the membership) and not the sync
+//!   triggers of schema 14; an index on `folder_uuid` serves the list of one folder. Every row of schema 34
 //!   stays, with the `updated_at` and `updated_by` of its item as `added_at` and as its
 //!   version; a credential had one folder then, so it stays its first folder.
 //! - `public_link` (synced row by row, [`super::merge`]) holds each public link that the
@@ -55,7 +58,7 @@
 use rusqlite::Transaction;
 
 use super::types::{SCHEMA_VERSION, VaultErrorKind, VaultResult, err};
-use super::{merge, verify_expected_columns_in};
+use super::verify_expected_columns_in;
 
 /// The schema version of several folders per credential and of public links.
 pub(super) const MULTI_FOLDER_SCHEMA_VERSION: i64 = 35;
@@ -110,10 +113,17 @@ CREATE TABLE public_link (
     key BLOB NOT NULL CHECK (typeof(key) = 'blob'),
     origin TEXT NOT NULL CHECK (
         (origin GLOB 'https://?*'
-            OR origin = 'http://localhost' OR origin GLOB 'http://localhost:[0-9]*'
-            OR origin = 'http://127.0.0.1' OR origin GLOB 'http://127.0.0.1:[0-9]*')
+            OR origin = 'http://localhost' OR origin GLOB 'http://localhost:*'
+            OR origin = 'http://127.0.0.1' OR origin GLOB 'http://127.0.0.1:*')
+        AND origin NOT GLOB '*[@\\ ?#]*'
         AND instr(substr(origin, instr(origin, '://') + 3), '/') = 0
-        AND origin NOT GLOB '*[ ?#]*'),
+        AND instr(substr(origin, instr(origin, '://') + 3), ':') <> 1
+        AND (instr(substr(origin, instr(origin, '://') + 3), ':') = 0
+            OR (length(substr(substr(origin, instr(origin, '://') + 3),
+                    instr(substr(origin, instr(origin, '://') + 3), ':') + 1)) BETWEEN 1 AND 5
+                AND substr(substr(origin, instr(origin, '://') + 3),
+                    instr(substr(origin, instr(origin, '://') + 3), ':') + 1)
+                    NOT GLOB '*[^0-9]*'))),
     account_id TEXT NOT NULL CHECK (account_id <> ''),
     expires_at INTEGER NOT NULL,
     one_time INTEGER NOT NULL DEFAULT 0 CHECK (one_time IN (0, 1)),
@@ -156,18 +166,41 @@ fn marks_sql(version: i64) -> String {
     )
 }
 
-/// The triggers of `item_folder`, which a rebuild of the table drops: a change of a row
-/// is a change of its credential (`merge::child_triggers_sql`, schema 14), and it ends
-/// the bouncer scopes of the credential (the triggers of `schema20.rs`, which also run
-/// while sync applies rows).
+/// The triggers of `item_folder` in schema 35, which a rebuild of the table drops: a new,
+/// ended, or moved membership ends the bouncer scopes of the credential (the triggers of
+/// `schema20.rs`, which also run while sync applies rows). A new version of a row with
+/// the same membership (an `added_at` from another device) ends none. A change of a row
+/// does not touch the credential: the sync triggers of schema 14 are not made again.
 fn item_folder_triggers_sql() -> String {
-    let mut sql = merge::child_triggers_sql(&["item_folder"]);
+    let mut sql = bouncer_insert_delete_sql();
+    sql.push_str(
+        "CREATE TRIGGER bouncer_scope_item_folder_update AFTER UPDATE ON item_folder
+         WHEN OLD.removed_at IS NOT NEW.removed_at OR OLD.folder_uuid IS NOT NEW.folder_uuid
+             OR OLD.item_id IS NOT NEW.item_id
+         BEGIN
+         DELETE FROM bouncer_scope WHERE item_id IN (OLD.item_id, NEW.item_id); END;\n",
+    );
+    sql
+}
+
+/// The bouncer scope triggers of schema 20 for a new and a deleted row of `item_folder`.
+fn bouncer_insert_delete_sql() -> String {
+    let mut sql = String::new();
     for (event, target) in [("insert", "NEW"), ("delete", "OLD")] {
         sql.push_str(&format!(
             "CREATE TRIGGER bouncer_scope_item_folder_{event} AFTER {event} ON item_folder BEGIN
              DELETE FROM bouncer_scope WHERE item_id = {target}.item_id; END;\n"
         ));
     }
+    sql
+}
+
+/// The triggers of `item_folder` in schema 34: the sync triggers of a child table and
+/// the bouncer scope triggers of schema 20, as that schema has them.
+#[cfg(test)]
+fn item_folder_triggers_v34_sql() -> String {
+    let mut sql = super::merge::child_triggers_sql(&["item_folder"]);
+    sql.push_str(&bouncer_insert_delete_sql());
     sql.push_str(
         "CREATE TRIGGER bouncer_scope_item_folder_update AFTER UPDATE ON item_folder BEGIN
          DELETE FROM bouncer_scope WHERE item_id IN (OLD.item_id, NEW.item_id); END;\n",
@@ -216,7 +249,7 @@ DROP TABLE item_folder;
 ALTER TABLE item_folder_v34 RENAME TO item_folder;
 "
     .to_owned();
-    sql.push_str(&item_folder_triggers_sql());
+    sql.push_str(&item_folder_triggers_v34_sql());
     sql.push_str(&marks_sql(PREVIOUS_SCHEMA_VERSION));
     sql
 }
@@ -225,6 +258,7 @@ ALTER TABLE item_folder_v34 RENAME TO item_folder;
 mod tests {
     use rusqlite::Connection;
 
+    use super::super::merge;
     use super::*;
     use crate::contracts::CredentialKind;
     use crate::vault::{
@@ -347,7 +381,8 @@ mod tests {
                 assert_eq!(by, item_by);
                 assert!(removed_at.is_none());
             }
-            // The child triggers and the index are there again.
+            // The bouncer scope triggers and the index are there again; the sync triggers of a
+            // child table are not.
             let names: Vec<String> = conn
                 .prepare(
                     "SELECT name FROM sqlite_schema WHERE tbl_name = 'item_folder'
@@ -366,9 +401,6 @@ mod tests {
                     "bouncer_scope_item_folder_insert",
                     "bouncer_scope_item_folder_update",
                     "item_folder_folder",
-                    "item_folder_sync_delete",
-                    "item_folder_sync_insert",
-                    "item_folder_sync_update",
                 ]
             );
         }
@@ -389,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_of_a_folder_row_is_a_change_of_its_credential() {
+    fn a_change_of_a_folder_row_leaves_the_version_of_its_credential() {
         let dir = tempfile::TempDir::new().unwrap();
         let (path, [a, _, _], [_, home]) = previous_file(&dir);
         let mut vault = Vault::open(&path).unwrap();
@@ -414,10 +446,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stamp(&vault), (1, "old".to_owned()));
+        // The row has its own version; the credential keeps its own, so an edit of it on
+        // another device makes no conflict with this change.
         vault.add_item_to_folder(a, &home).unwrap();
-        let (at, by) = stamp(&vault);
+        vault.remove_item_from_folder(a, &home).unwrap();
+        assert_eq!(stamp(&vault), (1, "old".to_owned()));
+        // The way back makes the sync triggers of schema 34 again.
+        vault.lock().unwrap();
+        drop(vault);
+        let conn = raw(&path);
+        conn.execute_batch(&downgrade_sql()).unwrap();
+        conn.execute(
+            "UPDATE item_folder SET folder_uuid = folder_uuid WHERE item_id = ?1",
+            [i64::try_from(a).unwrap()],
+        )
+        .unwrap();
+        let (at, by): (i64, String) = conn
+            .query_row(
+                "SELECT updated_at, updated_by FROM item WHERE id = ?1",
+                [i64::try_from(a).unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert!(at > 1);
         assert_ne!(by, "old");
+        close_conn(conn).unwrap();
     }
 
     #[test]
@@ -612,6 +665,10 @@ mod tests {
                 origin: "http://127.0.0.1:8787",
                 ..Link::live("g5", link_id(5))
             },
+            Link {
+                origin: "https://connect.example.test:8443",
+                ..Link::live("g7", link_id(7))
+            },
             // A revoke: no key and no addresses.
             Link {
                 key: Vec::new(),
@@ -723,6 +780,62 @@ mod tests {
                 Link {
                     origin: "https://",
                     ..Link::live("b16", link_id(24))
+                },
+            ),
+            (
+                "userinfo after a port",
+                Link {
+                    origin: "http://localhost:8@evil.example",
+                    ..Link::live("b21", link_id(29))
+                },
+            ),
+            (
+                "userinfo after an address",
+                Link {
+                    origin: "http://127.0.0.1:1@evil.example",
+                    ..Link::live("b22", link_id(31))
+                },
+            ),
+            (
+                "a backslash",
+                Link {
+                    origin: "https://connect.example.test\\x",
+                    ..Link::live("b23", link_id(32))
+                },
+            ),
+            (
+                "userinfo",
+                Link {
+                    origin: "https://user@connect.example.test",
+                    ..Link::live("b24", link_id(33))
+                },
+            ),
+            (
+                "a port that is not a number",
+                Link {
+                    origin: "https://connect.example.test:44x",
+                    ..Link::live("b25", link_id(34))
+                },
+            ),
+            (
+                "an empty port",
+                Link {
+                    origin: "http://localhost:",
+                    ..Link::live("b26", link_id(35))
+                },
+            ),
+            (
+                "a host after localhost",
+                Link {
+                    origin: "http://localhost.evil.example",
+                    ..Link::live("b27", link_id(36))
+                },
+            ),
+            (
+                "no host before the port",
+                Link {
+                    origin: "https://:443",
+                    ..Link::live("b28", link_id(37))
                 },
             ),
             (

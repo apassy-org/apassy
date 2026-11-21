@@ -15,6 +15,9 @@ mod fake_stripe;
 #[path = "common/relay.rs"]
 mod relay;
 
+#[path = "common/links.rs"]
+mod links;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1397,9 +1400,10 @@ fn the_cutover_keeps_the_account_stores_as_plain_files_that_connect_mode_opens()
         (after.teams, after.account, after.operator, after.connect),
         (2, 2, 0, 0)
     );
-    // Only `relay.db`, the record, and the two stores are left, plain.
+    // Only `relay.db`, the record, the public links, and the two stores are left, plain.
     let mut expected = vec![
         "relay.db".to_string(),
+        "links.db".to_string(),
         cutover::CUTOVER_FILE.to_string(),
         format!("teams/{}.db", f.store),
         format!("teams/{}.db", f.other_store),
@@ -1412,6 +1416,7 @@ fn the_cutover_keeps_the_account_stores_as_plain_files_that_connect_mode_opens()
         .collect();
     assert_eq!(left, expected);
     assert!(is_plain(&f.data().join("relay.db")));
+    assert!(is_plain(&f.data().join("links.db")));
     assert!(is_plain(&f.config.team_path(&f.store)));
     assert!(is_plain(&f.config.team_path(&f.other_store)));
     // No file key, no other team, and the record of the cutover in the relay audit.
@@ -1679,6 +1684,7 @@ fn stopped_and_finished(at: Interrupt) {
         }
         let mut expected = vec![
             "relay.db".to_string(),
+            "links.db".to_string(),
             cutover::CUTOVER_FILE.to_string(),
             format!("teams/{}.db", f.store),
             format!("teams/{}.db", f.other_store),
@@ -2237,7 +2243,9 @@ fn a_dry_run_of_a_committed_cutover_answers_what_the_confirmed_run_does() {
         (pending.state.as_str(), pending.plan_sha256.as_str()),
         ("committing", plan.as_str())
     );
+    // The files of the stores, and the public links.
     let mut converted = pending.converted.clone();
+    converted.push("links.db".to_string());
     converted.sort();
     let mut to_convert = pending.to_convert.clone();
     to_convert.sort();
@@ -2643,4 +2651,152 @@ fn the_binary_backs_up_cuts_over_and_serves_connect_mode() {
     assert_eq!(again["state"], "done");
     let _ = BillingSettings::new;
     let _ = ConnectConfig::default;
+}
+
+// ---- Public links through the cutover (docs/SPEC.md section 38). ----
+
+/// `links.db` is keyed with the master key before the cutover; the cutover makes it plain
+/// with every row, as a kept store, and binds it in its plan. After it, in `connect` mode,
+/// a live link opens, an opened one-time link is still listed, and a revoked id cannot be
+/// made again.
+#[test]
+fn the_cutover_keeps_the_links_and_their_used_ids() {
+    let c = connect::start_with_config(|_| {});
+    let a = c.account("Ada");
+    let live = links::anyone_body(false, 7 * 86_400);
+    let revoked = links::anyone_body(false, 7 * 86_400);
+    let once = links::anyone_body(true, 7 * 86_400);
+    for body in [&live, &revoked, &once] {
+        c.ok("POST", "/v1/account/links", Some(&a.token), Some(body));
+    }
+    let id = |body: &Value| body["link_id"].as_str().unwrap().to_string();
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/links/{}", id(&revoked)),
+        Some(&a.token),
+        None,
+    );
+    let (status, _) = c.call(
+        "POST",
+        &format!("/v1/links/{}/open", id(&once)),
+        None,
+        Some(&links::open_body(true)),
+    );
+    assert_eq!(status, 200);
+    let Connect { relay, stripe, .. } = c;
+    let (config, dir) = relay.stop_keep();
+    assert!(!is_plain(&config.links_path()), "keyed before the cutover");
+    cutover::stopped_backup(&config, now()).unwrap();
+    let dry = cutover::run(&config, &Options::default(), now()).unwrap();
+    let planned = dry.links.clone().expect("links.db is in the plan");
+    assert_eq!(planned.name, "links.db");
+    assert!(
+        !dry.left.iter().any(|name| name.starts_with("links")),
+        "{:?}",
+        dry.left
+    );
+    assert!(
+        !dry.files_before
+            .iter()
+            .any(|entry| entry.name.starts_with("links"))
+    );
+    // The plan binds links.db: a change after the dry run is refused, and nothing changes.
+    {
+        let conn = rusqlite::Connection::open(config.links_path()).unwrap();
+        conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+            .unwrap();
+        conn.execute_batch("UPDATE link SET opens = opens + 7;")
+            .unwrap();
+    }
+    let stale = cutover::run(
+        &config,
+        &Options {
+            confirm: Some(dry.plan_sha256.clone()),
+            ..Options::default()
+        },
+        now(),
+    );
+    assert!(stale.is_err());
+    assert!(!is_plain(&config.links_path()));
+    assert!(!is_plain(&config.directory_path()));
+    let plan = cutover::run(&config, &Options::default(), now())
+        .unwrap()
+        .plan_sha256;
+    assert_ne!(plan, dry.plan_sha256);
+    let done = cutover::run(
+        &config,
+        &Options {
+            confirm: Some(plan),
+            ..Options::default()
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!(done.state, "done");
+    let after = done.links_after.clone().expect("links.db after");
+    assert!(is_plain(&config.links_path()));
+    assert!(!config.data_dir.join(cutover::PLAIN_LINKS_FILE).exists());
+    assert!(
+        !done.left.iter().any(|name| name.starts_with("links")),
+        "{:?}",
+        done.left
+    );
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(config.data_dir.join(cutover::CUTOVER_FILE)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["links"]["name"], "links.db");
+    assert_eq!(record["links_after"]["sha256"], after.sha256.as_str());
+    // A second run changes nothing.
+    assert!(
+        !cutover::run(&config, &Options::default(), now())
+            .unwrap()
+            .changed
+    );
+    // Connect mode opens the plain file with every row.
+    let relay = start_existing(connect_mode(&config), dir, None, "");
+    let c = Connect::around(relay, stripe);
+    let mut a = a;
+    a.token = account_token(&c.relay.url, &a);
+    let opened = c.ok(
+        "POST",
+        &format!("/v1/links/{}/open", id(&live)),
+        None,
+        Some(&links::open_body(false)),
+    );
+    assert_eq!(opened["sealed"], live["sealed"]);
+    let listed = c.ok("GET", "/v1/account/links", Some(&a.token), None);
+    let states: BTreeSet<(String, String)> = listed["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["link_id"].as_str().unwrap().to_string(),
+                row["state"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        BTreeSet::from([
+            (id(&live), "live".to_string()),
+            (id(&once), "opened".to_string())
+        ])
+    );
+    // The revoked id stays used: 404 to the public, 409 to a new creation.
+    let (status, _) = c.call(
+        "POST",
+        &format!("/v1/links/{}/open", id(&revoked)),
+        None,
+        Some(&links::open_body(false)),
+    );
+    assert_eq!(status, 404);
+    let mut again = revoked.clone();
+    again["expires_at"] = json!(now() + 3600);
+    let (status, answer) = c.call("POST", "/v1/account/links", Some(&a.token), Some(&again));
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (409, Some("conflict"))
+    );
 }
