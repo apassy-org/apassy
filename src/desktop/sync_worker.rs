@@ -296,6 +296,9 @@ impl UiStatus {
 /// What a sync of the worker means for the window. Each event names the vault (its list
 /// ID); the window drops an event about a vault that is not open any more.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// The outcome holds the merge report (with the link notes of schema 35); a few events a
+// sync, so the size of the largest variant costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SyncEvent {
     /// A sync finished. Its merge can have kept conflict copies or skipped variables.
     Synced { id: String, outcome: SyncOutcome },
