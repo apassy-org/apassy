@@ -17,7 +17,10 @@
 // free Connect routes `/v1/connect` and `/v1/connect/challenge` answer 410 `hosted_retired`
 // here (so they need no guard: CONNECT_LIMITER and CONNECT_PREFIX_LIMITER are not used, and
 // nothing reaches the relay), and the agent proxy `/p/` has the JSON cap (the relay has no
-// proxy there and answers 410). `/dl/*`, `/guide`, and `/install.sh` are the same in both.
+// proxy there and answers 410). `/dl/*`, `/guide`, `/install.sh`, and the viewer of public
+// links (`/s` with `/share.js` and `/share.css`, connect-share-v1 section 5) are the same in both.
+// In both, a request with `Service-Worker: script` is refused on every path, and an answer of
+// the agent proxy `/p/` loses `Service-Worker-Allowed` and gets the CSP `sandbox` (section 5.1).
 // Any other value is a configuration error: 503 on every relay route, 404 on
 // `/internal/*`; the static files stay. The deploy refuses a RELAY_MODE that differs from
 // the mode of the relay (scripts/check-relay-mode.mjs).
@@ -283,13 +286,52 @@ function unsafeDownloadPath(path: string): boolean {
   }
 }
 
-function staticResponse(response: Response, noStore: boolean): Response {
+function staticResponse(response: Response, noStore: boolean, viewer = false): Response {
   const headers = new Headers(response.headers);
   headers.delete(EDGE_HEADER);
   headers.set("x-content-type-options", "nosniff");
   if (noStore) headers.set("cache-control", "no-store");
+  if (viewer) for (const [name, value] of Object.entries(VIEWER_HEADERS)) headers.set(name, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
+
+/**
+ * The viewer of a public link (connect-share-v1 section 5): the page `/s` and its script and
+ * style, each the asset of the same name. The key of a link is in the fragment, which never
+ * reaches the Worker; the page asks only its own origin.
+ */
+const VIEWER_FILES = new Map([
+  ["/s", "/share.html"],
+  ["/share.js", "/share.js"],
+  ["/share.css", "/share.css"],
+]);
+
+// Whoever runs a script at this origin can read the key in the fragment of a public link
+// (connect-share-v1 section 5.1). So no service worker is registered here: a browser fetches the
+// script of one with `Service-Worker: script`, and every such request is refused, on every
+// path. And a page of the agent proxy never runs with this origin's rights: its answers lose
+// `Service-Worker-Allowed` and get the CSP `sandbox`, an opaque origin.
+function isServiceWorkerScript(request: Request): boolean {
+  return (request.headers.get("service-worker") ?? "").trim().toLowerCase() === "script";
+}
+
+function proxyResponse(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.delete("service-worker-allowed");
+  headers.append("content-security-policy", "sandbox");
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+/** The headers of the viewer's three answers: no other origin, no inline code, no cache, no referrer, no index. */
+const VIEWER_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-robots-tag": "noindex, nofollow",
+  "x-frame-options": "DENY",
+  "cross-origin-opener-policy": "same-origin",
+};
 
 /** The codeless team route (SPEC 26): anyone can call it, so its limiter is the strictest. */
 const CONNECT_PATH = "/v1/connect";
@@ -334,6 +376,9 @@ function limiterFor(method: string, path: string, env: Env): CreateLimiter | und
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     // Check the raw path before URL parsing removes dot segments or backslashes.
+    if (isServiceWorkerScript(request)) {
+      return jsonError(400, "invalid_request", "This origin registers no service worker.");
+    }
     const rawPath = request.url.replace(/^[^:]+:\/\/[^/?#]+/, "").split(/[?#]/, 1)[0]!;
     const url = new URL(request.url);
     const mode = relayMode(env);
@@ -356,20 +401,26 @@ export default {
       return staticResponse(text(404, "not found"), false);
     }
     const isDownload = url.pathname.startsWith("/dl/");
-    const isStatic = url.pathname === "/install.sh" || url.pathname === "/guide" || isDownload;
+    const viewerFile = rawPath === url.pathname ? VIEWER_FILES.get(url.pathname) : undefined;
+    const isViewer = viewerFile !== undefined;
+    const isStatic = url.pathname === "/install.sh" || url.pathname === "/guide" || isDownload || isViewer;
     if (isStatic) {
       const noStore = !isDownload;
       if (request.method !== "GET" && request.method !== "HEAD") {
-        return staticResponse(text(405, "method not allowed"), noStore);
+        return staticResponse(text(405, "method not allowed"), noStore, isViewer);
       }
-      if (!env.ASSETS) return staticResponse(text(404, "not found"), noStore);
+      if (!env.ASSETS) return staticResponse(text(404, "not found"), noStore, isViewer);
       if (url.pathname === "/guide") url.pathname = "/guide.html";
+      if (viewerFile !== undefined) {
+        url.pathname = viewerFile;
+        url.search = "";
+      }
       const headers = new Headers(request.headers);
       headers.delete(EDGE_HEADER);
       headers.delete(CLIENT_PREFIX_HEADER);
       headers.delete(CLIENT_PREFIX_MAC_HEADER);
       const assetRequest = new Request(url, { method: request.method, headers });
-      return staticResponse(await env.ASSETS.fetch(assetRequest), noStore);
+      return staticResponse(await env.ASSETS.fetch(assetRequest), noStore, isViewer);
     }
 
     if (mode === undefined) return text(503, "relay not configured");
@@ -492,7 +543,8 @@ export default {
       // The body and the answer stream. Nothing is buffered, and no URL is logged:
       // the path holds session keys. A tunnel upgrade keeps its headers, and the relay's
       // `101` (with its WebSocket) is returned as it is.
-      return await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
+      const response = await (env.RELAY ? env.RELAY.fetch(target, init) : fetch(target, init));
+      return url.pathname.startsWith(PROXY_PREFIX) ? proxyResponse(response) : response;
     } catch {
       return text(502, "relay unreachable");
     }

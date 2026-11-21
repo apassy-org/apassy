@@ -62,6 +62,22 @@ Connect never does the way B swap on an Apassy server and never holds a team key
 - Purchase: on the Mac, through a web checkout (Stripe) that returns to the app. The iPhone shows the plan only. There is no In-App Purchase. (Carried over from 2026-10-13.)
 - Stripe today has the products of the old split: Personal (EUR 1 a month) and Team (EUR 2 a member a month), in the sandbox and the live account. Renaming them to Connect Personal and Connect Team, and adding Connect Family, changes the Stripe account: do it only with the owner's confirmation, before stage 7.
 
+### Sharing: public links and shares with a person (ADR 0047)
+
+Owner decisions of 2026-11-21. Public links come in release A, shares with a person in release B ([ADR 0047](../adr/0047-shared-folders-links-and-people.md), [connect-share-v1](../contracts/connect-share-v1.md)).
+
+| | No plan | Connect Personal | Connect Family, each person | Connect Team, each member | Own relay |
+| --- | --- | --- | --- | --- | --- |
+| Public links, live at once | 25 | 25 | 25 | 100 | no limit |
+| Longest life of a public link | 30 days | 30 days | 30 days | 30 days | 30 days |
+| Receive a share with a person, and edit it when the sharer allows | yes | yes | yes | yes | yes |
+| Share with a person (release B) | no | yes | yes | yes | yes |
+| Secrets with edit rights, each counted once (release B) | – | 10 | 10 | no limit | no limit |
+
+- A public link needs a Connect account, not a plan. A link opens for anyone with it, or only for the e-mail addresses that the sharer named ("Only these e-mail addresses": Connect mails the reader a one-time code). A link lives 7 days by default.
+- The numbers are Connect's settings with these defaults. Read-only shares with a person have only technical caps.
+- The iPhone shows the limits and names no plan change (section 3).
+
 ## 4. Until Connect exists
 
 | What | Now | Ends |

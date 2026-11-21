@@ -35,7 +35,7 @@ Sources read: `docs/adr/0001`–`0039`, `docs/goal.md`, `docs/product/plans.md`,
 | --- | --- |
 | `0.5.16-core` | 10 |
 | `plan:s2-s3` | 14 |
-| `plan:s4-teams` | 21 |
+| `plan:s4-teams` | 20 |
 | `plan:s5-env-0011` | 10 |
 | `plan:s6-sharing` | 4 |
 | `plan:s7-connect` | 11 |
@@ -44,7 +44,7 @@ Sources read: `docs/adr/0001`–`0039`, `docs/goal.md`, `docs/product/plans.md`,
 | `physical` | 13 |
 | `superseded` | 9 |
 | `tee-deferred` | 6 |
-| `other` | 24 |
+| `other` | 25 |
 | **Total** | **131** |
 
 ### The `other` points
@@ -54,6 +54,7 @@ Sources read: `docs/adr/0001`–`0039`, `docs/goal.md`, `docs/product/plans.md`,
 | 0010-1 | Connectors as plugins (P4a, P4b) | A new ADR. goal.md puts it out of scope; the owner's 2026-11-03 rule puts it back in. |
 | 0011-7 | ADR 0011 stage 6 for Windows (service account), and stage 4 for Windows | A decision to port to Windows. No ADR or plan covers Windows; the code does not build there. |
 | 0012-1 | macOS notification for an access request | A small unit: `OwnerEvent` (`src/desktop/notify.rs:88-96`) has no access-request kind. |
+| 0014-1 | A shared collection as another sync scope | ADR 0047 release B: schema 36, the collection routes of Connect, the share sync of the Mac and Linux, and the release-B sections of connect-share-v1. |
 | 0015-1 | `latest.json` `file` to the versioned name; end `/download/Apassy.dmg` | An owner decision that no app before 0.5.0 is in use, then a change of `scripts/build-dmg.sh:340` and the Worker. |
 | 0021-1 | Fill a login in a cross-origin frame (D4); agent fills top frame only (ADR 0036) | A design with a host permission for the frame, and a security review. |
 | 0022-6 | 64 MiB push through the Cloudflare edge (open question 3) | One test push on the live relay (ops, owner go). |
@@ -142,7 +143,7 @@ Touch ID unlock (A3, paused in the fourth round) is built: `src/desktop/unlock.r
 
 | ID | Section | Point | State and evidence | Category |
 | --- | --- | --- | --- | --- |
-| 0014-1 | §7 | A shared collection as another sync scope (own file, own key) | Not built; `SyncScope` has one scope | `plan:s4-teams` |
+| 0014-1 | §7 | A shared collection as another sync scope (own file, own key) | Decided by [ADR 0047](../adr/0047-shared-folders-links-and-people.md) section 5 (2026-11-21): a collection is a relay-sync-v1 store of the kind `collection` with its own key, written only by the sharing account and imported by each recipient, without the version-vector merge; release B, not built. Release A (public links, [connect-share-v1](../contracts/connect-share-v1.md)) does not need it | `other` |
 
 ### ADR 0015 — Automatic updates
 

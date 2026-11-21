@@ -7371,3 +7371,465 @@ fn connect_account_v1_share_vectors_match_the_contract() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public links of ADR 0047 release A: docs/contracts/connect-share-v1.md and
+// tests/fixtures/connect-share-v1/ (made by generate_vectors.mjs with WebCrypto). The helpers
+// are local to this test, not product code: they derive, seal, and normalise as a strict party
+// of the contract would, with `ring` and `idna`. The viewer test of the edge Worker
+// (crates/apassy-relay/deploy/worker/test/share.test.ts) opens the same vectors with WebCrypto.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "vault")]
+#[allow(dead_code)]
+mod connect_share_v1 {
+    use ring::{aead, hkdf, hmac};
+    use serde_json::Value;
+
+    pub const CONTRACT: &str = include_str!("../docs/contracts/connect-share-v1.md");
+    pub const PLANS: &str = include_str!("../docs/product/plans.md");
+    pub const VECTORS: &str = include_str!("fixtures/connect-share-v1/link-vectors.json");
+    pub const TAG_ID: &str = "apassy-connect public-link id v1";
+    pub const TAG_KEY: &str = "apassy-connect public-link key v1";
+    pub const TAG_ADDRESS: &str = "apassy-connect public-link address v1";
+    pub const TAG_SEAL: &str = "apassy-connect public-link v1";
+    pub const PAD: usize = 1024;
+    pub const MAX_PLAINTEXT: usize = 32 * 1024;
+
+    pub fn vectors() -> Value {
+        serde_json::from_str(VECTORS).unwrap()
+    }
+
+    pub fn b64u(data: &[u8]) -> String {
+        apassy::sync::encode_b64u(data)
+    }
+
+    pub fn unb64u(text: &str) -> Vec<u8> {
+        apassy::sync::decode_b64u(text).unwrap()
+    }
+
+    pub fn hex(data: &[u8]) -> String {
+        data.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    struct Len(usize);
+
+    impl hkdf::KeyType for Len {
+        fn len(&self) -> usize {
+            self.0
+        }
+    }
+
+    /// HKDF-SHA256 with an empty salt and the tag as its info (section 3).
+    pub fn derive(key: &[u8], info: &str, len: usize) -> Vec<u8> {
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(key);
+        let info = [info.as_bytes()];
+        let okm = prk.expand(&info, Len(len)).unwrap();
+        let mut out = vec![0; len];
+        okm.fill(&mut out).unwrap();
+        out
+    }
+
+    /// The associated data of section 3: the parts joined with one `0x00`.
+    pub fn associated(
+        origin: &str,
+        link_id: &str,
+        expires_at: u64,
+        one_time: bool,
+        access: &str,
+    ) -> Vec<u8> {
+        [
+            TAG_SEAL,
+            origin,
+            link_id,
+            &expires_at.to_string(),
+            if one_time { "1" } else { "0" },
+            access,
+        ]
+        .join("\0")
+        .into_bytes()
+    }
+
+    /// The sealed form is the 12-byte nonce, then the AES-256-GCM ciphertext with its tag.
+    pub fn open(seal_key: &[u8], sealed: &[u8], associated: &[u8]) -> Option<Vec<u8>> {
+        if sealed.len() < 12 + 16 {
+            return None;
+        }
+        let (nonce, body) = sealed.split_at(12);
+        let key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, seal_key).ok()?);
+        let mut buffer = body.to_vec();
+        let plain = key
+            .open_in_place(
+                aead::Nonce::try_assume_unique_for_key(nonce).ok()?,
+                aead::Aad::from(associated),
+                &mut buffer,
+            )
+            .ok()?;
+        Some(plain.to_vec())
+    }
+
+    pub fn address_hash(address_key: &[u8], normalized: &str) -> String {
+        let key = hmac::Key::new(hmac::HMAC_SHA256, address_key);
+        b64u(hmac::sign(&key, normalized.as_bytes()).as_ref())
+    }
+
+    /// Section 6: the normal form of an address, or `None` when the text is not one.
+    pub fn normalize(text: &str) -> Option<String> {
+        let trimmed = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
+        let mut parts = trimmed.split('@');
+        let (local, domain) = (parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let local_ok = (1..=64).contains(&local.len())
+            && local.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~.".contains(&byte)
+            });
+        if !local_ok || local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+            return None;
+        }
+        if domain.is_empty()
+            || domain
+                .chars()
+                .any(|c| c.is_ascii() && !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        {
+            return None;
+        }
+        // UTS #46 ToASCII, non-transitional; then one trailing dot goes, so a mapped
+        // full-width dot counts as one too.
+        let ascii = idna::domain_to_ascii(domain).ok()?;
+        let domain = ascii.strip_suffix('.').unwrap_or(&ascii);
+        let labels: Vec<&str> = domain.split('.').collect();
+        if domain.len() > 253 || labels.len() < 2 {
+            return None;
+        }
+        let label_ok = |label: &&str| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        if !labels.iter().all(label_ok)
+            || !labels.last()?.starts_with(|c: char| c.is_ascii_lowercase())
+        {
+            return None;
+        }
+        let address = format!("{}@{domain}", local.to_ascii_lowercase());
+        (address.len() <= 254).then_some(address)
+    }
+
+    /// The codes of section 8, each with its status.
+    pub const CODES: [(&str, u16); 3] = [
+        ("link_limit", 403),
+        ("code_invalid", 403),
+        ("mail_unavailable", 503),
+    ];
+}
+
+/// Each link of the vectors: the link text, the id and both keys derive from its key, the
+/// associated data binds the origin, the id, the expiry, the one-time flag, and the access mode,
+/// the sealed form opens to the padded plaintext, and that is the snapshot as JSON followed by
+/// spaces up to a multiple of 1024 bytes. The body of the creation names the same values.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_share_v1_link_vector_opens() {
+    use connect_share_v1::*;
+
+    for tag in [TAG_ID, TAG_KEY, TAG_ADDRESS, TAG_SEAL] {
+        assert!(CONTRACT.contains(&format!("`{tag}`")), "{tag}");
+    }
+    let v = vectors();
+    assert_eq!(v["pad"], PAD);
+    let origin = v["origin"].as_str().unwrap();
+    let links = v["links"].as_array().unwrap();
+    assert_eq!(links.len(), 3);
+    for link in links {
+        let name = link["name"].as_str().unwrap();
+        let key = unb64u(link["key_b64u"].as_str().unwrap());
+        assert_eq!(key.len(), 32, "{name}");
+        assert_eq!(
+            link["link"].as_str().unwrap(),
+            format!("{origin}/s#v1.{}", b64u(&key)),
+            "{name}"
+        );
+        let link_id = hex(&derive(&key, TAG_ID, 16));
+        assert_eq!(link_id, link["link_id"].as_str().unwrap(), "{name}");
+        assert_eq!(link_id.len(), 32);
+        let seal_key = derive(&key, TAG_KEY, 32);
+        assert_eq!(
+            hex(&seal_key),
+            link["seal_key_hex"].as_str().unwrap(),
+            "{name}"
+        );
+        let address_key = derive(&key, TAG_ADDRESS, 32);
+        assert_eq!(
+            b64u(&address_key),
+            link["address_key_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        let (expires_at, one_time, access) = (
+            link["expires_at"].as_u64().unwrap(),
+            link["one_time"].as_bool().unwrap(),
+            link["access"].as_str().unwrap(),
+        );
+        assert!(matches!(access, "anyone" | "emails"), "{name}");
+        let ad = associated(origin, &link_id, expires_at, one_time, access);
+        assert_eq!(
+            b64u(&ad),
+            link["associated_data_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        let sealed = unb64u(link["sealed_b64u"].as_str().unwrap());
+        assert_eq!(
+            hex(&sealed[..12]),
+            link["nonce_hex"].as_str().unwrap(),
+            "{name}"
+        );
+        let plain = open(&seal_key, &sealed, &ad).expect(name);
+        assert_eq!(
+            b64u(&plain),
+            link["plaintext_b64u"].as_str().unwrap(),
+            "{name}"
+        );
+        assert_eq!(plain.len() % PAD, 0, "{name}");
+        assert!((PAD..=MAX_PLAINTEXT).contains(&plain.len()), "{name}");
+        assert_eq!(sealed.len(), 12 + plain.len() + 16, "{name}");
+        let json_length = link["json_length"].as_u64().unwrap() as usize;
+        assert!(plain.len() - json_length < PAD, "{name}: the least padding");
+        assert!(
+            plain[json_length..].iter().all(|byte| *byte == b' '),
+            "{name}"
+        );
+        let snapshot: Value = serde_json::from_slice(&plain).unwrap();
+        assert_eq!(snapshot, link["snapshot"], "{name}");
+        assert_eq!(snapshot["v"], 1, "{name}");
+        for item in snapshot["items"].as_array().unwrap() {
+            assert!(item["path"].is_array(), "{name}");
+            for field in item["fields"].as_array().unwrap() {
+                assert!(field["secret"].is_boolean(), "{name}");
+            }
+        }
+        let create = &link["create"];
+        let fields: Vec<&str> = create
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut sorted = fields.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            [
+                "access",
+                "address_hashes",
+                "expires_at",
+                "link_id",
+                "one_time",
+                "sealed"
+            ],
+            "{name}"
+        );
+        assert_eq!(create["link_id"], link["link_id"]);
+        assert_eq!(create["sealed"], link["sealed_b64u"]);
+        assert_eq!(create["expires_at"], link["expires_at"]);
+        assert_eq!(create["one_time"], link["one_time"]);
+        assert_eq!(create["access"], link["access"]);
+        let hashes = create["address_hashes"].as_array().unwrap();
+        assert_eq!(access == "emails", !hashes.is_empty(), "{name}");
+    }
+}
+
+/// A sealed form opens only with the values it was sealed with: a changed expiry, one-time
+/// flag, access mode, origin, or id, a changed byte of the sealed form, and a key of another
+/// link all fail.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_share_v1_a_changed_binding_does_not_open() {
+    use connect_share_v1::*;
+
+    let v = vectors();
+    let origin = v["origin"].as_str().unwrap();
+    let links = v["links"].as_array().unwrap();
+    for (index, link) in links.iter().enumerate() {
+        let key = unb64u(link["key_b64u"].as_str().unwrap());
+        let seal_key = derive(&key, TAG_KEY, 32);
+        let link_id = link["link_id"].as_str().unwrap();
+        let expires_at = link["expires_at"].as_u64().unwrap();
+        let one_time = link["one_time"].as_bool().unwrap();
+        let access = link["access"].as_str().unwrap();
+        let other_access = if access == "anyone" {
+            "emails"
+        } else {
+            "anyone"
+        };
+        let sealed = unb64u(link["sealed_b64u"].as_str().unwrap());
+        assert!(
+            open(
+                &seal_key,
+                &sealed,
+                &associated(origin, link_id, expires_at, one_time, access)
+            )
+            .is_some()
+        );
+        for changed in [
+            associated(origin, link_id, expires_at + 1, one_time, access),
+            associated(origin, link_id, expires_at - 1, one_time, access),
+            associated(origin, link_id, expires_at, !one_time, access),
+            associated(origin, link_id, expires_at, one_time, other_access),
+            associated(
+                "https://relay.example",
+                link_id,
+                expires_at,
+                one_time,
+                access,
+            ),
+            associated(origin, &"0".repeat(32), expires_at, one_time, access),
+        ] {
+            assert!(open(&seal_key, &sealed, &changed).is_none());
+        }
+        let ad = associated(origin, link_id, expires_at, one_time, access);
+        for at in [0, 12, sealed.len() - 1] {
+            let mut changed = sealed.clone();
+            changed[at] ^= 1;
+            assert!(open(&seal_key, &changed, &ad).is_none(), "byte {at}");
+        }
+        let other = &links[(index + 1) % links.len()];
+        let other_key = derive(&unb64u(other["key_b64u"].as_str().unwrap()), TAG_KEY, 32);
+        assert!(open(&other_key, &sealed, &ad).is_none());
+    }
+}
+
+/// Section 6: each address of the vectors has its normal form (or none), and each address hash
+/// of a link is the HMAC-SHA256 of the normal form under the link's address key.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_share_v1_address_hash_vectors() {
+    use connect_share_v1::*;
+
+    let v = vectors();
+    let cases = v["addresses"].as_array().unwrap();
+    assert!(cases.iter().any(|case| case["normalized"].is_null()));
+    for case in cases {
+        let input = case["input"].as_str().unwrap();
+        assert_eq!(
+            normalize(input).as_deref(),
+            case["normalized"].as_str(),
+            "{input:?}: the Rust implementation is the reference (contract section 6)"
+        );
+    }
+    // The edge cases of section 9 are all in the vectors.
+    let normal = |input: &str| {
+        cases
+            .iter()
+            .find(|case| case["input"] == input)
+            .unwrap_or_else(|| panic!("{input:?} is not in the vectors"))["normalized"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        normal("user@straße.example").as_deref(),
+        Some("user@xn--strae-oqa.example")
+    );
+    assert_eq!(
+        normal("user@example。com").as_deref(),
+        Some("user@example.com")
+    );
+    assert_eq!(normal("user@xn--a.example"), None);
+    assert_eq!(normal("user@a.0x10"), None);
+    let label = |length: usize| format!("user@{}.example", "a".repeat(length));
+    assert!(normal(&label(63)).is_some());
+    assert_eq!(normal(&label(64)), None);
+    let lengths: Vec<(usize, bool)> = cases
+        .iter()
+        .filter(|case| {
+            case["note"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("a domain of")
+        })
+        .map(|case| {
+            let input = case["input"].as_str().unwrap();
+            (input.len() - "u@".len(), case["normalized"].is_string())
+        })
+        .collect();
+    assert_eq!(lengths, [(252, true), (253, false), (254, false)]);
+    let mut seen = std::collections::BTreeSet::new();
+    for link in v["links"].as_array().unwrap() {
+        let key = unb64u(link["key_b64u"].as_str().unwrap());
+        let address_key = derive(&key, TAG_ADDRESS, 32);
+        let hashes = link["create"]["address_hashes"].as_array().unwrap();
+        let addresses = link["addresses"].as_array().unwrap();
+        assert_eq!(hashes.len(), addresses.len());
+        for (address, hash) in addresses.iter().zip(hashes) {
+            let normalized = normalize(address["input"].as_str().unwrap()).unwrap();
+            assert_eq!(normalized, address["normalized"].as_str().unwrap());
+            let expected = address_hash(&address_key, &normalized);
+            assert_eq!(expected.len(), 43);
+            assert_eq!(expected, address["hash"].as_str().unwrap());
+            assert_eq!(&Value::String(expected.clone()), hash);
+            assert!(
+                seen.insert(expected),
+                "an address hash is unique to its link"
+            );
+            // The same address under another link key has another hash.
+            let other = derive(b"another link key, 32 bytes long!", TAG_ADDRESS, 32);
+            assert_ne!(
+                address_hash(&other, &normalized),
+                address["hash"].as_str().unwrap()
+            );
+        }
+    }
+}
+
+/// Section 8 names each new code with its status; section 7 and the plans page give the same
+/// link limits.
+#[cfg(feature = "vault")]
+#[test]
+fn connect_share_v1_defines_its_codes_and_limits() {
+    use connect_share_v1::*;
+
+    for (code, status) in CODES {
+        let row = format!("| {status} | `{code}` |");
+        assert!(
+            CONTRACT.contains(&row),
+            "connect-share-v1 section 8 lacks {row}"
+        );
+    }
+    for row in [
+        "| Live links of an account without a plan, on Connect Personal, or on Connect Family | 25 |",
+        "| Live links of a Connect Team member | 100 |",
+        "| Live links on a relay that you run yourself | no plan limit |",
+        "| Expiry | 10 minutes to 30 days; the app's default is 7 days |",
+        "| Padded plaintext | 1 KiB to 32 KiB, a multiple of 1 KiB |",
+        "| A code | 8 digits, 15 minutes, 5 tries, one live code for each link and address |",
+        "| Wrong tries of a link and address | 10 over the life of the link;",
+        "| Codes of a link and address | 5 each UTC day,",
+        "| Code mails of a sharing account, each UTC day | 50 for an account without a plan, on Connect Personal, or on Connect Family; 200 for a Connect Team member;",
+    ] {
+        assert!(
+            CONTRACT.contains(row),
+            "connect-share-v1 section 7 lacks {row}"
+        );
+    }
+    assert!(
+        PLANS.contains("| Public links, live at once | 25 | 25 | 25 | 100 | no limit |"),
+        "plans.md lacks the link row"
+    );
+    // The requirements on a relay that unit R builds against (sections 4.1, 4.5, 5, 5.1).
+    for text in [
+        "`Service-Worker: script`, on every path, with `400 invalid_request`",
+        "has no `Service-Worker-Allowed` header",
+        "carries `Content-Security-Policy: sandbox`",
+        "a relay MUST NOT redirect these three paths",
+        "Connect MUST NOT store or log `address_key`",
+        "`link_id_used` in `links.db`: the id only, no account, no time, never deleted",
+        "require-trusted-types-for 'script'; trusted-types 'none'",
+        "The answer comes before any look at the addresses.",
+        "The scheme is `https:`; `http:` only for `http://localhost` and `http://127.0.0.1`",
+    ] {
+        assert!(CONTRACT.contains(text), "connect-share-v1 lacks {text:?}");
+    }
+}
