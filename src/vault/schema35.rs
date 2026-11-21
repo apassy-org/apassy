@@ -88,7 +88,6 @@ CREATE TABLE public_link (
     name TEXT NOT NULL,
     key BLOB NOT NULL,
     origin TEXT NOT NULL,
-    account_id TEXT NOT NULL DEFAULT '',
     expires_at INTEGER NOT NULL,
     one_time INTEGER NOT NULL DEFAULT 0 CHECK (one_time IN (0, 1)),
     access TEXT NOT NULL DEFAULT 'anyone' CHECK (access IN ('anyone', 'emails')),
@@ -107,7 +106,7 @@ CREATE INDEX public_link_root ON public_link(root_kind, root_uuid);
 /// What `verify_expected_columns_in` reads for schema 35 and later.
 pub(super) const COLUMNS: [&str; 2] = [
     "SELECT item_id, folder_uuid, added_at FROM item_folder LIMIT 0",
-    "SELECT uuid, link_id, root_kind, root_uuid, name, key, origin, account_id, expires_at, one_time,
+    "SELECT uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at, one_time,
          access, addresses, created_at, updated_at, updated_by, deleted_at
          FROM public_link LIMIT 0",
 ];

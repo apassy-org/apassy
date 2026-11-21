@@ -313,7 +313,6 @@ const LWW_TABLES: [LwwTable; 5] = [
             "name",
             "key",
             "origin",
-            "account_id",
             "expires_at",
             "one_time",
             "access",
