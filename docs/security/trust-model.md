@@ -1,6 +1,6 @@
 # Trust model
 
-Date: 2026-11-02. Updated 2026-11-03: way C without leases in runs (0.5.17), the accepted risk of a synced way C switch, the account device key, and the codeless relay copies; cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (built on `release/0.5.17`, not released yet; contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md); security panel [N8](../reviews/node-tailnet-2026-11/n8-panel.md)). Decision:
+Date: 2026-11-02. Updated 2026-11-03: way C without leases in runs (0.5.17), the accepted risk of a synced way C switch, the account device key, and the codeless relay copies; cloud agents through Tailscale Funnel; Apassy Connect as planned for stage 7; the node over the tailnet and the push gateway (built on `release/0.5.17`, not released yet; contracts [node-pairing-v1](../contracts/node-pairing-v1.md) and [push-gateway-v1](../contracts/push-gateway-v1.md); security panel [N8](../reviews/node-tailnet-2026-11/n8-panel.md)). Updated 2026-11-21: public links and the code mail of Connect, planned (ADR 0047 release A). Decision:
 [ADR 0037](../adr/0037-own-relay-open-source.md). This page says who can see what. Update it in the
 same change as any code that changes an answer here.
 
@@ -153,7 +153,7 @@ it.
 | Plain files at rest | In `APASSY_RELAY_MODE=connect` there is no master key: `relay.db` and the vault store files are plain SQLite. They hold the directory above and, in the stores, SQLCipher snapshots under the user's passphrase, signed heads, and receipts | — | Nothing in them opens a vault. Disk encryption of the host is the owner's choice; backups go through the encrypted pull of today |
 | Vault stores (blind sync store) | One relay-sync-v1 team for each vault: the current and the previous snapshot | Ciphertext, sizes, times, which device pushed | Vault contents. The passphrase never reaches Connect |
 | Account sign-in, the device list, and the safety words | Public keys, signed challenges, and the signed device list; a 15-minute account token in memory | Which device signs in, and when | It cannot add or remove a device for an Apassy client, or rename one: each change of the device list is an entry signed by a device of the list over the hash of the entry before (an `add` also over the new device's name), back to the account's first key, which each client pinned when it made or joined the account and which signed its own name, and each client pins the highest version it verified that holds its own key. A row that Connect adds, a key it swaps, or a removed device it lists again is not in the list: the client shows it as "Not verified" and never uses it as an account device (no store, no sync head, no later confirmation). A list older than the pinned one, or another history, verifies no device. A device that Connect only hides stays a device until a device of the list signs its removal. The joining device chooses its own name and signs it in its join request (one canonical form on both sides: trimmed, 1 to 64 bytes, no control character, never `-`); the confirming device shows, and signs into the list, only a name whose join signature verifies, and the joining device pins only a list whose `add` names it as it asked, so Connect can neither choose nor change the name of a device. A new device needs the confirmation of a verified device with six safety words and an owner check; the link code names the confirming device's key and the account's first key, and Connect never sees the code, so it can neither compute the words nor answer with other keys. Connect can refuse a sign-in, but a refusal never removes a device: the device forgets its key only when its owner confirms on it |
-| The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7. Account deletion deletes the copy |
+| The email | A copy of the Stripe customer's email, for the devices list and support | — | Connect sends no mail in stage 7; release A of ADR 0047 adds one mail, the code of a public link (section "Public links"). Account deletion deletes the copy |
 | Stripe (payment processor) | The customer: email, billing address, payment method, tax id; subscriptions and invoices (kept for legal retention) | The checkout and portal sessions, and the account id in `client_reference_id` and metadata | A device key, a token, a vault id, a device name, a value. Connect never sees card data or the address |
 | The webhook | Event ids for 30 days | Stripe events, checked with the endpoint secret | A forged or replayed event changes nothing: signature, 300 s tolerance, idempotency by event id |
 | The tunnel (byte relay) | Nodes and grants; for each account and month the counts of dials and streams and the bytes (also apart for the ingress and for each other account that dials its nodes), 13 months | TLS records, sizes, times; the client address of a WebSocket in memory | A device's requests, tokens, values: its TLS ends on the node and is pinned to the node's own certificate, which no CA issues. It logs no stream content |
@@ -353,6 +353,25 @@ it cannot learn or use a code.
 device name `Mac` (or `iPhone`) of a codeless relay copy, never the names that the owner gave them;
 the vault keeps its own names. A Connect team pushes at most 30 snapshots and 512 MiB of them an
 hour.
+
+## Public links (ADR 0047 release A, planned, not built)
+
+A public link shows a snapshot of a secret or a folder to whoever has the link
+([ADR 0047](../adr/0047-shared-folders-links-and-people.md) section 4,
+[connect-share-v1](../contracts/connect-share-v1.md)). The key `K` is in the fragment of the link
+(`<origin>/s#v1.<K>`): a browser sends no fragment to a server, and the viewer page takes it out of the
+address bar before its first request.
+
+| Part | Holds | Sees | Cannot see or do |
+| --- | --- | --- | --- |
+| The owner's devices | The link and its key in the vault table `public_link` (synced, under the passphrase) | Everything of the link | — |
+| Whoever has the link | The key | The snapshot (names, fields, notes) until the expiry, the revoke, or the one open of a "Show once" link | A one-time-code seed, a passkey, the history, anything outside the shared secret or folder, a later value |
+| Connect, `links.db` (not in the backups) | The link id, the account id, the times, the one-time flag, the access mode, the count of opens, the sealed form (padded to 1 KiB steps); for "Only these e-mail addresses" the address hashes, keyed by a key from `K`; a hash of each code, 10 minutes | The client address of each request in memory only; the address and the address key of a reader who asks for a code | `K`, the seal key, a value, a name. It cannot change the expiry, the one-time flag, or the access mode of a link that a viewer opens: the sealed form binds them, with the origin and the id. Without `K` the address hashes give no address |
+| Connect, as the check of "Only these e-mail addresses" | — | Whether a typed address is on the link | Connect makes this check; the viewer cannot. A Connect that breaks its rules can give the sealed form to anyone who has the link, never to someone without it |
+| The code mail | The outbox of `links.db` until it is sent, at most 1 hour | The operator's mail server and the provider that it relays through see the address and the code; plain text, no link | The link, the key, the sharer's name |
+| The mailbox of a named address | The code | Whoever reads that mailbox can open a link of that address | — |
+| The viewer page `/s` (Worker assets, or the relay that you run yourself) | Three static files | The browser runs them with a CSP of its own origin only, no inline script, no storage, no referrer, no index | It never asks for a password or an account. The script that the origin serves decides what the browser does with `K`: whoever controls the origin (the operator, or the edge) can serve another script |
+| The Cloudflare Worker (edge) | — | The open and code requests: link ids, sealed forms, addresses and address keys of code requests | `K` and the snapshot |
 
 ## The hosted relay today (until ADR 0037 stage 7)
 

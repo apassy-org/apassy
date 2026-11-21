@@ -1,0 +1,217 @@
+{
+  "contract": "connect-share-v1",
+  "note": "Synthetic vectors. Made by generate_vectors.mjs; do not edit by hand.",
+  "origin": "https://apassy-relay.wyderka.cc",
+  "tags": {
+    "id": "apassy-connect public-link id v1",
+    "key": "apassy-connect public-link key v1",
+    "address": "apassy-connect public-link address v1",
+    "seal": "apassy-connect public-link v1"
+  },
+  "pad": 1024,
+  "links": [
+    {
+      "name": "anyone",
+      "key_b64u": "K8yNWTfwMyoAX7OJFie8NfdoLsS8JvZoQjlJCv2kwJo",
+      "link": "https://apassy-relay.wyderka.cc/s#v1.K8yNWTfwMyoAX7OJFie8NfdoLsS8JvZoQjlJCv2kwJo",
+      "link_id": "d4e59a0011f71c40fb1dfdb1a8446660",
+      "seal_key_hex": "5ca70e5b41fc3c5ef3be1e9bd907ef812e4129a9cf05168a84b04ad8d3273124",
+      "address_key_b64u": "zbxgkntnyEMpeOdNL8WqVnVEVeyJPrevlpDgCMsZ8T8",
+      "expires_at": 1764331200,
+      "one_time": false,
+      "access": "anyone",
+      "snapshot": {
+        "v": 1,
+        "title": "Staging database",
+        "items": [
+          {
+            "title": "Staging database",
+            "kind": "database",
+            "path": [],
+            "fields": [
+              {
+                "name": "Host",
+                "value": "db.staging.example",
+                "secret": false
+              },
+              {
+                "name": "User",
+                "value": "app",
+                "secret": false
+              },
+              {
+                "name": "Password",
+                "value": "synthetic-Pa55-0001",
+                "secret": true
+              }
+            ],
+            "notes": "Synthetic vector. Not a real credential."
+          }
+        ]
+      },
+      "json_length": 332,
+      "plaintext_b64u": "eyJ2IjoxLCJ0aXRsZSI6IlN0YWdpbmcgZGF0YWJhc2UiLCJpdGVtcyI6W3sidGl0bGUiOiJTdGFnaW5nIGRhdGFiYXNlIiwia2luZCI6ImRhdGFiYXNlIiwicGF0aCI6W10sImZpZWxkcyI6W3sibmFtZSI6Ikhvc3QiLCJ2YWx1ZSI6ImRiLnN0YWdpbmcuZXhhbXBsZSIsInNlY3JldCI6ZmFsc2V9LHsibmFtZSI6IlVzZXIiLCJ2YWx1ZSI6ImFwcCIsInNlY3JldCI6ZmFsc2V9LHsibmFtZSI6IlBhc3N3b3JkIiwidmFsdWUiOiJzeW50aGV0aWMtUGE1NS0wMDAxIiwic2VjcmV0Ijp0cnVlfV0sIm5vdGVzIjoiU3ludGhldGljIHZlY3Rvci4gTm90IGEgcmVhbCBjcmVkZW50aWFsLiJ9XX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA",
+      "associated_data_b64u": "YXBhc3N5LWNvbm5lY3QgcHVibGljLWxpbmsgdjEAaHR0cHM6Ly9hcGFzc3ktcmVsYXkud3lkZXJrYS5jYwBkNGU1OWEwMDExZjcxYzQwZmIxZGZkYjFhODQ0NjY2MAAxNzY0MzMxMjAwADAAYW55b25l",
+      "nonce_hex": "a8d900db8fe06a0d5092f611",
+      "sealed_b64u": "qNkA24_gag1QkvYRpSdAHBsO_slL4Eq5ShBRv2D5LxskDY7fuRz_xZ3t3a6OznPQHSf3-s5icbHp1mrfxeVqMCpl7-PWyxJaKAPa_I07iGAT_TfW9ecP9LG745fuRmStKzRAfHRO-EHRTaLvgws2ELLz1VOPSGazcOEuY-L6KFKyp-8PxwjSgkahtmxq0XGtycKoNVSdcD65ZDLcpre2zdkdbMmgTkC25_AzBjbhZc5FYDJKEPTOv_kHQIfJEeL1gPJoZ-1fP8SjBq5yh_gq4l9E5sILoH9T9S4DzOCC855AhCmdBcKRpq0ZDbY8J3myfEsfjsYuwGCiJzBSBZ6FonwJGQUO5BEfqGeiwOyhSU7d5rA7JxfTj0pLhPUg4IbM4CJ88fSxz_C6mjC73LtvGtVMM3qGEwpIxzOC7wWJasmicfi5GTRU7S1iJup7vAtFfHjHKGe1DWIEHTX0OgAOLgGeh13bCqCxsfdgv08LqNbjQ1ixjr05u3gwRMBBQ-vy9UmtNg7yS7NpAL9HiGLFW7da3lMmSuaKy5IlI2pYSDsRm7z8cb1XSgDaaO2kVqTzOifqmLoHIyvwWEqhBG4CnIblbgRjdUUQOjJqxGXHifPH3m02eseToszt0_sP4DC01uXXbMglPr1621shmUJsugRa_KVqjDrCHavftch1cw_zBWkmioMuQUnYlGhCj4Pbw0HvwjZVpFOoxciui9TxsrdTCt84gSek12Q3GwEtCYj6B2drm3T784_umH6PPp6leotxu6m4zKcqRoszHeRoAyW1q2Bl9VcdWFJ1yM8K_6ow2ZqTDBWOfxxyobxLCcHdmJKF7QBI4YZNwvnGOy9aoK0Z4bKeMIbZ39ny1yVCtQXFEGmvqbt1WR7md7OdDBUNsh2XIYOTqw_z4T1eyqXYmai6kuouXLrbHBSTLB4Eil0YEOcGHB48StFv4G-KBimbq5SJLpkUxeXoeaIpvYFakoR_wPqNLc_04ljBFQc7AfW598kkqNIpddPr5q4wiPN7RTjpSzgd3zRTAZJoIRrEovYDxlqwdMa-l1OpKsMtgd6AwL9wG-vQpLDhuMUmy_2ptuhNKxFWTn7QQXFbZE1hrt-GxHhp79x70jETj2CrTQgMyHFsLDRZ92NLufHQcHjH1dcYVrB6ggcYDFs8fZu8Wpv1vNiecyZPLKZvVe2JqP1Vt3HonsbzMw2LIgBWpkZCQmu7l0z8H5jPhVCPJRkuwHm2nmvDOvMfEw9HuyCCb5jQlUI4DvgVLnIvTLO-uASWhKgJ_JVCldXXd4Bk9h70exn4K3fnVDHl-6kp5xoNgK7QTZtHYGY1rMsaTcFViw6UpQsVWd39oaFvt-9ME3X0KC_0H7V6O2oUmpPlribp_2E1jZAWh4yMNoO51M0",
+      "addresses": [],
+      "create": {
+        "link_id": "d4e59a0011f71c40fb1dfdb1a8446660",
+        "sealed": "qNkA24_gag1QkvYRpSdAHBsO_slL4Eq5ShBRv2D5LxskDY7fuRz_xZ3t3a6OznPQHSf3-s5icbHp1mrfxeVqMCpl7-PWyxJaKAPa_I07iGAT_TfW9ecP9LG745fuRmStKzRAfHRO-EHRTaLvgws2ELLz1VOPSGazcOEuY-L6KFKyp-8PxwjSgkahtmxq0XGtycKoNVSdcD65ZDLcpre2zdkdbMmgTkC25_AzBjbhZc5FYDJKEPTOv_kHQIfJEeL1gPJoZ-1fP8SjBq5yh_gq4l9E5sILoH9T9S4DzOCC855AhCmdBcKRpq0ZDbY8J3myfEsfjsYuwGCiJzBSBZ6FonwJGQUO5BEfqGeiwOyhSU7d5rA7JxfTj0pLhPUg4IbM4CJ88fSxz_C6mjC73LtvGtVMM3qGEwpIxzOC7wWJasmicfi5GTRU7S1iJup7vAtFfHjHKGe1DWIEHTX0OgAOLgGeh13bCqCxsfdgv08LqNbjQ1ixjr05u3gwRMBBQ-vy9UmtNg7yS7NpAL9HiGLFW7da3lMmSuaKy5IlI2pYSDsRm7z8cb1XSgDaaO2kVqTzOifqmLoHIyvwWEqhBG4CnIblbgRjdUUQOjJqxGXHifPH3m02eseToszt0_sP4DC01uXXbMglPr1621shmUJsugRa_KVqjDrCHavftch1cw_zBWkmioMuQUnYlGhCj4Pbw0HvwjZVpFOoxciui9TxsrdTCt84gSek12Q3GwEtCYj6B2drm3T784_umH6PPp6leotxu6m4zKcqRoszHeRoAyW1q2Bl9VcdWFJ1yM8K_6ow2ZqTDBWOfxxyobxLCcHdmJKF7QBI4YZNwvnGOy9aoK0Z4bKeMIbZ39ny1yVCtQXFEGmvqbt1WR7md7OdDBUNsh2XIYOTqw_z4T1eyqXYmai6kuouXLrbHBSTLB4Eil0YEOcGHB48StFv4G-KBimbq5SJLpkUxeXoeaIpvYFakoR_wPqNLc_04ljBFQc7AfW598kkqNIpddPr5q4wiPN7RTjpSzgd3zRTAZJoIRrEovYDxlqwdMa-l1OpKsMtgd6AwL9wG-vQpLDhuMUmy_2ptuhNKxFWTn7QQXFbZE1hrt-GxHhp79x70jETj2CrTQgMyHFsLDRZ92NLufHQcHjH1dcYVrB6ggcYDFs8fZu8Wpv1vNiecyZPLKZvVe2JqP1Vt3HonsbzMw2LIgBWpkZCQmu7l0z8H5jPhVCPJRkuwHm2nmvDOvMfEw9HuyCCb5jQlUI4DvgVLnIvTLO-uASWhKgJ_JVCldXXd4Bk9h70exn4K3fnVDHl-6kp5xoNgK7QTZtHYGY1rMsaTcFViw6UpQsVWd39oaFvt-9ME3X0KC_0H7V6O2oUmpPlribp_2E1jZAWh4yMNoO51M0",
+        "expires_at": 1764331200,
+        "one_time": false,
+        "access": "anyone",
+        "address_hashes": []
+      }
+    },
+    {
+      "name": "one_time_emails",
+      "key_b64u": "_lWDG7mEeg0v9gsGDimfWMKgJLNw-nFGF51uoAthjpc",
+      "link": "https://apassy-relay.wyderka.cc/s#v1._lWDG7mEeg0v9gsGDimfWMKgJLNw-nFGF51uoAthjpc",
+      "link_id": "80e3f46d2a85c4d36168843d7cf821aa",
+      "seal_key_hex": "485b7032417a498593c2a21e20bac6ed0e9247eeb0ef4300e1a719fc386007f8",
+      "address_key_b64u": "TLms93iYMpQE6QjZDzXy7BWhBCwt-SUXS5zvqB2HeAA",
+      "expires_at": 1764331800,
+      "one_time": true,
+      "access": "emails",
+      "snapshot": {
+        "v": 1,
+        "title": "Family › Wi-Fi",
+        "items": [
+          {
+            "title": "Home Wi-Fi",
+            "kind": "login",
+            "path": [],
+            "fields": [
+              {
+                "name": "Network",
+                "value": "synthetic-net",
+                "secret": false
+              },
+              {
+                "name": "Password",
+                "value": "zażółć-gęślą-0002",
+                "secret": true
+              }
+            ],
+            "notes": ""
+          },
+          {
+            "title": "Router",
+            "kind": "login",
+            "path": [
+              "Devices"
+            ],
+            "fields": [
+              {
+                "name": "Username",
+                "value": "admin",
+                "secret": false
+              },
+              {
+                "name": "Password",
+                "value": "synthetic-router-0003",
+                "secret": true
+              }
+            ],
+            "notes": "Synthetic vector.\nSecond line."
+          }
+        ]
+      },
+      "json_length": 464,
+      "plaintext_b64u": "eyJ2IjoxLCJ0aXRsZSI6IkZhbWlseSDigLogV2ktRmkiLCJpdGVtcyI6W3sidGl0bGUiOiJIb21lIFdpLUZpIiwia2luZCI6ImxvZ2luIiwicGF0aCI6W10sImZpZWxkcyI6W3sibmFtZSI6Ik5ldHdvcmsiLCJ2YWx1ZSI6InN5bnRoZXRpYy1uZXQiLCJzZWNyZXQiOmZhbHNlfSx7Im5hbWUiOiJQYXNzd29yZCIsInZhbHVlIjoiemHFvMOzxYLEhy1nxJnFm2zEhS0wMDAyIiwic2VjcmV0Ijp0cnVlfV0sIm5vdGVzIjoiIn0seyJ0aXRsZSI6IlJvdXRlciIsImtpbmQiOiJsb2dpbiIsInBhdGgiOlsiRGV2aWNlcyJdLCJmaWVsZHMiOlt7Im5hbWUiOiJVc2VybmFtZSIsInZhbHVlIjoiYWRtaW4iLCJzZWNyZXQiOmZhbHNlfSx7Im5hbWUiOiJQYXNzd29yZCIsInZhbHVlIjoic3ludGhldGljLXJvdXRlci0wMDAzIiwic2VjcmV0Ijp0cnVlfV0sIm5vdGVzIjoiU3ludGhldGljIHZlY3Rvci5cblNlY29uZCBsaW5lLiJ9XX0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA",
+      "associated_data_b64u": "YXBhc3N5LWNvbm5lY3QgcHVibGljLWxpbmsgdjEAaHR0cHM6Ly9hcGFzc3ktcmVsYXkud3lkZXJrYS5jYwA4MGUzZjQ2ZDJhODVjNGQzNjE2ODg0M2Q3Y2Y4MjFhYQAxNzY0MzMxODAwADEAZW1haWxz",
+      "nonce_hex": "015b7a83e3bbe0c4d859834d",
+      "sealed_b64u": "AVt6g-O74MTYWYNNGIPlBdj48ZGxbySd5isLvHaUV6SzieWU1Ovm6-xmIJrH9uxJrDhCLsMk2yV-gixbCkqYXvgSTy-_ikn7nlflayOZASdGDoeS43trnpSqUpd2WbYEZIK3xnPgJ5LMGlAHda5OpMyVYHfdxO4I7tOilWpYOKVsBl4iokt4vvPDmSmkyvTuC0bfFlcE_jlG2tFYiGTdlIyRWxrYZmye0HuN2l9ochADcPK8xs0XSrTQ_16bZjnpLyWfOuDuZmryO0sg0knpBoApNEjNfiVql21sP_7c_CO02SfrV2SQE3KCRVqsqIhsZfio24cwoegE-_v3IxaWdgePP0YI-z_AFI8AbWKgS5rf55D81QJ9UufCmkLQvan42HsugfKOmIdlNQxrgkXSqaPjf6uNDdKp-baUzIfRyz9TAaS8kEP28DUZ9cx7yG3L9sLOKueJOa5XsKshpu-9UY9iJQHPQcALh8FAferuMYOHrPCkjkquk_xNPWWKE-iu8ofWWHma3rrVrQcqDah4vE9Nxb5MfPcb9K_8nloTVsVwFi09ey5GFa9ebmcB-etVv1dloLS4qnAH-JZJeoWHHuwbgCV9f38hzEQdPppibMwkL1DDs-rqPZVmpg5DhNxwJ0TM8oU4ecxEN6RQ1bZy2Df38QSqd9-TJ8uSJAJTtQ812jJsbFcqJGVodazRSB-upC3jfvS5UFMPm1Kojq6_AOE0DQpZJnT5bQag_SeivL_b26umrb-ypOSdMOFB1RrDgoZ49sEeRkS3XPOUA0n33De36333SwE6t9x6fXPbJLBDGi4CkpVPD3EhFGUmu3W8sUgDKpyr3Ay-ENgNjYR0vGyMS_-XBqFtm5GBNEQHARSyTMxI9NAE5155Qo83OPoQzOGKznciaaMnikXi-iNLCcro7BbWboEOZjJxlPXVY6tli4WlSA-7KxAkNVRQ7G3ESDBsMsAnPqbWUbIY8YVc72X7RO_BMa4Qk5h7Ok30Mee0cpj9SJICVyNT0HL9e0HqV9tMlwDANZ1LZ8yAnz_qm6HkIYoMgocWYeyHNoNuW5IHm-VDpH4WpQGBKbeqN-eONSlCmvKLTI6N4yuU9ZS10nOrnwBAw0zMidNTj_ZObWBfZtQ-u84ZwO11jl_TUArcUJITb2ewaBq7uKfw2JL_QF6sJ6XVK8yY1Jn5-od4WZC3OQG6R-GxqBIzy3v4CsN5uuA_UiRVhG-4_8pBVX03TwCDxWnY4FLIfhKT5rucrTi9DE7mzbaNezLMiTaeBikts-4-_nMrhRB8T4HBWUkrfdUakz7vgPS3AhT6Y1_jF6SFJFShjdr5q5TyLHxX_KgMM614e8U_Wn4YrASGhXyPAqHNBfQ3osVaNflkKoAilFI71-7EbHME6bBIT5g",
+      "addresses": [
+        {
+          "input": " Ada.Lovelace@Example.COM ",
+          "normalized": "ada.lovelace@example.com",
+          "hash": "i2AM6gQVsjR_--a_6MLEn6sp6hO4wJpb80l1Jrpexe0"
+        },
+        {
+          "input": "grace@BÜCHER.example",
+          "normalized": "grace@xn--bcher-kva.example",
+          "hash": "4FyJb1Q04wXVnoTq6F8kBmsQtMQZ1Zd84FPMTCu9R1g"
+        }
+      ],
+      "create": {
+        "link_id": "80e3f46d2a85c4d36168843d7cf821aa",
+        "sealed": "AVt6g-O74MTYWYNNGIPlBdj48ZGxbySd5isLvHaUV6SzieWU1Ovm6-xmIJrH9uxJrDhCLsMk2yV-gixbCkqYXvgSTy-_ikn7nlflayOZASdGDoeS43trnpSqUpd2WbYEZIK3xnPgJ5LMGlAHda5OpMyVYHfdxO4I7tOilWpYOKVsBl4iokt4vvPDmSmkyvTuC0bfFlcE_jlG2tFYiGTdlIyRWxrYZmye0HuN2l9ochADcPK8xs0XSrTQ_16bZjnpLyWfOuDuZmryO0sg0knpBoApNEjNfiVql21sP_7c_CO02SfrV2SQE3KCRVqsqIhsZfio24cwoegE-_v3IxaWdgePP0YI-z_AFI8AbWKgS5rf55D81QJ9UufCmkLQvan42HsugfKOmIdlNQxrgkXSqaPjf6uNDdKp-baUzIfRyz9TAaS8kEP28DUZ9cx7yG3L9sLOKueJOa5XsKshpu-9UY9iJQHPQcALh8FAferuMYOHrPCkjkquk_xNPWWKE-iu8ofWWHma3rrVrQcqDah4vE9Nxb5MfPcb9K_8nloTVsVwFi09ey5GFa9ebmcB-etVv1dloLS4qnAH-JZJeoWHHuwbgCV9f38hzEQdPppibMwkL1DDs-rqPZVmpg5DhNxwJ0TM8oU4ecxEN6RQ1bZy2Df38QSqd9-TJ8uSJAJTtQ812jJsbFcqJGVodazRSB-upC3jfvS5UFMPm1Kojq6_AOE0DQpZJnT5bQag_SeivL_b26umrb-ypOSdMOFB1RrDgoZ49sEeRkS3XPOUA0n33De36333SwE6t9x6fXPbJLBDGi4CkpVPD3EhFGUmu3W8sUgDKpyr3Ay-ENgNjYR0vGyMS_-XBqFtm5GBNEQHARSyTMxI9NAE5155Qo83OPoQzOGKznciaaMnikXi-iNLCcro7BbWboEOZjJxlPXVY6tli4WlSA-7KxAkNVRQ7G3ESDBsMsAnPqbWUbIY8YVc72X7RO_BMa4Qk5h7Ok30Mee0cpj9SJICVyNT0HL9e0HqV9tMlwDANZ1LZ8yAnz_qm6HkIYoMgocWYeyHNoNuW5IHm-VDpH4WpQGBKbeqN-eONSlCmvKLTI6N4yuU9ZS10nOrnwBAw0zMidNTj_ZObWBfZtQ-u84ZwO11jl_TUArcUJITb2ewaBq7uKfw2JL_QF6sJ6XVK8yY1Jn5-od4WZC3OQG6R-GxqBIzy3v4CsN5uuA_UiRVhG-4_8pBVX03TwCDxWnY4FLIfhKT5rucrTi9DE7mzbaNezLMiTaeBikts-4-_nMrhRB8T4HBWUkrfdUakz7vgPS3AhT6Y1_jF6SFJFShjdr5q5TyLHxX_KgMM614e8U_Wn4YrASGhXyPAqHNBfQ3osVaNflkKoAilFI71-7EbHME6bBIT5g",
+        "expires_at": 1764331800,
+        "one_time": true,
+        "access": "emails",
+        "address_hashes": [
+          "i2AM6gQVsjR_--a_6MLEn6sp6hO4wJpb80l1Jrpexe0",
+          "4FyJb1Q04wXVnoTq6F8kBmsQtMQZ1Zd84FPMTCu9R1g"
+        ]
+      }
+    }
+  ],
+  "addresses": [
+    {
+      "input": " Ada.Lovelace@Example.COM ",
+      "normalized": "ada.lovelace@example.com"
+    },
+    {
+      "input": "\tgrace@BÜCHER.example.\n",
+      "normalized": "grace@xn--bcher-kva.example"
+    },
+    {
+      "input": "o'brien+tag@sub.example.org",
+      "normalized": "o'brien+tag@sub.example.org"
+    },
+    {
+      "input": "no-at-sign.example",
+      "normalized": null
+    },
+    {
+      "input": "two@at@example.com",
+      "normalized": null
+    },
+    {
+      "input": "@example.com",
+      "normalized": null
+    },
+    {
+      "input": "dot.@example.com",
+      "normalized": null
+    },
+    {
+      "input": "a..b@example.com",
+      "normalized": null
+    },
+    {
+      "input": "zoë@example.com",
+      "normalized": null
+    },
+    {
+      "input": "space in@example.com",
+      "normalized": null
+    },
+    {
+      "input": "user@localhost",
+      "normalized": null
+    },
+    {
+      "input": "user@192.168.0.1",
+      "normalized": null
+    },
+    {
+      "input": "user@-bad-.example",
+      "normalized": null
+    },
+    {
+      "input": "user@exa_mple.com",
+      "normalized": null
+    },
+    {
+      "input": "user@[127.0.0.1]",
+      "normalized": null
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "normalized": null
+    }
+  ]
+}
