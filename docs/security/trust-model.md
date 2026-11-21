@@ -374,6 +374,12 @@ address bar before its first request.
 | The reader's browser, and the services that carry the link | The whole link in the global history of the browser and its sync (written when the tab opened it, before the viewer took the key out of the address bar); a copy in the link rewriters and scanners of mail and chat services | The snapshot, for whoever reads that history or that copy before the link ends | A one-time link opens only after a yes on the page, and a link of "Only these e-mail addresses" only with a code from that mailbox: the recommended modes for a secret that matters |
 | The Cloudflare Worker (edge) | — | The open and code requests: link ids, sealed forms, addresses and address keys of code requests | `K` and the snapshot |
 
+Accepted for public links: a relay near its daily mail cap can tell a holder of `K` whether one
+more code mail was made (the next code request then answers `503 mail_unavailable`), and with it
+whether an address is on the link. The holder of `K` reads the link anyway. A wrong code counts
+toward the 10 wrong tries of a link and address only while a code is live, so a holder of the link
+cannot lock a reader out without a mail to that reader.
+
 ## The hosted relay today (until ADR 0037 stage 7)
 
 | Function | State on 2026-11-02 | Sees |

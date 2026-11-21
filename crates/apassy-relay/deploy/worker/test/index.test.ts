@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, it } from "node:test";
 
 import worker, { type RelayService } from "../src/index.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "../src/limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_LINK_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "../src/limits.ts";
 
 const SECRET = "edge-secret-synthetic-0123456789abcdef0123";
 const PUBLIC = "https://apassy-relay.wyderka.cc";
@@ -1308,6 +1308,8 @@ function everyLimiter(success: boolean) {
       ACCOUNT_LIMITER: limiter("account"),
       TUNNEL_LIMITER: limiter("tunnel"),
       TUNNEL_NODE_LIMITER: limiter("node"),
+      LINK_LIMITER: limiter("link"),
+      LINK_CODE_LIMITER: limiter("link-code"),
     },
   };
 }
@@ -1862,5 +1864,108 @@ describe("relay mode (one build for the hosted relay and Connect)", () => {
       assert.equal(response.status, 201, `${method} ${path}`);
       assert.deepEqual(values(seen[0]!, "x-apassy-edge"), [SECRET]);
     }
+  });
+});
+
+describe("public link rate limit", () => {
+  const ID = "d4e59a0011f71c40fb1dfdb1a8446660";
+  const OPEN = `/v1/links/${ID}/open`;
+  const CODE = `/v1/links/${ID}/code`;
+  const body = '{"confirm":false,"email":null,"address_key":null,"code":null}';
+
+  it("uses LINK_LIMITER for the opens and LINK_CODE_LIMITER for the code requests, keyed by the address or the /64", async () => {
+    for (const [path, name] of [
+      [OPEN, "link"],
+      [CODE, "link-code"],
+      // A made-up id is limited too.
+      ["/v1/links/not-an-id/open", "link"],
+    ]) {
+      for (const [address, key] of [
+        ["198.51.100.7", "198.51.100.7"],
+        ["2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"],
+      ]) {
+        const refused = everyLimiter(false);
+        const response = await call(path!, {
+          method: "POST",
+          body,
+          headers: { "cf-connecting-ip": address! },
+        }, { ...refused.env, RELAY: vpc() });
+        assert.equal(response.status, 429, `${path} ${address}`);
+        assert.equal(response.headers.get("retry-after"), "60");
+        assert.equal((await envelope(response)).error.code, "rate_limited");
+        assert.deepEqual(refused.used, [`${name}:${key}`], `${path} ${address}`);
+        assert.equal(seen.length, 0);
+        assert.equal(vpcTargets.length, 0);
+      }
+    }
+    const allowed = everyLimiter(true);
+    const passed = await call(OPEN, { method: "POST", body }, allowed.env);
+    assert.equal(passed.status, 201);
+    assert.equal(await passed.text(), `echo:${body}`);
+    assert.deepEqual(allowed.used, ["link:unknown"]);
+  });
+
+  it("passes when the limiters are missing or fail, and leaves the account link routes alone", async () => {
+    for (const env of [{}, { LINK_LIMITER: { limit: async () => { throw new Error("down"); } } }]) {
+      const response = await call(OPEN, { method: "POST", body }, env);
+      assert.equal(response.status, 201);
+    }
+    const refused = everyLimiter(false);
+    for (const [method, path] of [
+      ["POST", "/v1/account/links"],
+      ["GET", "/v1/account/links"],
+      ["DELETE", `/v1/account/links/${ID}`],
+      ["GET", OPEN],
+    ]) {
+      const response = await call(path!, { method, ...(method === "POST" ? { body: "{}" } : {}) }, refused.env);
+      assert.equal(response.status, 201, `${method} ${path}`);
+    }
+    assert.deepEqual(refused.used, []);
+  });
+
+  it("caps the body of the public link routes at 4 KiB, before the limiter and the relay", async () => {
+    assert.equal(MAX_LINK_LENGTH, 4096);
+    for (const path of [OPEN, CODE]) {
+      const refused = everyLimiter(true);
+      const response = await call(path, {
+        method: "POST",
+        body: "x".repeat(MAX_LINK_LENGTH + 1),
+        headers: { "content-length": String(MAX_LINK_LENGTH + 1) },
+      }, refused.env);
+      assert.equal(response.status, 413, path);
+      assert.equal((await envelope(response)).error.code, "payload_too_large");
+      assert.deepEqual(refused.used, []);
+      assert.equal(seen.length, 0);
+      const passed = await call(path, {
+        method: "POST",
+        body: "x".repeat(MAX_LINK_LENGTH),
+        headers: { "content-length": String(MAX_LINK_LENGTH) },
+      }, everyLimiter(true).env);
+      assert.equal(passed.status, 201, path);
+    }
+    // A creation keeps the 64 KiB cap of every JSON route.
+    const created = await call("/v1/account/links", {
+      method: "POST",
+      body: "x".repeat(40 * 1024),
+      headers: { "content-length": String(40 * 1024) },
+    });
+    assert.equal(created.status, 201);
+  });
+});
+
+describe("service worker", () => {
+  it("refuses a service worker script request on every path, before the static files and the relay", async () => {
+    for (const path of ["/s", "/share.js", "/v1/links/d4e59a0011f71c40fb1dfdb1a8446660/open", "/v1/account", "/guide", "/dl/x"]) {
+      for (const value of ["script", " Script "]) {
+        const response = await call(path, { headers: { "service-worker": value } }, { RELAY: vpc() });
+        assert.equal(response.status, 400, `${path} ${value}`);
+        assert.equal((await envelope(response)).error.code, "invalid_request");
+        assert.equal(seen.length, 0);
+        assert.equal(vpcTargets.length, 0);
+      }
+    }
+    // Another value of the header is not a script request.
+    const response = await call("/v1/account", { headers: { "service-worker": "other" } });
+    assert.equal(response.status, 201);
   });
 });

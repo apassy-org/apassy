@@ -150,6 +150,14 @@ pub mod codes {
     pub const TUNNEL_LIMIT: &str = "tunnel_limit";
     /// The node exists and has no open tunnel.
     pub const TUNNEL_OFFLINE: &str = "tunnel_offline";
+    // Public links (docs/contracts/connect-share-v1.md).
+    /// A new public link over the live links of the account's plan.
+    pub const LINK_LIMIT: &str = "link_limit";
+    /// An open with a code that is not the live code of the link and the address.
+    pub const CODE_INVALID: &str = "code_invalid";
+    /// A link for e-mail addresses or a code request on a relay without a mail sender, or
+    /// above its daily mail cap.
+    pub const MAIL_UNAVAILABLE: &str = "mail_unavailable";
     // Anything else.
     pub const RELAY_ERROR: &str = "relay_error";
 }
@@ -191,7 +199,9 @@ pub fn status_of(code: &str) -> u16 {
         | ACCOUNT_REQUIRED
         | NOT_IN_GROUP
         | ACCOUNT_LIMIT
-        | DEVICE_REMOVED => 403,
+        | DEVICE_REMOVED
+        | LINK_LIMIT
+        | CODE_INVALID => 403,
         NOT_FOUND | NODE_UNKNOWN => 404,
         METHOD_NOT_ALLOWED => 405,
         CONFLICT | RUN_NOT_PENDING | QUESTION_SETTLED | QUESTION_EXPIRED | PUSH_UNAVAILABLE
@@ -203,7 +213,7 @@ pub fn status_of(code: &str) -> u16 {
         RATE_LIMITED | TUNNEL_LIMIT => 429,
         NOT_SUPPORTED => 501,
         UPSTREAM_FAILED | ENCODED_RESPONSE => 502,
-        BUSY | TUNNEL_OFFLINE => 503,
+        BUSY | TUNNEL_OFFLINE | MAIL_UNAVAILABLE => 503,
         _ => 500,
     }
 }

@@ -70,6 +70,15 @@ const DROPPED_RESPONSE_HEADERS: [&str; 7] = [
     "content-length",
 ];
 
+/// Response headers that a relay of public links never passes on: `Service-Worker-Allowed`
+/// would let a page of an upstream widen the scope of a service worker on the relay's
+/// origin, where the viewer of public links lives (connect-share-v1 section 5).
+const STRIPPED_RESPONSE_HEADERS: [&str; 1] = ["service-worker-allowed"];
+
+/// Added to every proxied response: an upstream page runs in a sandbox, an opaque origin,
+/// so it never runs script, sets a cookie, or registers a worker as the relay's origin.
+const PROXY_CSP: (&str, &str) = ("Content-Security-Policy", "sandbox");
+
 /// What the audit needs to know about a request, before the response is known.
 struct Context {
     at: u64,
@@ -376,6 +385,7 @@ impl Proxy {
         for (name, value) in &head.headers {
             if DROPPED_RESPONSE_HEADERS
                 .iter()
+                .chain(STRIPPED_RESPONSE_HEADERS.iter())
                 .any(|dropped| name.eq_ignore_ascii_case(dropped))
             {
                 continue;
@@ -385,6 +395,13 @@ impl Proxy {
             if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_slice()) {
                 out_headers.push(header);
             }
+        }
+        // An upstream's own policy stays; this one adds the sandbox to it (a browser
+        // enforces every policy it gets).
+        if let Ok(header) =
+            tiny_http::Header::from_bytes(PROXY_CSP.0.as_bytes(), PROXY_CSP.1.as_bytes())
+        {
+            out_headers.push(header);
         }
         let data_length = match head.body {
             BodyLen::Length(length) => usize::try_from(length).ok(),

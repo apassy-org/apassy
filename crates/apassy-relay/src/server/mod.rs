@@ -30,6 +30,8 @@ pub mod http;
 pub mod hub;
 pub mod ingress;
 pub mod joins;
+pub mod links;
+pub mod mail;
 pub mod mcp;
 pub mod oauth;
 pub mod operator;
@@ -483,6 +485,9 @@ impl RunningRelay {
     /// Stops accepting requests and ends every live session.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(links) = self.hub.links() {
+            links.wake();
+        }
         for core in self.hub.all() {
             core.notify.notify();
         }

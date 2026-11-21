@@ -177,6 +177,68 @@ pub trait Plans: Send + Sync {
     ) -> RelayResult<bool> {
         Ok(false)
     }
+
+    /// What the plan of `account` gives for sharing (connect-share-v1 section 7): a Team
+    /// member with an entitled plan has the Team limits; every other account, also one
+    /// without a plan, the standard ones.
+    fn sharing(&self, directory: &Store, account: &str, now: u64) -> RelayResult<Sharing> {
+        let view = self.plan(directory, account, now)?;
+        Ok(if view.entitled && view.plan.as_deref() == Some("team") {
+            Sharing::Team
+        } else {
+            Sharing::Standard
+        })
+    }
+}
+
+/// The sharing limits of an account's plan (connect-share-v1 section 7). The numbers are
+/// the relay's settings (`config::LinkSettings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sharing {
+    /// No plan, Personal, or Family.
+    Standard,
+    /// A Team member.
+    Team,
+    /// A relay that you run yourself with open plans: no plan limit.
+    Open,
+}
+
+/// The plans of a relay that you run yourself (`APASSY_RELAY_ACCOUNT_PLANS=open`, R0):
+/// every account is entitled without Stripe, as Personal, and its sharing has no plan
+/// limit. `Hub::open` installs it; the configuration refuses it beside Stripe and in
+/// `connect` mode.
+pub struct OpenPlans;
+
+impl OpenPlans {
+    /// The view of every account: Personal, active, entitled, nothing that ends.
+    pub fn view() -> PlanView {
+        PlanView {
+            plan: Some("personal".to_string()),
+            status: "active".to_string(),
+            entitled: true,
+            quantity: Some(1),
+            ..PlanView::none()
+        }
+    }
+}
+
+impl Plans for OpenPlans {
+    fn plan(&self, _directory: &Store, _account: &str, _now: u64) -> RelayResult<PlanView> {
+        Ok(Self::view())
+    }
+
+    fn plan_on(
+        &self,
+        _conn: &Connection,
+        _account: &str,
+        _now: u64,
+    ) -> RelayResult<Option<PlanView>> {
+        Ok(Some(Self::view()))
+    }
+
+    fn sharing(&self, _directory: &Store, _account: &str, _now: u64) -> RelayResult<Sharing> {
+        Ok(Sharing::Open)
+    }
 }
 
 /// No account has a plan: every account is `none` (until billing, C2).
@@ -273,6 +335,8 @@ pub enum AccountEndpoint {
     Portal,
     /// `/v1/account/group/…` (connect-billing-v1 section 6, `server::group`).
     Group(crate::server::group::GroupEndpoint),
+    /// `/v1/account/links` and below (connect-share-v1 section 4, `server::links`).
+    Links(crate::server::links::AccountLinkEndpoint),
 }
 
 /// True for a path of this contract: `/v1/account` and below, and the well-known document.
@@ -318,6 +382,10 @@ pub fn route(method: &str, path: &str) -> RelayResult<(Need, AccountEndpoint)> {
         ["v1", "account", "plan"] => pick(vec![("GET", Need::Account, Plan)]),
         ["v1", "account", "checkout"] => pick(vec![("POST", Need::Account, Checkout)]),
         ["v1", "account", "portal"] => pick(vec![("POST", Need::Account, Portal)]),
+        ["v1", "account", "links", rest @ ..] => {
+            let endpoint = crate::server::links::account_route(method, rest)?;
+            Ok((Need::Account, Links(endpoint)))
+        }
         ["v1", "account", "group", rest @ ..] => {
             let (need, endpoint) = crate::server::group::route(method, rest)?;
             Ok((need, Group(endpoint)))
@@ -1064,6 +1132,9 @@ pub fn dispatch(
         }
         AccountEndpoint::Peers(endpoint) => {
             crate::server::peers::dispatch(hub, caller, endpoint, body, now)
+        }
+        AccountEndpoint::Links(endpoint) => {
+            crate::server::links::dispatch(hub, caller, endpoint, body, now)
         }
         _ => Err(RelayError::internal("Not an account endpoint.")),
     }
@@ -1953,6 +2024,15 @@ fn delete_account(hub: &Hub, caller: &AccountCaller, now: u64) -> RelayResult<Va
         Ok(removals)
     })?;
     hub.accounts.state().drop_account(&caller.account);
+    // Its public links, in `links.db` (connect-share-v1 section 1). A failure here leaves
+    // them to the maintenance pass, which deletes the links of every account that is gone.
+    if let Some(links) = hub.links()
+        && links.delete_account(&caller.account).is_err()
+    {
+        eprintln!(
+            "apassy-relay: the public links of a deleted account wait for the maintenance pass"
+        );
+    }
     hub.apply_removals(&removals, now);
     crate::server::tunnel_routes::account_deleted(hub, &caller.account);
     to_value(&AccountDeleted {

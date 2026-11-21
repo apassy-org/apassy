@@ -4357,3 +4357,131 @@ fn a_directory_at_1006_without_a_part_of_the_accounts_step_is_refused_and_left_a
         drop(dir);
     }
 }
+
+// ---- Open plans of a relay that you run yourself (ADR 0047 plan unit R0). ----
+
+/// `APASSY_RELAY_ACCOUNT_PLANS=open`: every account is entitled without Stripe, so it makes
+/// a vault store, pushes, gets an entitlement token, and has no plan limit on its public
+/// links (docs/SPEC.md section 38.9).
+#[test]
+fn open_plans_entitle_every_account() {
+    let relay = start_with(
+        |cfg| {
+            accounts_on(cfg);
+            cfg.connect.plans = apassy_relay::config::AccountPlans::Open;
+        },
+        UpstreamOptions::default(),
+    );
+    // No test plans: the relay's own seam answers.
+    let c = Connect {
+        relay,
+        plans: Arc::new(TestPlans::default()),
+    };
+    for _ in 0..2 {
+        let a = create(&c);
+        let token = sign_in(&c, &a);
+        let plan = c.ok("GET", "/v1/account/plan", Some(&token), None);
+        assert_eq!(plan["entitled"], true, "{plan}");
+        assert_eq!(plan["status"], "active");
+        assert_eq!(plan["plan"], "personal");
+        assert_eq!(plan["ends_at"], Value::Null);
+        let view = c.ok("GET", "/v1/account", Some(&token), None);
+        assert_eq!(view["plan"]["entitled"], true);
+        let (team, device) = make_store(&c, &a, &token);
+        let sync = c.relay.sign_in(&team, &a.key);
+        Pusher::new(&team).push(&c, &sync, device, &a.key, b"ciphertext");
+        let entitlement = c.ok("GET", "/v1/account/entitlement", Some(&token), None);
+        assert!(entitlement["token"].as_str().is_some_and(|t| !t.is_empty()));
+        let links = c.ok("GET", "/v1/account/links", Some(&token), None);
+        assert_eq!(links["limit"], Value::Null);
+        // More live links than the standard limit (25).
+        for _ in 0..26 {
+            let mut id = [0u8; 16];
+            getrandom::fill(&mut id).unwrap();
+            let link_id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+            let sealed = encode_b64(&vec![3u8; 12 + 1024 + 16]);
+            c.ok(
+                "POST",
+                "/v1/account/links",
+                Some(&token),
+                Some(
+                    &json!({"link_id": link_id, "sealed": sealed, "expires_at": now() + 3600,
+                             "one_time": false, "access": "anyone", "address_hashes": []}),
+                ),
+            );
+        }
+        assert_eq!(
+            c.ok("GET", "/v1/account/links", Some(&token), None)["live"],
+            26
+        );
+    }
+}
+
+/// Open plans are refused beside the Stripe files (billing gives the plans there), in
+/// `connect` mode (the hosted Connect), and without the account routes.
+#[test]
+fn open_plans_are_refused_beside_stripe() {
+    let dir = tempfile::tempdir().unwrap();
+    let edge = "edge-secret-for-tests-0123456789abcdef0123456789";
+    let base = vec![
+        (
+            "APASSY_RELAY_DATA",
+            dir.path().join("data").to_string_lossy().into_owned(),
+        ),
+        (
+            "APASSY_RELAY_PUBLIC_URL",
+            "https://connect.example.test".to_string(),
+        ),
+        ("APASSY_RELAY_EDGE_SECRET", edge.to_string()),
+    ];
+    let with = |extra: &[(&'static str, &str)]| {
+        let mut pairs = base.clone();
+        pairs.extend(extra.iter().map(|(key, value)| (*key, value.to_string())));
+        RelayConfig::from_lookup(move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        })
+    };
+    let key = ("APASSY_RELAY_KEY", "a synthetic master key for tests");
+    let accounts = ("APASSY_RELAY_CONNECT_ACCOUNTS", "1");
+    let open = ("APASSY_RELAY_ACCOUNT_PLANS", "open");
+    let config = with(&[key, accounts, open]).unwrap();
+    assert_eq!(
+        config.connect.plans,
+        apassy_relay::config::AccountPlans::Open
+    );
+    assert_eq!(
+        with(&[key, accounts]).unwrap().connect.plans,
+        apassy_relay::config::AccountPlans::Billing
+    );
+    // Beside either Stripe file, before any file is read.
+    for stripe in ["STRIPE_SECRET_KEY_FILE", "STRIPE_WEBHOOK_SECRET_FILE"] {
+        let error = with(&[key, accounts, open, (stripe, "/nonexistent/stripe")]).unwrap_err();
+        assert!(
+            error.message.contains("without Stripe"),
+            "{}",
+            error.message
+        );
+    }
+    let error = with(&[
+        key,
+        accounts,
+        open,
+        ("STRIPE_SECRET_KEY_FILE", "/nonexistent/key"),
+        ("STRIPE_WEBHOOK_SECRET_FILE", "/nonexistent/webhook"),
+    ])
+    .unwrap_err();
+    assert!(
+        error.message.contains("without Stripe"),
+        "{}",
+        error.message
+    );
+    // In `connect` mode.
+    let error = with(&[("APASSY_RELAY_MODE", "connect"), open]).unwrap_err();
+    assert!(error.message.contains("run yourself"), "{}", error.message);
+    // Without the account routes, and a value that is not `open`.
+    assert!(with(&[key, open]).is_err());
+    assert!(with(&[key, accounts, ("APASSY_RELAY_ACCOUNT_PLANS", "free")]).is_err());
+}
