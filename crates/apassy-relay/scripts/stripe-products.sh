@@ -95,7 +95,15 @@ stripe_post() {
         echo '{"id":"dry_run"}'
         return
     fi
-    stripe post ${mode_flags[@]+"${mode_flags[@]}"} "$path" "$@"
+    local answer
+    answer=$(stripe post ${mode_flags[@]+"${mode_flags[@]}"} "$path" "$@")
+    # The CLI exits 0 on an API error; the answer then holds `error`. Stop there, so that no
+    # later step runs on a state that did not change.
+    if jq -e '.error' <<< "$answer" > /dev/null 2>&1; then
+        echo "stripe-products.sh: POST $path failed: $(jq -r '.error.message // .error' <<< "$answer")" >&2
+        exit 1
+    fi
+    printf '%s\n' "$answer"
 }
 
 # The product of a plan: a fixed id (apassy_connect_<plan>), or the old product when its id is
@@ -123,10 +131,17 @@ ensure_product() {
     printf '%s' "$id"
 }
 
-# Archives the active prices of a product that carry no Connect lookup key.
+# Archives the active prices of a product that carry no Connect lookup key. Stripe refuses
+# to archive the default price of a product, so the monthly Connect price becomes the
+# default first.
 archive_old_prices() {
-    local product=$1
-    local ids
+    local product=$1 month_key=$2
+    local ids month
+    month=$(price_of "$month_key" | jq -r '.id // empty')
+    if [[ -n $month ]]; then
+        echo "product $product: default price $month_key" >&2
+        stripe_post "/v1/products/$product" -d "default_price=$month" > /dev/null
+    fi
     ids=$(stripe_get /v1/prices -d "product=$product" -d active=true -d limit=100 |
         jq -r '.data[] | select((.lookup_key // "") | startswith("connect_") | not) | .id')
     for price in $ids; do
@@ -228,10 +243,10 @@ ensure_unit_price "$team" connect_team_month month "$team_month"
 ensure_unit_price "$team" connect_team_year year "$team_year"
 
 if [[ -n ${APASSY_STRIPE_OLD_PERSONAL_PRODUCT:-} ]]; then
-    archive_old_prices "$personal"
+    archive_old_prices "$personal" connect_personal_month
 fi
 if [[ -n ${APASSY_STRIPE_OLD_TEAM_PRODUCT:-} ]]; then
-    archive_old_prices "$team"
+    archive_old_prices "$team" connect_team_month
 fi
 
 echo "stripe-products.sh: done. Restart the relay, or wait an hour, for GET /v1/plans to show the prices."

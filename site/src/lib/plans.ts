@@ -7,8 +7,8 @@
 // Keep the lines `month: <cents>,` and `year: <cents>,` in this form: the script
 // reads them.
 
-/** "coming" until Connect ships (ADR 0037 stage 7): no buy button, no checkout link. */
-export const CONNECT_STATUS: "coming" | "live" = "coming";
+/** "live" since Connect went on sale (ADR 0037 stage 7); "coming" hides the sale. */
+export const CONNECT_STATUS: "coming" | "live" = "live";
 
 export const CURRENCY = "EUR";
 /** The listed price is what the customer pays. Stripe Tax computes the VAT part. */

@@ -1,18 +1,15 @@
 ---
-// The update of the privacy policy for Apassy Connect (implementation plan s7, W1
-// and owner-needed step 3). A DRAFT: /privacy stays the policy in force. When
-// Connect starts, the owner checks this text, the facts in lib/legal.ts are given,
-// and its parts move into /privacy (the lead "There are no Apassy accounts" goes);
-// then this page is removed. Keep it true to the code and to
+// The privacy policy of Apassy Connect (implementation plan s7, W1), in force since
+// Connect went on sale, beside /privacy, which links it. The facts are in
+// lib/legal.ts. Keep it true to the code and to
 // docs/security/trust-model.md and the decisions of implementation-plan-s7-connect.md.
 import Legal from "../layouts/Legal.astro";
 import OwnerFact from "../components/OwnerFact.astro";
 import { REPO } from "../lib/site";
-const UPDATED = "2026-11-03";
+const UPDATED = "2026-11-21";
 const doc = (path: string) => `${REPO}/blob/main/${path}`;
 ---
 <Legal
-  draft
   title="Privacy and Apassy Connect · apassy"
   description="What Apassy Connect, the hosted service, stores and why."
   eyebrow="Privacy"
@@ -21,7 +18,7 @@ const doc = (path: string) => `${REPO}/blob/main/${path}`;
 >
   <Fragment slot="lead">
     Apassy needs no account. Apassy Connect, the optional paid service, has accounts. This text says what Connect
-    stores, why, and for how long. When Connect starts, it becomes part of the <a href="/privacy">privacy policy</a>.
+    stores, why, and for how long. It is part of the <a href="/privacy">privacy policy</a>.
   </Fragment>
 
   <h2>Who is responsible</h2>

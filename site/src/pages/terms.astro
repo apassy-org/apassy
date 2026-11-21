@@ -1,17 +1,15 @@
 ---
 // The terms of Apassy Connect: the contract, the right of withdrawal, the consent
-// to start at once, and the refund policy (implementation plan s7, owner-needed
-// step 3). A DRAFT: the owner gives the facts in lib/legal.ts and has the text
-// checked before it comes into force. Then remove `draft`, link it from the footer
-// and from the Stripe settings. The prices come from lib/plans.ts.
+// to start at once, and the refund policy (implementation plan s7). In force since
+// Connect went on sale; the footer and the Stripe settings link it. The facts are
+// in lib/legal.ts and the prices come from lib/plans.ts.
 import Legal from "../layouts/Legal.astro";
 import OwnerFact from "../components/OwnerFact.astro";
 import { FAMILY_EXTRA, FAMILY_INCLUDED_PEOPLE, PLANS, YEAR_MONTHS, eur } from "../lib/plans";
 import { REPO } from "../lib/site";
-const UPDATED = "2026-11-03";
+const UPDATED = "2026-11-21";
 ---
 <Legal
-  draft
   title="Terms of Apassy Connect · apassy"
   description="The terms of Apassy Connect, the hosted service of the Apassy project."
   eyebrow="Terms"
