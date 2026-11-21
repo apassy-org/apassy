@@ -88,6 +88,8 @@ CREATE TABLE link (
   addresses INTEGER NOT NULL,
   sealed TEXT,
   create_hash BLOB NOT NULL,
+  code_failures INTEGER NOT NULL DEFAULT 0,
+  code_requests INTEGER NOT NULL DEFAULT 0,
   opens INTEGER NOT NULL DEFAULT 0,
   last_opened_at INTEGER);
 CREATE INDEX link_account ON link(account_id, created_at);
@@ -310,6 +312,10 @@ pub enum PublicLinkEndpoint {
     Code(String),
 }
 
+/// The largest body of a public route (the Worker's cap too): a few hundred bytes are
+/// enough for both.
+pub const MAX_PUBLIC_BODY: usize = 4096;
+
 /// The prefix of the public routes.
 pub const PUBLIC_PREFIX: &str = "/v1/links/";
 
@@ -505,8 +511,11 @@ impl Windows {
 pub struct Links {
     store: Store,
     settings: LinkSettings,
-    /// A mail sender is set up (`APASSY_CONNECT_SMTP_HOST`).
-    mail: bool,
+    /// A mail sender is set up (`APASSY_CONNECT_SMTP_HOST`) and its thread runs. Off from
+    /// the moment the mail thread ends (`mail_stopped`).
+    mail: std::sync::atomic::AtomicBool,
+    /// The submission client, built at start (a start without it is refused).
+    mailer: Option<std::sync::Arc<crate::server::mail::Mailer>>,
     windows: Mutex<Windows>,
     /// The code requests that the mail thread has not looked at yet. Memory only: the
     /// address key in them is never stored.
@@ -548,17 +557,26 @@ impl Links {
         };
         let refused = || {
             RelayError::internal(
-                "links.db cannot be opened in this mode, or is not a file of public links of this version. It holds only public links, which no backup keeps: stop the relay and remove it to start with no links (docs/OPERATIONS.md section 30).",
+                "links.db cannot be opened in this mode, or is not a file of public links of this version: nothing was changed. Keep it: it holds the ids of every link ever made, so a revoked link stays revoked. Start the image that wrote it, or, after a move to APASSY_RELAY_MODE=connect, let connect-cutover convert it (docs/OPERATIONS.md section 30).",
             )
         };
         let store = opened.map_err(|_| refused())?;
+        // The mail sender is built here, so a relay whose sender cannot be built (no
+        // system roots, a host that is no name) does not start.
+        let mailer = config
+            .connect
+            .mail
+            .as_ref()
+            .map(|settings| crate::server::mail::Mailer::new(settings).map(std::sync::Arc::new))
+            .transpose()?;
         if store.user_version().map_err(|_| refused())? != LINKS_VERSION {
             return Err(refused());
         }
         Ok(Self {
             store,
             settings: config.connect.links,
-            mail: config.connect.mail.is_some(),
+            mail: std::sync::atomic::AtomicBool::new(mailer.is_some()),
+            mailer,
             windows: Mutex::new(Windows::default()),
             jobs: Mutex::new(VecDeque::new()),
             jobs_held: std::sync::atomic::AtomicBool::new(false),
@@ -570,7 +588,23 @@ impl Links {
 
     /// True when this relay sends the code mail.
     pub fn mail_on(&self) -> bool {
-        self.mail
+        self.mail.load(Ordering::SeqCst)
+    }
+
+    /// The submission client (the mail thread).
+    pub(crate) fn mailer(&self) -> Option<std::sync::Arc<crate::server::mail::Mailer>> {
+        self.mailer.clone()
+    }
+
+    /// The mail thread ended (or never started): no mail goes any more, so links for
+    /// e-mail addresses and code requests answer 503 `mail_unavailable`, and the waiting
+    /// code requests go with their address keys.
+    pub(crate) fn mail_stopped(&self) {
+        self.mail.store(false, Ordering::SeqCst);
+        self.jobs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// The live-link limit of a sharing level (`None`: no limit).
@@ -784,6 +818,57 @@ impl Links {
     }
 }
 
+/// `apassy-relay purge-links`, with the relay stopped (it takes `relay.lock`): every link
+/// goes with its address hashes, codes, and counts, and the mails of the outbox go too;
+/// `link_id_used` stays, so no id that was revoked opens or is made again. For a relay
+/// that comes back to links after an image without them (whose revokes a device took as
+/// done), and for an operator who wants no live link left (docs/OPERATIONS.md 30.5). A
+/// relay without `links.db` has nothing to purge. Answers the counts.
+pub fn purge_stopped(config: &RelayConfig) -> RelayResult<Value> {
+    let _lock = crate::server::hub::lock_data_dir(config).map_err(|error| {
+        if error.code == codes::CONFLICT {
+            RelayError::new(
+                codes::CONFLICT,
+                "The relay runs (relay.lock is held): stop it first. `apassy-relay purge-links` runs only with the relay stopped.",
+            )
+        } else {
+            error
+        }
+    })?;
+    let path = config.links_path();
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(serde_json::json!({"links": 0, "mails": 0, "ids_kept": 0}));
+    }
+    let store = if config.connect.plain_files() {
+        Store::open_plain(&path, config)
+    } else {
+        Store::open_at(&path, &config.master_key)
+    }
+    .map_err(|_| {
+        RelayError::internal(
+            "links.db does not open in this mode: nothing was changed. Run the purge with the configuration of the relay that wrote it.",
+        )
+    })?;
+    if store.user_version()? != LINKS_VERSION {
+        return Err(RelayError::internal(
+            "links.db is of another version: nothing was changed. Run the purge of the image that wrote it.",
+        ));
+    }
+    let (links, mails, kept) = store.tx(|tx| {
+        let links = tx.execute("DELETE FROM link", []).map_err(db)?;
+        tx.execute("DELETE FROM link_code", []).map_err(db)?;
+        tx.execute("DELETE FROM link_address", []).map_err(db)?;
+        tx.execute("DELETE FROM mail_count", []).map_err(db)?;
+        let mails = tx.execute("DELETE FROM mail_outbox", []).map_err(db)?;
+        let kept: i64 = tx
+            .query_row("SELECT count(*) FROM link_id_used", [], |row| row.get(0))
+            .map_err(db)?;
+        Ok((links, mails, to_u(kept)))
+    })?;
+    store.with(|conn| conn.execute_batch("VACUUM").map_err(db))?;
+    Ok(serde_json::json!({"links": links, "mails": mails, "ids_kept": kept}))
+}
+
 /// True when `relay.db` holds the account (deleted accounts have no row).
 fn account_exists(directory: &Store, account: &str) -> RelayResult<bool> {
     directory.with(|conn| {
@@ -882,6 +967,27 @@ fn create(
     request: &CreateLink,
     now: u64,
 ) -> RelayResult<Value> {
+    let body_hash = Sha256::digest(
+        serde_json::to_vec(request)
+            .map_err(|_| RelayError::internal("The request cannot be written."))?,
+    )
+    .to_vec();
+    // A retry first: the same id and the same body from the same account answer the
+    // stored view, before the checks of the expiry, which a late retry may fail.
+    let stored = links.store.with(|conn| {
+        conn.query_row(
+            &format!(
+                "SELECT {VIEW_COLUMNS} FROM link WHERE link_id = ?1 AND account_id = ?2 AND create_hash = ?3"
+            ),
+            params![request.link_id, caller.account, body_hash],
+            view_of,
+        )
+        .optional()
+        .map_err(db)
+    })?;
+    if let Some(view) = stored {
+        return to_value(&view);
+    }
     check_create(request, now)?;
     if !link_origin_ok(&hub.config.public_url) {
         return Err(RelayError::new(
@@ -889,7 +995,7 @@ fn create(
             "This relay's origin is not https, so it makes no public link.",
         ));
     }
-    if request.access == "emails" && !links.mail {
+    if request.access == "emails" && !links.mail_on() {
         return Err(mail_unavailable());
     }
     let sharing = hub
@@ -897,11 +1003,6 @@ fn create(
         .plans()
         .sharing(&hub.directory.store, &caller.account, now)?;
     let limit = links.limit_of(sharing);
-    let body_hash = Sha256::digest(
-        serde_json::to_vec(request)
-            .map_err(|_| RelayError::internal("The request cannot be written."))?,
-    )
-    .to_vec();
     let view = links.store.tx(|tx| {
         let known: Option<(String, Vec<u8>)> = tx
             .query_row(
@@ -1024,7 +1125,7 @@ fn list(hub: &Hub, links: &Links, caller: &AccountCaller, now: u64) -> RelayResu
         links: rows,
         live,
         limit: links.limit_of(sharing),
-        mail: links.mail,
+        mail: links.mail_on(),
     })
 }
 
@@ -1160,16 +1261,9 @@ pub fn open(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> RelayResult<Valu
                     return Err(RelayError::invalid("The code is 8 digits."));
                 }
                 let hash = address_hash(&address_key, &normal);
-                let on_link: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM link_address WHERE link_id = ?1 AND address_hash = ?2)",
-                        params![link_id, hash],
-                        |row| row.get(0),
-                    )
-                    .map_err(db)?;
-                if !on_link {
-                    return Ok(OpenOutcome::CodeInvalid);
-                }
+                // The same reads, the same HMAC, and the same writes and commit for every
+                // code that does not open, for an address of the link and for any other
+                // one (section 4.4). A live code exists only for an address of the link.
                 let live_code: Option<Vec<u8>> = tx
                     .query_row(
                         "SELECT code_hash FROM link_code WHERE link_id = ?1 AND address_hash = ?2 \
@@ -1179,28 +1273,29 @@ pub fn open(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> RelayResult<Valu
                     )
                     .optional()
                     .map_err(db)?;
-                let Some(stored) = live_code else {
-                    // An address of the link without a live code: a wrong try of the pair
-                    // over the life of the link all the same (section 4.4).
+                let stored = live_code.clone().unwrap_or_else(|| vec![0u8; 32]);
+                let matches = code_matches(&address_key, link_id, code, &stored);
+                if !(matches && live_code.is_some()) {
+                    // The link's own count of codes that did not open: a write on every
+                    // path. Then a try of the live code of this address, if there is one,
+                    // and with it, only then, a wrong try of the pair over the life of the
+                    // link. The fifth try ends the code; the tenth wrong try of the pair
+                    // ends it and every later code of that address.
                     tx.execute(
-                        "UPDATE link_address SET wrong_tries = wrong_tries + 1 WHERE link_id = ?1 AND address_hash = ?2",
-                        params![link_id, hash],
+                        "UPDATE link SET code_failures = code_failures + 1 WHERE link_id = ?1",
+                        params![link_id],
                     )
                     .map_err(db)?;
-                    return Ok(OpenOutcome::CodeInvalid);
-                };
-                if !code_matches(&address_key, link_id, code, &stored) {
-                    // A wrong code of a live code counts a try of the code (the fifth ends
-                    // it) and of the link and address (the tenth over the life of the
-                    // link ends the code and every later one for that address).
+                    let counted = tx
+                        .execute(
+                            "UPDATE link_code SET tries = tries + 1 WHERE link_id = ?1 AND address_hash = ?2 \
+                             AND expires_at > ?3 AND tries < ?4",
+                            params![link_id, hash, to_i(now), CODE_TRIES],
+                        )
+                        .map_err(db)?;
                     tx.execute(
-                        "UPDATE link_code SET tries = tries + 1 WHERE link_id = ?1 AND address_hash = ?2",
-                        params![link_id, hash],
-                    )
-                    .map_err(db)?;
-                    tx.execute(
-                        "UPDATE link_address SET wrong_tries = wrong_tries + 1 WHERE link_id = ?1 AND address_hash = ?2",
-                        params![link_id, hash],
+                        "UPDATE link_address SET wrong_tries = wrong_tries + ?3 WHERE link_id = ?1 AND address_hash = ?2",
+                        params![link_id, hash, counted as i64],
                     )
                     .map_err(db)?;
                     tx.execute(
@@ -1274,7 +1369,7 @@ pub fn request_code(hub: &Hub, link_id: &str, body: &[u8], now: u64) -> Result<V
     if access != "emails" || !account_exists(&hub.directory.store, &account)? {
         return Err(link_not_found().into());
     }
-    if !links.mail {
+    if !links.mail_on() {
         return Err(mail_unavailable().into());
     }
     // The daily caps: the account's that made the link first, then the relay's. They count
@@ -1400,10 +1495,11 @@ impl Links {
         let code = zeroize::Zeroizing::new(new_code()?);
         let stored = code_hash(&job.address_key, &job.link_id, &code);
         let text = zeroize::Zeroizing::new(MAIL_TEXT.replace("{code}", &code));
+        // The same reads and the same statements for every request, for an address of the
+        // link and for any other: whether a code is made is a parameter of each write, so
+        // the transaction holds the lock of `links.db` as long on both paths.
         self.store.tx(|tx| {
-            if live_link(tx, &job.link_id, now)?.is_none() {
-                return Ok(());
-            }
+            let live = live_link(tx, &job.link_id, now)?.is_some();
             let pair: Option<(i64, i64, i64)> = tx
                 .query_row(
                     "SELECT wrong_tries, code_day, codes FROM link_address WHERE link_id = ?1 AND address_hash = ?2",
@@ -1412,42 +1508,49 @@ impl Links {
                 )
                 .optional()
                 .map_err(db)?;
-            let Some((wrong, code_day, codes_today)) = pair else {
-                return Ok(());
-            };
-            let codes_today = if code_day == day { codes_today } else { 0 };
-            if wrong >= PAIR_WRONG_TRIES || codes_today >= PAIR_CODES_PER_DAY {
-                return Ok(());
-            }
-            // The caps hold for the mails of the thread too.
             let (account_mails, relay_mails) = Links::mail_counts(tx, &job.account, day)?;
-            if account_mails >= job.account_cap || relay_mails >= self.settings.mail_per_day {
-                return Ok(());
-            }
+            let pair_room = pair.is_some_and(|(wrong, code_day, codes)| {
+                let today = if code_day == day { codes } else { 0 };
+                wrong < PAIR_WRONG_TRIES && today < PAIR_CODES_PER_DAY
+            });
+            // The caps hold for the mails of the thread too.
+            let made = i64::from(
+                live && pair_room
+                    && account_mails < job.account_cap
+                    && relay_mails < self.settings.mail_per_day,
+            );
+            tx.execute(
+                "UPDATE link SET code_requests = code_requests + 1 WHERE link_id = ?1",
+                params![job.link_id],
+            )
+            .map_err(db)?;
             for who in [job.account.as_str(), RELAY_COUNT] {
                 tx.execute(
-                    "INSERT INTO mail_count (day, account_id, mails) VALUES (?1, ?2, 1) \
+                    "INSERT INTO mail_count (day, account_id, mails) SELECT ?1, ?2, 1 WHERE ?3 = 1 \
                      ON CONFLICT (day, account_id) DO UPDATE SET mails = mails + 1",
-                    params![day, who],
+                    params![day, who, made],
                 )
                 .map_err(db)?;
             }
             tx.execute(
-                "UPDATE link_address SET code_day = ?3, codes = ?4 WHERE link_id = ?1 AND address_hash = ?2",
-                params![job.link_id, hash, day, codes_today + 1],
+                "UPDATE link_address SET codes = CASE WHEN code_day = ?3 THEN codes + 1 ELSE 1 END, \
+                 code_day = ?3 WHERE link_id = ?1 AND address_hash = ?2 AND ?4 = 1",
+                params![job.link_id, hash, day, made],
             )
             .map_err(db)?;
             // One live code for each link and address: a new one ends the one before.
             tx.execute(
-                "INSERT INTO link_code (link_id, address_hash, code_hash, expires_at, tries) VALUES (?1, ?2, ?3, ?4, 0) \
+                "INSERT INTO link_code (link_id, address_hash, code_hash, expires_at, tries) \
+                 SELECT ?1, ?2, ?3, ?4, 0 WHERE ?5 = 1 \
                  ON CONFLICT (link_id, address_hash) DO UPDATE SET code_hash = excluded.code_hash, \
                  expires_at = excluded.expires_at, tries = 0",
-                params![job.link_id, hash, stored, to_i(now + CODE_SECS)],
+                params![job.link_id, hash, stored, to_i(now + CODE_SECS), made],
             )
             .map_err(db)?;
             tx.execute(
-                "INSERT INTO mail_outbox (recipient, text, created_at, next_at) VALUES (?1, ?2, ?3, ?3)",
-                params![job.normal.as_str(), text.as_str(), to_i(now)],
+                "INSERT INTO mail_outbox (recipient, text, created_at, next_at) \
+                 SELECT ?1, ?2, ?3, ?3 WHERE ?4 = 1",
+                params![job.normal.as_str(), text.as_str(), to_i(now), made],
             )
             .map_err(db)?;
             Ok(())

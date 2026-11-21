@@ -32,6 +32,8 @@ use crate::server::links::MAIL_SUBJECT;
 const MAX_LINE: u64 = 2048;
 /// The most lines of one reply.
 const MAX_REPLY_LINES: usize = 100;
+/// The whole of one SMTP session, from the connection to `QUIT`.
+pub const SESSION_SECS: u64 = 60;
 /// Mails the thread hands over in one round.
 const BATCH: u32 = 10;
 /// The first wait after a failure; it doubles up to `MAX_RETRY_SECS`.
@@ -64,6 +66,18 @@ impl std::fmt::Display for MailError {
 enum Wire {
     Plain(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl Wire {
+    /// The timeouts of the socket under the session.
+    fn set_timeouts(&self, timeout: Duration) -> std::io::Result<()> {
+        let tcp = match self {
+            Self::Plain(stream) => stream,
+            Self::Tls(stream) => &stream.sock,
+        };
+        tcp.set_read_timeout(Some(timeout))?;
+        tcp.set_write_timeout(Some(timeout))
+    }
 }
 
 impl Read for Wire {
@@ -211,6 +225,8 @@ impl Mailer {
             .map_err(|_| MailError::at("connect"))?;
         let session = Session {
             reader: BufReader::new(Wire::Plain(tcp)),
+            deadline: std::time::Instant::now() + Duration::from_secs(SESSION_SECS),
+            io_timeout: self.settings.io_timeout,
         };
         if self.settings.implicit_tls() {
             session.start_tls(&self.tls, &self.settings.host)
@@ -237,13 +253,31 @@ fn plain_address(address: &str) -> bool {
             .all(|byte| byte.is_ascii_graphic() && byte != b'<' && byte != b'>')
 }
 
-/// One SMTP session.
+/// One SMTP session, with one deadline for all of it.
 struct Session {
     reader: BufReader<Wire>,
+    deadline: std::time::Instant,
+    io_timeout: Duration,
 }
 
 impl Session {
+    /// The time left for the next read or write: at most the I/O timeout, never past the
+    /// deadline of the session.
+    fn arm(&mut self) -> Result<(), MailError> {
+        let left = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(MailError::at("deadline"));
+        }
+        self.reader
+            .get_ref()
+            .set_timeouts(left.min(self.io_timeout))
+            .map_err(|_| MailError::at("deadline"))
+    }
+
     fn command(&mut self, line: &str) -> Result<(), MailError> {
+        self.arm()?;
         let wire = self.reader.get_mut();
         wire.write_all(line.as_bytes())
             .and_then(|()| wire.write_all(b"\r\n"))
@@ -255,6 +289,7 @@ impl Session {
     fn reply(&mut self, step: &'static str) -> Result<(u16, Vec<String>), MailError> {
         let mut lines = Vec::new();
         loop {
+            self.arm()?;
             let mut line = Vec::new();
             (&mut self.reader)
                 .take(MAX_LINE)
@@ -311,12 +346,25 @@ impl Session {
         let Wire::Plain(tcp) = self.reader.into_inner() else {
             return Err(MailError::at("starttls"));
         };
+        let left = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(MailError::at("deadline"));
+        }
+        let timeout = left.min(self.io_timeout);
+        tcp.set_read_timeout(Some(timeout))
+            .and_then(|()| tcp.set_write_timeout(Some(timeout)))
+            .map_err(|_| MailError::at("tls"))?;
         let name = ServerName::try_from(host.to_string()).map_err(|_| MailError::at("tls"))?;
         let connection =
             ClientConnection::new(Arc::clone(config), name).map_err(|_| MailError::at("tls"))?;
         let mut stream = StreamOwned::new(connection, tcp);
         // The handshake is finished, and the certificate checked, before any command.
         while stream.conn.is_handshaking() {
+            if std::time::Instant::now() >= self.deadline {
+                return Err(MailError::at("deadline"));
+            }
             stream
                 .conn
                 .complete_io(&mut stream.sock)
@@ -324,6 +372,8 @@ impl Session {
         }
         Ok(Self {
             reader: BufReader::new(Wire::Tls(Box::new(stream))),
+            deadline: self.deadline,
+            io_timeout: self.io_timeout,
         })
     }
 
@@ -343,6 +393,7 @@ impl Session {
             data.truncate(len);
         }
         data.push_str(".\r\n");
+        self.arm()?;
         let wire = self.reader.get_mut();
         wire.write_all(data.as_bytes())
             .and_then(|()| wire.flush())
@@ -389,26 +440,42 @@ fn retry_after(tries: i64) -> u64 {
         .min(MAX_RETRY_SECS)
 }
 
-/// The `relay-mail` thread: it waits for the outbox, hands each due mail to the server,
-/// deletes it once the server took it, and waits longer after each failure. A mail that
-/// is not taken within an hour is deleted (`Links::mail_failed`, the maintenance pass).
+/// Turns the mail off when the thread ends, however it ends (a stop, or a panic): the
+/// waiting code requests go with their address keys (`Links::mail_stopped`).
+struct MailOff(Arc<crate::server::links::Links>);
+
+impl Drop for MailOff {
+    fn drop(&mut self) {
+        self.0.mail_stopped();
+    }
+}
+
+/// True for a reply that no later try changes (5xx, RFC 5321 section 4.2.1).
+fn permanent(error: &MailError) -> bool {
+    error.reply.is_some_and(|code| (500..600).contains(&code))
+}
+
+/// The `relay-mail` thread: it turns the waiting code requests into mails
+/// (`Links::process_jobs`), also between two mails, so a slow server delays them by one
+/// session at most (`SESSION_SECS`); it hands each due mail to the server and deletes it
+/// once the server took it; a 5xx reply drops the mail at once; any other failure waits
+/// longer each time; a mail that is not taken within an hour is deleted
+/// (`Links::mail_failed`, the maintenance pass).
 pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
-    let (Some(links), Some(settings)) = (hub.links().cloned(), hub.config.connect.mail.clone())
-    else {
+    let Some(links) = hub.links().cloned() else {
         return;
     };
-    let mailer = match Mailer::new(&settings) {
-        Ok(mailer) => mailer,
-        Err(_) => {
-            eprintln!("apassy-relay: the mail sender cannot start: no code mail is sent");
-            return;
-        }
+    let _off = MailOff(links.clone());
+    let Some(mailer) = links.mailer() else {
+        return;
     };
-    while !stop.load(Ordering::Relaxed) {
-        // The code requests first: their lookup, code, and mail (`Links::process_jobs`).
+    let jobs = || {
         if links.process_jobs().is_err() {
             eprintln!("apassy-relay: a code request could not be made into a mail");
         }
+    };
+    while !stop.load(Ordering::Relaxed) {
+        jobs();
         let now = crate::now_unix();
         let due = match links.due_mail(now, BATCH) {
             Ok(due) => due,
@@ -421,9 +488,16 @@ pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
+            jobs();
             let now = crate::now_unix();
             let stored = match mailer.send(recipient, text, now) {
                 Ok(()) => links.mail_sent(*id),
+                Err(error) if permanent(&error) => {
+                    eprintln!(
+                        "apassy-relay: a code mail was refused by the SMTP server at step {error}: it is dropped"
+                    );
+                    links.mail_sent(*id)
+                }
                 Err(error) => {
                     eprintln!(
                         "apassy-relay: a code mail was not taken by the SMTP server at step {error} (try {})",

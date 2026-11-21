@@ -138,7 +138,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
   | `emails`, one-time | a valid code and `confirm` `true` | the sealed form; the code is used and Connect deletes the sealed form in the same transaction |
 
 - So a link of `anyone` that is not one-time opens with one request, and a one-time link opens only after the reader said yes. Of two opens of a one-time link at the same moment, one gets the sealed form and the other `404 not_found`.
-- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, a code that ended, and a pair of link and address that used its wrong tries (section 7) are `403 code_invalid`, after the same work. Each `403 code_invalid` for an address of the link counts a try of the live code (the fifth ends the code) and a wrong try of the pair over the life of the link (the tenth ends codes for that pair: no new code is sent to that address for that link, and the answers stay the same).
+- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, a code that ended, and a pair of link and address that used its wrong tries (section 7) are `403 code_invalid`, after the same work. A wrong try counts only while a code is live for that link and address: each `403 code_invalid` of a live code counts a try of that code (the fifth ends the code) and a wrong try of the pair over the life of the link (the tenth ends codes for that pair: no new code is sent to that address for that link, and the answers stay the same). A guess with no live code is `403 code_invalid` and counts nothing, so a holder of the link cannot lock a reader out without a mail to that reader.
 - An unknown, expired, revoked, or opened link is `404 not_found` (section 1), before any other check of the body except its form.
 
 ### 4.5 `POST /v1/links/{link_id}/code`
@@ -149,6 +149,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 
 - **The answer comes before any look at the addresses.** Connect checks, in this order and only these: the form of the body; that `email` has a normal form (section 6; else `400 invalid_request`) and `address_key` is 32 bytes; that the link is live and has the access `emails` (else `404 not_found`); that the relay has a mail sender and that neither the daily mail cap of the sharing account nor the one of the relay is reached (else `503 mail_unavailable`); and the code requests of the link (section 7; else `429 rate_limited`). None of these depends on the address. It then answers `{"expires_in":900}` and hands the normal form, the address key, and the link id in memory to the mail thread.
 - **The mail thread** makes the address hash and compares it with the hashes of the link. When it is one of them, and the pair of link and address has codes left for the UTC day and wrong tries left over the life of the link (section 7), it makes a code, ends the code before for that pair, writes the code row and the outbox row (section 10) in one transaction, and counts the mail for the account and the relay. Otherwise it writes nothing and sends nothing. The request has its answer before any of this, so both paths are the same on the wire and in time.
+- **Accepted.** The mail caps count the mails that were made. So a relay near its cap can tell a holder of `K`, by the answer to the next request, whether one more mail was made, and so whether an address that the holder asked for is on the link. A holder of `K` reads the link anyway; the caps say nothing about an address to anyone without `K`.
 - Only the person who reads the mail learns that the address may open the link.
 - Above a mail cap, every code request of that link gets `503 mail_unavailable`, whatever the address, until the UTC day ends.
 - Connect MUST NOT store or log `address_key`: it lives in the memory of the request and of the mail thread only, and goes when the thread has handled it.
@@ -204,12 +205,12 @@ A text without a normal form is not an address: the app does not take it, and Co
 | Padded plaintext | 1 KiB to 32 KiB, a multiple of 1 KiB |
 | Addresses of a link | 1 to 20 |
 | A code | 8 digits, 15 minutes, 5 tries, one live code for each link and address |
-| Wrong tries of a link and address | 10 over the life of the link; then no new code for that address and that link, and every answer stays the same |
+| Wrong tries of a link and address | 10 over the life of the link; only a wrong code while a code is live counts; then no new code for that address and that link, and every answer stays the same |
 | Codes of a link and address | 5 each UTC day, counted by the mail thread; above it no mail, and the answer stays the same |
 | Code requests of a link | 20 an hour, every request counted, before any look at the address; then `429 rate_limited` |
 | Code mails of a sharing account, each UTC day | 50 for an account without a plan, on Connect Personal, or on Connect Family; 200 for a Connect Team member; a setting of the operator on a relay with open plans. Counted before the cap of the relay; above it `503 mail_unavailable` for every code request of the account's links |
-| Code mails of a relay, each UTC day | a cap of the operator (default 500); above it `503 mail_unavailable` until the day ends |
-| Worker, for each IPv4 address or IPv6 /64 (`LINK_LIMITER`) | 30 opens and 5 code requests a minute, then `429 rate_limited` with `Retry-After: 60` |
+| Code mails of a relay, each UTC day | a cap of the operator (default 2000); above it `503 mail_unavailable` until the day ends |
+| Worker, for each IPv4 address or IPv6 /64 | `LINK_LIMITER`: 30 opens a minute; `LINK_CODE_LIMITER`: 5 code requests a minute; then `429 rate_limited` with `Retry-After: 60` |
 
 The plan limits are Connect's settings with these defaults. The live links of an account count in the transaction that adds one. When a plan ends, the links stay until their expiry; a new link counts against the new limit.
 
@@ -257,7 +258,7 @@ Connect sends one kind of mail in this release: the code of section 4.5.
 
 | Where | What | How long |
 | --- | --- | --- |
-| `links.db`, link row | The link id, the account id, the times, the one-time flag, the access mode, `opens`, `last_opened_at`, the sealed form | Until the expiry, the revoke, or the account's deletion. A one-time link loses its sealed form and its address hashes at its open; its row stays until its expiry, for the list of section 4.2 |
+| `links.db`, link row | The link id, the account id, the times, the one-time flag, the access mode, `opens`, `last_opened_at`, the counts of codes that did not open and of code requests that the mail thread handled (one write on every path), the sealed form | Until the expiry, the revoke, or the account's deletion. A one-time link loses its sealed form and its address hashes at its open; its row stays until its expiry, for the list of section 4.2 |
 | `links.db`, address hashes | The address hashes of a link of `emails` | With the link |
 | `links.db`, codes | A hash of each code with the link id, the address hash, its expiry, and its tries | 15 minutes, or the fifth wrong try, or its use |
 | `links.db`, pairs | For each link and address hash that got a code: the wrong tries over the life of the link, and the codes of the UTC day | With the link |

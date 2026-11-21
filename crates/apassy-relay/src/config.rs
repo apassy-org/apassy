@@ -41,7 +41,7 @@
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT` | Code mails of the links of one account in one UTC day (no plan, Personal, Family), 0 to 100000; counted before the relay's cap; above it every code request of that account's links answers 503 `mail_unavailable` until the day ends | `50` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_TEAM` | The same for a Team member, 0 to 100000 | `200` |
 //! | `APASSY_CONNECT_MAIL_PER_ACCOUNT_OPEN` | The same with `APASSY_RELAY_ACCOUNT_PLANS=open`, 0 to 1000000 | `500` |
-//! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `500` |
+//! | `APASSY_CONNECT_MAIL_PER_DAY` | Code mails of the relay in one UTC day, 0 to 1000000; above it the code route answers 503 `mail_unavailable` until the day ends | `2000` |
 //! | `APASSY_CONNECT_FAMILY_EXTRA_CENTS`, `APASSY_CONNECT_FAMILY_EXTRA_YEAR_CENTS` | Tier 2 of the Family prices that a checkout expects (cents, VAT included); a Family checkout is 503 `busy` while Stripe's price differs | `100`, `1000` |
 //! | `APASSY_CONNECT_GRACE_DAYS` | Entitled days after the first failed payment, 1 to 60 | `14` |
 //! | `APASSY_CONNECT_READ_ONLY_DAYS` | Read-only days after the end of a plan, 1 to 365 | `30` |
@@ -150,7 +150,7 @@ pub const MAX_CONNECT_LINKS: u64 = 10_000;
 /// Code requests for one link in `CODE_LINK_WINDOW_SECS`.
 pub const DEFAULT_MAIL_PER_LINK: u64 = 20;
 /// Code mails of the relay in one UTC day.
-pub const DEFAULT_MAIL_PER_DAY: u64 = 500;
+pub const DEFAULT_MAIL_PER_DAY: u64 = 2000;
 /// Code requests of the links of one account in one UTC day: no plan, Personal, Family.
 pub const DEFAULT_MAIL_PER_ACCOUNT: u64 = 50;
 /// The same for a Team member.

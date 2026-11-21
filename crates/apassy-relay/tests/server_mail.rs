@@ -332,12 +332,12 @@ fn five_wrong_codes_end_the_code() {
         (status, answer["error"]["code"].as_str()),
         (403, Some("code_invalid"))
     );
-    // Under five tries a new code is usable. The pair has 6 wrong tries now (the right
-    // code of an ended code counts too); 3 more leave it under its 10.
+    // Under five tries a new code is usable. The pair has 5 wrong tries now (the right
+    // code of an ended code does not count: no code lives); 4 more leave it at 9.
     assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
     let code = smtp.wait_for(2)[1].code();
     let wrong = other_code(&code);
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(open_with(&c, &link_id, ADA, &key, &wrong, false).0, 403);
     }
     let opened = open_with(&c, &link_id, ADA, &key, &code, false);
@@ -489,24 +489,213 @@ fn a_link_and_address_get_five_codes_a_day_and_ten_wrong_tries() {
     let last = smtp.mails()[4].code();
     assert_eq!(open_with(&c, &link_id, ADA, &key, &last, false).0, 200);
 
+    // A new UTC day gives the pair 5 codes again.
+    let conn = links_db(&c);
+    conn.execute_batch("UPDATE link_address SET code_day = code_day - 1;")
+        .unwrap();
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    assert_eq!(smtp.wait_for(6).len(), 6);
+}
+
+/// The lifetime count of wrong tries of a link and address: only a wrong code while a code
+/// lives counts; 9 still allow a new code, 10 do not, and the answers stay the same.
+#[test]
+fn nine_wrong_tries_allow_a_code_and_ten_do_not() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |_| {});
+    let a = c.account("Ada");
     let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
-    let before = smtp.mails().len();
-    for round in 0..2 {
-        assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
-        let code = smtp.wait_for(before + round + 1)[before + round].code();
-        let wrong = other_code(&code);
-        for _ in 0..5 {
-            assert_eq!(open_with(&c, &link_id, ADA, &key, &wrong, false).0, 403);
-        }
-        assert_eq!(open_with(&c, &link_id, ADA, &key, &code, false).0, 403);
+    let conn = links_db(&c);
+    let wrong_tries = || -> i64 {
+        conn.query_row("SELECT wrong_tries FROM link_address", [], |row| row.get(0))
+            .unwrap()
+    };
+    // Guesses with no live code are 403 and count nothing: no mail locks anybody out.
+    for _ in 0..12 {
+        assert_eq!(open_with(&c, &link_id, ADA, &key, "12345678", false).0, 403);
     }
-    // Ten wrong tries: the answer stays the same, and no code goes any more.
+    assert_eq!(wrong_tries(), 0);
+    // A first code: 5 wrong tries end it (5 for the pair).
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    let code = smtp.wait_for(1)[0].code();
+    for _ in 0..5 {
+        assert_eq!(
+            open_with(&c, &link_id, ADA, &key, &other_code(&code), false).0,
+            403
+        );
+    }
+    assert_eq!(open_with(&c, &link_id, ADA, &key, &code, false).0, 403);
+    assert_eq!(wrong_tries(), 5);
+    // A second code: 4 wrong tries (9 for the pair) leave it alive.
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    let code = smtp.wait_for(2)[1].code();
+    for _ in 0..4 {
+        assert_eq!(
+            open_with(&c, &link_id, ADA, &key, &other_code(&code), false).0,
+            403
+        );
+    }
+    assert_eq!(wrong_tries(), 9);
+    // At 9 a new code still goes.
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    let code = smtp.wait_for(3)[2].code();
+    // The tenth ends it and every later one.
+    assert_eq!(
+        open_with(&c, &link_id, ADA, &key, &other_code(&code), false).0,
+        403
+    );
+    assert_eq!(wrong_tries(), 10);
+    assert_eq!(open_with(&c, &link_id, ADA, &key, &code, false).0, 403);
+    assert_eq!(wrong_tries(), 10, "no live code: no count");
     assert_eq!(
         ask_code(&c, &link_id, ADA, &key).1["result"],
         json!({"expires_in": 900})
     );
     std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(smtp.mails().len(), before + 2);
+    assert_eq!(smtp.mails().len(), 3);
+}
+
+/// A code that does not open does the same work for an address of the link and for any
+/// other: the same reads and the same writes, and one commit that the link counts.
+#[test]
+fn a_wrong_code_does_the_same_work_for_every_address() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |_| {});
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    let code = smtp.wait_for(1)[0].code();
+    let conn = links_db(&c);
+    let counts = || -> (i64, i64, i64) {
+        conn.query_row(
+            "SELECT l.code_failures, a.wrong_tries, coalesce((SELECT tries FROM link_code), -1) \
+             FROM link l JOIN link_address a USING (link_id)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(counts(), (0, 0, 0));
+    let wrong = other_code(&code);
+    let unknown = open_with(&c, &link_id, "nobody@example.com", &key, &wrong, false);
+    let other_key = open_with(&c, &link_id, ADA, &encode_b64(&[5u8; 32]), &wrong, false);
+    let listed = open_with(&c, &link_id, ADA, &key, &wrong, false);
+    assert_eq!(unknown, listed);
+    assert_eq!(other_key, listed);
+    assert_eq!(listed.0, 403);
+    // Each of the three committed its write; only the live code of the listed address
+    // counted a try, of the code and of the pair.
+    assert_eq!(counts(), (3, 1, 1));
+}
+
+/// The four ways a submission must not go on: each fails at its step, before any AUTH,
+/// MAIL FROM, or RCPT TO is on the wire.
+#[test]
+fn the_client_sends_nothing_without_a_checked_tls_session() {
+    use apassy_relay::server::mail::Mailer;
+    use fake_smtp::Mode;
+    let text = "Your code to open a shared Apassy item: 12345678\r\n";
+    let cases: Vec<(&str, FakeSmtp, bool, &str)> = vec![
+        (
+            "port 587 without STARTTLS",
+            fake_smtp::start_with(false, Mode::NoStartTls, fake_smtp::HOST),
+            true,
+            "starttls offered",
+        ),
+        (
+            "a certificate for another name",
+            fake_smtp::start_with(false, Mode::Normal, "other.apassy.test"),
+            true,
+            "tls",
+        ),
+        (
+            "a root that no one trusts",
+            fake_smtp::start_with(false, Mode::Normal, fake_smtp::HOST),
+            false,
+            "tls",
+        ),
+        (
+            "AUTH offered before TLS",
+            fake_smtp::start_with(false, Mode::AuthBeforeTls, fake_smtp::HOST),
+            true,
+            "starttls offered",
+        ),
+    ];
+    for (what, smtp, trusted, step) in cases {
+        let mut settings = smtp.settings();
+        if !trusted {
+            settings.extra_roots_der = Vec::new();
+        }
+        let error = Mailer::new(&settings)
+            .unwrap()
+            .send(ADA_NORMAL, text, now())
+            .unwrap_err();
+        assert_eq!(error.step, step, "{what}: {error}");
+        let commands = smtp.commands();
+        for line in &commands {
+            let command = line.split_once(':').map_or(line.as_str(), |(_, rest)| rest);
+            for refused in ["AUTH", "MAIL FROM", "RCPT TO", "DATA"] {
+                assert!(
+                    !command.to_ascii_uppercase().starts_with(refused),
+                    "{what}: {commands:?}"
+                );
+            }
+        }
+        assert!(smtp.mails().is_empty(), "{what}");
+    }
+}
+
+/// A 5xx answer is permanent: the mail goes at once, and the server is not asked again.
+#[test]
+fn a_permanent_refusal_drops_the_mail() {
+    let smtp = fake_smtp::start_with(false, fake_smtp::Mode::Permanent, fake_smtp::HOST);
+    let c = start_with_mail(&smtp, |_| {});
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    let links = c.relay.hub().links().unwrap().clone();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while smtp.sessions.load(std::sync::atomic::Ordering::SeqCst) == 0 && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(outbox_after_send(&links), 0);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(smtp.sessions.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// The daily mail counts are in links.db: a restart keeps the caps.
+#[test]
+fn the_mail_caps_hold_across_a_restart() {
+    let smtp = fake_smtp::start(false);
+    let c = start_with_mail(&smtp, |cfg| {
+        cfg.connect.links = LinkSettings {
+            mail_per_account: 1,
+            ..LinkSettings::default()
+        };
+    });
+    let a = c.account("Ada");
+    let (link_id, key) = email_link(&c, &a, &[ADA_NORMAL]);
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 200);
+    assert_eq!(smtp.wait_for(1).len(), 1);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ask_code(&c, &link_id, ADA, &key).0, 503);
+    let Connect { relay, stripe, .. } = c;
+    let c = Connect::around(relay.restart(), stripe);
+    let (status, answer) = ask_code(&c, &link_id, ADA, &key);
+    assert_eq!(
+        (status, answer["error"]["code"].as_str()),
+        (503, Some("mail_unavailable"))
+    );
+}
+
+/// links.db of a running test relay (keyed with the master key here).
+fn links_db(c: &Connect) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open(c.relay.config.links_path()).unwrap();
+    conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+        .unwrap();
+    conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    conn
 }
 
 /// The code route answers before it looks the address up: with the mail thread held, an
@@ -742,15 +931,15 @@ fn the_mail_settings_are_checked_at_start() {
 
 // ---- No log line holds an address or a code. ----
 
-/// A server that greets every connection with 554, so each mail fails at its first step
-/// and the relay logs the failure.
+/// A server that greets every connection with 421 (try later), so each mail fails at its
+/// first step, stays in the outbox, and the relay logs the failure.
 fn refusing_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let mut stream = stream;
-            let _ = std::io::Write::write_all(&mut stream, b"554 no service here\r\n");
+            let _ = std::io::Write::write_all(&mut stream, b"421 no service here for now\r\n");
         }
     });
     port
@@ -890,6 +1079,18 @@ fn no_log_line_holds_an_address() {
     conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
         .unwrap();
     conn.busy_timeout(Duration::from_secs(10)).unwrap();
+    // The mail thread writes the outbox rows after the answers.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while conn
+        .query_row("SELECT count(*) FROM mail_outbox", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+        < 2
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let texts: Vec<String> = conn
         .prepare("SELECT text FROM mail_outbox")
         .unwrap()
@@ -917,7 +1118,7 @@ fn no_log_line_holds_an_address() {
         .read_to_string(&mut log)
         .unwrap();
     assert!(
-        log.contains("a code mail was not taken by the SMTP server at step greeting (554)"),
+        log.contains("a code mail was not taken by the SMTP server at step greeting (421)"),
         "the failure is logged: {log}"
     );
     let lower = log.to_lowercase();

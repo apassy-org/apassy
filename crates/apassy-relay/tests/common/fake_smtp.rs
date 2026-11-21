@@ -48,10 +48,25 @@ impl Mail {
     }
 }
 
+/// How the server behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// STARTTLS (or TLS at once), then AUTH, as a submission server does.
+    Normal,
+    /// No STARTTLS in the plain EHLO.
+    NoStartTls,
+    /// AUTH in the plain EHLO, and no STARTTLS: a server that takes a password in plain.
+    AuthBeforeTls,
+    /// Every `RCPT TO` is refused for good (550).
+    Permanent,
+}
+
 pub struct FakeSmtp {
     pub addr: SocketAddr,
     pub ca_der: Vec<u8>,
     mails: Arc<Mutex<Vec<Mail>>>,
+    /// Every command line the server got, in order, with `plain:` or `tls:` before it.
+    commands: Arc<Mutex<Vec<String>>>,
     /// While true, every `RCPT TO` is refused with 451 (a server that fails for now).
     pub refuse: Arc<AtomicBool>,
     pub sessions: Arc<AtomicUsize>,
@@ -74,6 +89,11 @@ fn validity(params: &mut CertificateParams) {
 
 /// A server with STARTTLS on a free port (`implicit`: TLS from the first byte instead).
 pub fn start(implicit: bool) -> FakeSmtp {
+    start_with(implicit, Mode::Normal, HOST)
+}
+
+/// A server of `mode` whose certificate names `cert_host`.
+pub fn start_with(implicit: bool, mode: Mode, cert_host: &str) -> FakeSmtp {
     let mut root = CertificateParams::default();
     let mut name = DistinguishedName::new();
     name.push(DnType::CommonName, "Apassy relay SMTP test root");
@@ -87,7 +107,7 @@ pub fn start(implicit: bool) -> FakeSmtp {
     let root_key = KeyPair::generate().expect("root key");
     let root_cert = root.self_signed(&root_key).expect("root");
     let issuer = Issuer::new(root, root_key);
-    let mut leaf = CertificateParams::new(vec![HOST.to_string()]).expect("leaf");
+    let mut leaf = CertificateParams::new(vec![cert_host.to_string()]).expect("leaf");
     leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf.use_authority_key_identifier_extension = true;
@@ -110,16 +130,25 @@ pub fn start(implicit: bool) -> FakeSmtp {
     let mails = Arc::new(Mutex::new(Vec::new()));
     let refuse = Arc::new(AtomicBool::new(false));
     let sessions = Arc::new(AtomicUsize::new(0));
-    let (thread_mails, thread_refuse, thread_sessions) =
-        (mails.clone(), refuse.clone(), sessions.clone());
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let (thread_mails, thread_refuse, thread_sessions, thread_commands) = (
+        mails.clone(),
+        refuse.clone(),
+        sessions.clone(),
+        commands.clone(),
+    );
     thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             thread_sessions.fetch_add(1, Ordering::SeqCst);
-            let (config, mails, refuse) =
-                (config.clone(), thread_mails.clone(), thread_refuse.clone());
+            let (config, mails, refuse, commands) = (
+                config.clone(),
+                thread_mails.clone(),
+                thread_refuse.clone(),
+                thread_commands.clone(),
+            );
             thread::spawn(move || {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
-                let _ = session(stream, &config, implicit, &mails, &refuse);
+                let _ = session(stream, &config, implicit, mode, &mails, &refuse, &commands);
             });
         }
     });
@@ -127,6 +156,7 @@ pub fn start(implicit: bool) -> FakeSmtp {
         addr,
         ca_der: root_cert.der().to_vec(),
         mails,
+        commands,
         refuse,
         sessions,
         implicit,
@@ -143,6 +173,11 @@ impl FakeSmtp {
         settings.connect_to = Some(self.addr);
         settings.io_timeout = Duration::from_secs(10);
         settings
+    }
+
+    /// Every command line the server got so far.
+    pub fn commands(&self) -> Vec<String> {
+        self.commands.lock().unwrap().clone()
     }
 
     /// Every mail taken so far.
@@ -205,8 +240,10 @@ fn session(
     tcp: TcpStream,
     config: &Arc<ServerConfig>,
     implicit: bool,
+    mode: Mode,
     mails: &Mutex<Vec<Mail>>,
     refuse: &AtomicBool,
+    commands: &Mutex<Vec<String>>,
 ) -> std::io::Result<()> {
     let wire = if implicit {
         tls(tcp, config)?
@@ -229,12 +266,20 @@ fn session(
             return Ok(());
         }
         let line = line.trim_end().to_string();
+        commands
+            .lock()
+            .unwrap()
+            .push(format!("{}{line}", if secure { "tls:" } else { "plain:" }));
         let upper = line.to_ascii_uppercase();
         if upper.starts_with("EHLO") {
             let wire = reader.get_mut();
             wire.write_all(b"250-smtp.apassy.test\r\n")?;
             if !secure {
-                wire.write_all(b"250-STARTTLS\r\n")?;
+                match mode {
+                    Mode::NoStartTls => {}
+                    Mode::AuthBeforeTls => wire.write_all(b"250-AUTH PLAIN LOGIN\r\n")?,
+                    _ => wire.write_all(b"250-STARTTLS\r\n")?,
+                }
             } else {
                 wire.write_all(b"250-AUTH PLAIN LOGIN\r\n")?;
             }
@@ -248,7 +293,7 @@ fn session(
             reader = BufReader::new(tls(tcp, config)?);
             secure = true;
         } else if let Some(token) = line.strip_prefix("AUTH PLAIN ") {
-            if !secure {
+            if !secure && mode != Mode::AuthBeforeTls {
                 send(&mut reader, "538 encryption required")?;
                 continue;
             }
@@ -268,6 +313,10 @@ fn session(
             from = Some(address.trim_matches(['<', '>']).to_string());
             send(&mut reader, "250 ok")?;
         } else if let Some(address) = line.strip_prefix("RCPT TO:") {
+            if mode == Mode::Permanent {
+                send(&mut reader, "550 no such user here")?;
+                continue;
+            }
             if refuse.load(Ordering::SeqCst) {
                 send(&mut reader, "451 try later")?;
                 continue;

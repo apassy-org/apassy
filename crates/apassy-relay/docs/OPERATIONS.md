@@ -2182,8 +2182,10 @@ Public links (ADR 0047 release A, connect-share-v1, docs/SPEC.md section 38) liv
 ### 30.1 Backups
 
 - `links.db` is in no backup: not in `admin backup`, not in the stopped backup, not in the backup check of a cutover. This is on purpose: no restore brings back a link that its owner revoked or that expired.
-- A restore of a backup leaves `links.db` as it is. To start with no links, stop the relay and remove `links.db` (and `links.db-journal`); the owners' devices still list their links and show them as gone.
-- A start that refuses `links.db` (another form, such as a keyed file after a change to `connect` mode, or another version) says so; removing the file is the fix. Live links are then gone.
+- Snapshots of the data directory by the host (a volume snapshot, restic, a copy of the folder) must exclude `links.db*` too (`links.db`, `links.db-journal`, `links.db.plain`): such a copy would bring revoked links back.
+- A restore of a backup leaves `links.db` as it is.
+- To end every live link (no link opens any more), stop the relay and run `apassy-relay purge-links`: the links, their codes, the counts, and the outbox go; the ids of every link ever made stay, so none opens or is made again. Never delete `links.db`: that drops those ids too.
+- A start that refuses `links.db` (another form or another version) says so and changes nothing. Start the image that wrote it. A keyed `links.db` becomes plain in `connect-cutover` (docs/SPEC.md 38.13), with every link and id.
 
 ### 30.2 The code mail
 
@@ -2196,14 +2198,16 @@ Links for "Only these e-mail addresses" need a mail sender. Without `APASSY_CONN
 | `APASSY_CONNECT_SMTP_USER` | The submission account of the sender |
 | `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password (mode 0600, mounted read-only) |
 | `APASSY_CONNECT_SMTP_FROM` | `connect@apassy.wyderka.cc` |
-| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_LINK` | The defaults (50, 200, 500, 500, 20) unless the owner decides otherwise |
+| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_LINK` | The defaults (50, 200, 500, 2000, 20) unless the owner decides otherwise |
 
 The sending domain needs its records before the first mail: SPF that names the mail server (or its relay), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
 
 ### 30.3 What to watch
 
 - `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted.
-- `the mail sender cannot start`: the system roots or the host name; no code mail is sent until a restart with a fix.
+- A relay whose mail sender cannot be built does not start (the system roots, or the host name).
+- `the mail thread cannot start: no code mail is sent`: the mail is off until a restart; links for e-mail addresses and code requests answer 503 `mail_unavailable`.
+- `a code mail was refused by the SMTP server at step … (5xx): it is dropped`: a permanent refusal; the reader may ask for a new code.
 - Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day (the counts are in `links.db`, so a restart keeps them).
 
 ### 30.4 Settings of a relay that you run yourself
@@ -2212,4 +2216,10 @@ The sending domain needs its records before the first mail: SPF that names the m
 
 ### 30.5 Rollback
 
-An image before public links never opens `links.db` and leaves it in place; its routes are 404 there. Going forward again keeps the links that did not expire meanwhile. The edge Worker's `LINK_LIMITER` and `LINK_CODE_LIMITER` bindings are unused by an older Worker.
+An image before public links never opens `links.db` and leaves it in place; its link routes are 404. A device that revokes a link meanwhile takes the 404 for a revoke that is done, so that link would be live again on the way forward. Before going forward after such a rollback:
+
+1. Keep the relay stopped.
+2. Run `apassy-relay purge-links` with the configuration of the new image. Every link goes; the ids stay used.
+3. Start the new image. The owners make new links where they need them.
+
+The edge Worker's `LINK_LIMITER` and `LINK_CODE_LIMITER` bindings are unused by an older Worker.

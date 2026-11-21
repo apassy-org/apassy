@@ -1323,7 +1323,10 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
                 .spawn(move || mail::run(hub, stop))
         });
     if mail_sender.as_ref().is_some_and(Result::is_err) {
-        eprintln!("apassy-relay: the mail thread cannot start");
+        eprintln!("apassy-relay: the mail thread cannot start: no code mail is sent");
+        if let Some(links) = hub.links() {
+            links.mail_stopped();
+        }
     }
     let mut probed = Instant::now();
     let mut failed_probes = 0;
@@ -2479,7 +2482,7 @@ fn respond_public_link(hub: &Hub, mut request: Request, method: &str, path: &str
         );
         return;
     }
-    let body = match read_body(&mut request, method) {
+    let body = match read_body_max(&mut request, method, links::MAX_PUBLIC_BODY) {
         Ok(body) => body,
         Err(error) => {
             refuse(request, &error, None);

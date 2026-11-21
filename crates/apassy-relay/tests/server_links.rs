@@ -831,3 +831,101 @@ fn a_link_needs_an_https_origin() {
     );
     assert_eq!(list(&c, &a)["links"], json!([]));
 }
+
+/// Every address of the contract vectors: the relay's normal form, and for the addresses
+/// of each link the hash under its address key.
+#[test]
+fn every_address_vector_has_the_relays_normal_form_and_hash() {
+    use apassy_relay::server::links::{address_hash, normal_address};
+    let vectors = links::vectors();
+    let cases = vectors["addresses"].as_array().unwrap();
+    assert!(cases.len() >= 20, "the edge cases of contract section 9");
+    for case in cases {
+        let input = case["input"].as_str().unwrap();
+        assert_eq!(
+            normal_address(input).as_deref(),
+            case["normalized"].as_str(),
+            "{input:?} ({})",
+            case["note"]
+        );
+    }
+    let mut hashes = 0;
+    for link in vectors["links"].as_array().unwrap() {
+        let key =
+            apassy_relay::hostkeys::decode_b64(link["address_key_b64u"].as_str().unwrap(), 32)
+                .unwrap();
+        for address in link["addresses"].as_array().unwrap() {
+            let normal = normal_address(address["input"].as_str().unwrap()).unwrap();
+            assert_eq!(normal, address["normalized"].as_str().unwrap());
+            assert_eq!(
+                address_hash(&key, &normal),
+                address["hash"].as_str().unwrap()
+            );
+            hashes += 1;
+        }
+        assert_eq!(
+            link["create"]["address_hashes"].as_array().unwrap().len(),
+            link["addresses"].as_array().unwrap().len()
+        );
+    }
+    assert!(hashes >= 2);
+}
+
+/// `apassy-relay purge-links`: only with the relay stopped; every link goes with its codes
+/// and counts, and the ids stay used, so a purged link neither opens nor is made again.
+#[test]
+fn the_purge_empties_the_links_and_keeps_their_ids() {
+    let c = connect::start();
+    let a = c.account("Ada");
+    let live = anyone_body(false, 3600);
+    let revoked = anyone_body(false, 3600);
+    for body in [&live, &revoked] {
+        create_ok(&c, &a, body);
+    }
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/links/{}", revoked["link_id"].as_str().unwrap()),
+        Some(&a.token),
+        None,
+    );
+    let error = apassy_relay::server::links::purge_stopped(&c.relay.config).unwrap_err();
+    assert_eq!(error.code, "conflict");
+    let Connect { relay, stripe, .. } = c;
+    let (config, dir) = relay.stop_keep();
+    let counts = apassy_relay::server::links::purge_stopped(&config).unwrap();
+    assert_eq!(counts, json!({"links": 1, "mails": 0, "ids_kept": 2}));
+    let relay = relay::start_existing(config, dir, None, "");
+    let c = Connect::around(relay, stripe);
+    let mut a = a;
+    a.token = c.sign_in(&a);
+    assert_eq!(list(&c, &a)["links"], json!([]));
+    for body in [&live, &revoked] {
+        let link_id = body["link_id"].as_str().unwrap();
+        assert_eq!(open(&c, link_id, &open_body(false)).0, 404);
+        let mut again = body.clone();
+        again["expires_at"] = json!(now() + 3600);
+        let (status, answer) = create(&c, &a, &again);
+        assert_eq!(
+            (status, answer["error"]["code"].as_str()),
+            (409, Some("conflict"))
+        );
+    }
+    create_ok(&c, &a, &anyone_body(false, 3600));
+}
+
+/// A late retry of a creation gets its stored view, also once its expiry would no longer
+/// pass the check of a new link.
+#[test]
+fn a_retry_gets_the_stored_view_before_the_expiry_check() {
+    let c = connect::start();
+    let a = c.account("Ada");
+    let body = anyone_body(false, 542);
+    let made = create_ok(&c, &a, &body);
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    // The same expiry is now less than 540 s away: a new link with it is refused...
+    let mut fresh = body.clone();
+    fresh["link_id"] = json!(links::new_link_id());
+    assert_eq!(create(&c, &a, &fresh).0, 400);
+    // ...and the retry of the first gets its stored view.
+    assert_eq!(create_ok(&c, &a, &body), made);
+}
