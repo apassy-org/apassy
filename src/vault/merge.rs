@@ -24,11 +24,17 @@
 //! argument: SQLCipher then uses the key of the vault. A copy that another Mac rekeyed
 //! does not open, and the app asks for the new passphrase.
 //!
-//! A credential is in any number of folders (schema 35): each `item_folder` row is a
-//! child row of the credential. The content hash of a credential in no folder or one
-//! folder is the hash of schema 34. When two Macs change only the folders of one
-//! credential at the same time, the credential is in the folders of both, without a
-//! conflict copy ([`Record::differs_only_in_folders`]).
+//! A credential is in any number of folders (schema 35). Each `item_folder` row is one
+//! membership with its own version and a tombstone (`removed_at`) when it ended, and it
+//! merges on its own ([`merge_folder_rows`]): the later of the add and the removal wins,
+//! a removal wins a tie, and `added_at` takes the earliest value, so every device agrees
+//! on the first folder. So two removals on two devices both hold, a membership of a
+//! folder that another device deleted stays gone, and concurrent moves of one credential
+//! from "Work" to "Home" and from "Work" to "Bills" leave it in "Home" and "Bills". Between
+//! two copies of schema 35 the folders are no part of a conflict of the credential. The
+//! content hash counts the live memberships: a credential in no folder or one folder has
+//! the hash of schema 34, where the folder was part of the credential; a copy of schema 34
+//! still merges that way ([`keep_local_v35`], [`set_folder_rows`]).
 //!
 //! Folders, shared vaults, and vault secrets (schema 18), trusted devices (schema 19), and
 //! public links (schema 35) are not credentials. Their rows sync one by one: the later
@@ -313,6 +319,7 @@ const LWW_TABLES: [LwwTable; 5] = [
             "name",
             "key",
             "origin",
+            "account_id",
             "expires_at",
             "one_time",
             "access",
@@ -694,9 +701,9 @@ struct Record {
     declaration: Option<[String; 6]>,
     env: Option<(String, String, Option<String>)>,
     destination: Option<(String, String)>,
-    /// Schema 18 and 35: the folder UUIDs, as stored (one can name a folder that is
-    /// gone), each with its `added_at` (Unix milliseconds; 0 in a copy of an earlier
-    /// schema, which has no such column). The time is not content; the set is.
+    /// Schema 18 and 35: the live memberships by folder UUID, as stored (one can name a
+    /// folder that is gone), each with its `added_at` (Unix milliseconds; in a copy before
+    /// schema 35 the `updated_at` of the item). The time is not content; the set is.
     folders: BTreeMap<String, i64>,
     /// Schema 18: "Always ask" for the item.
     always_ask: bool,
@@ -748,11 +755,6 @@ impl Record {
     /// in order; the part of schema 18 then names the first of them.
     fn content_hash(&self) -> [u8; 32] {
         self.hash(true)
-    }
-
-    /// Whether the two versions are the same but for their folders.
-    fn differs_only_in_folders(&self, other: &Self) -> bool {
-        self.folders.keys().ne(other.folders.keys()) && self.hash(false) == other.hash(false)
     }
 
     /// [`Record::content_hash`]; without `folders`, as if the credential were in none.
@@ -910,20 +912,24 @@ fn load_records(
     let v35 = version >= schema35::MULTI_FOLDER_SCHEMA_VERSION;
     // Folder rows: one per credential before schema 35, any number since.
     let mut folders = if v18 {
-        let added_at = if v35 { "added_at" } else { "0" };
-        grouped(
-            conn,
-            &format!(
-                "SELECT item_id, folder_uuid, {added_at} FROM {schema}.item_folder
-                 ORDER BY item_id, folder_uuid"
-            ),
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    (row.get::<_, String>(1)?, row.get::<_, i64>(2)?),
-                ))
-            },
-        )?
+        let sql = if v35 {
+            format!(
+                "SELECT item_id, folder_uuid, added_at FROM {schema}.item_folder
+                 WHERE removed_at IS NULL ORDER BY item_id, folder_uuid"
+            )
+        } else {
+            format!(
+                "SELECT f.item_id, f.folder_uuid, COALESCE(i.updated_at, 0)
+                 FROM {schema}.item_folder f LEFT JOIN {schema}.item i ON i.id = f.item_id
+                 ORDER BY f.item_id, f.folder_uuid"
+            )
+        };
+        grouped(conn, &sql, |row| {
+            Ok((
+                row.get(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?
     } else {
         BTreeMap::new()
     };
@@ -1243,6 +1249,27 @@ pub(super) fn sync_content_digest(
             }
         }
     }
+    // Schema 35: every membership row with its version and tombstone, by credential
+    // UUID, so two copies that differ only in the version of a row do not look the same.
+    if version >= schema35::MULTI_FOLDER_SCHEMA_VERSION {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT i.uuid, f.folder_uuid, f.added_at, f.updated_at, f.updated_by,
+                     f.removed_at
+                 FROM {schema}.item_folder f JOIN {schema}.item i ON i.id = f.item_id
+                 WHERE i.uuid IS NOT NULL AND ({})
+                 ORDER BY 1, 2",
+                scope.item_filter()
+            ))
+            .map_err(storage)?;
+        let mut rows = stmt.query([]).map_err(storage)?;
+        while let Some(row) = rows.next().map_err(storage)? {
+            ctx.update(b"\0m");
+            for index in 0..6 {
+                hash_value(&mut ctx, row.get_ref(index).map_err(storage)?);
+            }
+        }
+    }
     let mut out = [0u8; 32];
     out.copy_from_slice(ctx.finish().as_ref());
     Ok(out)
@@ -1336,10 +1363,14 @@ fn keep_local_v32(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String
 
 /// Give the records of a copy before schema 35 the folders of this vault, in memory, where
 /// the copy cannot tell them apart: a copy of an earlier schema holds at most one folder
-/// per credential. When the one folder of the copy is one of several folders here, the
-/// record keeps the folders of this vault, so the upgrade makes no conflict and an older
-/// device never takes a credential out of its other folders. A record in no folder, or in
-/// a folder that is not one of these, is a move on the older device and stays as it is.
+/// per credential, as part of the credential. When the one folder of the copy is one of
+/// several live folders here, the record takes the folders of this vault, so the upgrade
+/// makes no conflict and an older device never takes a credential out of its other
+/// folders. A record in no folder, or in a folder that is not one of these, keeps the
+/// folder of the copy: where the version of the copy wins (it is newer, or the later
+/// change of a conflict), the credential is then in that folder alone, or in none, as on
+/// the older device ([`set_folder_rows`] with the version of the record); where the
+/// version here wins, its folders stay.
 fn keep_local_v35(remote: &mut BTreeMap<String, Record>, local: &BTreeMap<String, Record>) {
     for (uuid, record) in remote.iter_mut() {
         if let Some(ours) = local.get(uuid)
@@ -1434,8 +1465,8 @@ pub struct MergeReport {
     /// credential came without its variable.
     pub skipped_variables: Vec<String>,
     /// Rows of folders, shared vaults, and vault secrets (schema 18), of trusted
-    /// devices (schema 19), and of public links (schema 35) that took the version of the
-    /// other copy.
+    /// devices (schema 19), and of public links and folder memberships (schema 35) that
+    /// took the version of the other copy.
     pub folders: usize,
     /// The sync record of the other copy.
     pub remote: SyncIdentity,
@@ -1550,14 +1581,8 @@ fn write_children(
         )
         .map_err(storage)?;
     }
-    // A conflict copy stays in the folders of its credential.
-    for (folder, added_at) in &record.folders {
-        tx.execute(
-            "INSERT INTO item_folder (item_id, folder_uuid, added_at) VALUES (?1, ?2, ?3)",
-            (id, folder, added_at),
-        )
-        .map_err(storage)?;
-    }
+    // The folder rows have versions of their own: [`set_folder_rows`] and
+    // [`merge_folder_rows`] write them.
     if !with_settings {
         return Ok(());
     }
@@ -1681,17 +1706,27 @@ fn write_children(
     Ok(())
 }
 
+/// Delete the child rows of the item `id` before the rows of another version. The folder
+/// rows stay: each has its own version ([`set_folder_rows`], [`merge_folder_rows`]).
 fn delete_children(tx: &rusqlite::Transaction<'_>, id: i64) -> VaultResult<()> {
-    for table in CHILD_TABLES.into_iter().chain(schema32::CHILD_TABLES_V32) {
+    for table in CHILD_TABLES
+        .into_iter()
+        .chain(schema32::CHILD_TABLES_V32)
+        .filter(|table| *table != "item_folder")
+    {
         tx.execute(&format!("DELETE FROM {table} WHERE item_id = ?1"), [id])
             .map_err(storage)?;
     }
     Ok(())
 }
 
+/// Insert the credential `record` of the other copy. `by_row`: the copy has folder rows of
+/// schema 35, which [`merge_folder_rows`] takes after the credentials; else the folder of
+/// the record becomes a row with the version of the record.
 fn insert_record(
     tx: &rusqlite::Transaction<'_>,
     record: &Record,
+    by_row: bool,
     report: &mut MergeReport,
 ) -> VaultResult<i64> {
     tx.execute(
@@ -1710,17 +1745,215 @@ fn insert_record(
     .map_err(storage)?;
     let id = tx.last_insert_rowid();
     write_children(tx, id, record, true, report)?;
+    if !by_row {
+        set_folder_rows(tx, id, &record.folders, &record.version())?;
+    }
     set_stamp(tx, &record.uuid, &record.version())?;
     Ok(id)
 }
 
+/// Make `folders` the live memberships of the item `id`, as one change with `version`: a
+/// live row that is not in it gets its tombstone, and a folder of it that has no live row
+/// gets one. A row that stays live keeps the earlier `added_at`. For a credential of a
+/// copy of schema 34, whose one folder is part of the credential, and for a conflict
+/// copy; every device that takes the same version writes the same rows. Returns the count
+/// of rows that changed.
+fn set_folder_rows(
+    tx: &rusqlite::Transaction<'_>,
+    id: i64,
+    folders: &BTreeMap<String, i64>,
+    version: &Version,
+) -> VaultResult<usize> {
+    let rows: Vec<(String, i64, bool)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT folder_uuid, added_at, removed_at IS NOT NULL FROM item_folder
+                 WHERE item_id = ?1",
+            )
+            .map_err(storage)?;
+        stmt.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?
+    };
+    let (at, by) = version;
+    let mut changed = 0;
+    for (folder, _, removed) in &rows {
+        if !removed && !folders.contains_key(folder) {
+            changed += tx
+                .execute(
+                    "UPDATE item_folder SET removed_at = ?1, updated_at = ?1, updated_by = ?2
+                     WHERE item_id = ?3 AND folder_uuid = ?4",
+                    (at, by, id, folder),
+                )
+                .map_err(storage)?;
+        }
+    }
+    for (folder, added_at) in folders {
+        match rows.iter().find(|(uuid, _, _)| uuid == folder) {
+            Some((_, old, false)) => {
+                if added_at < old {
+                    changed += tx
+                        .execute(
+                            "UPDATE item_folder SET added_at = ?1
+                             WHERE item_id = ?2 AND folder_uuid = ?3",
+                            (added_at, id, folder),
+                        )
+                        .map_err(storage)?;
+                }
+            }
+            Some((_, old, true)) => {
+                changed += tx
+                    .execute(
+                        "UPDATE item_folder SET removed_at = NULL, added_at = ?1,
+                             updated_at = ?2, updated_by = ?3
+                         WHERE item_id = ?4 AND folder_uuid = ?5",
+                        ((*added_at).min(*old), at, by, id, folder),
+                    )
+                    .map_err(storage)?;
+            }
+            None => {
+                changed += tx
+                    .execute(
+                        "INSERT INTO item_folder
+                             (item_id, folder_uuid, added_at, updated_at, updated_by)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        (id, folder, added_at, at, by),
+                    )
+                    .map_err(storage)?;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// One membership row of a copy of schema 35.
+struct FolderRow {
+    item_uuid: String,
+    folder: String,
+    added_at: i64,
+    updated_at: i64,
+    updated_by: String,
+    removed_at: Option<i64>,
+}
+
+/// Take the membership rows of the other copy (schema 35), each on its own, for the
+/// credentials that this vault has after the merge of the credentials. The later
+/// `(updated_at, updated_by)` wins; at the same version a removal wins; `added_at` is the
+/// earlier of the two. The order is total, so every device ends with the same rows.
+/// Returns the count of rows that changed.
+fn merge_folder_rows(tx: &rusqlite::Transaction<'_>) -> VaultResult<usize> {
+    let remote: Vec<FolderRow> = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT i.uuid, f.folder_uuid, f.added_at, f.updated_at, f.updated_by,
+                     f.removed_at
+                 FROM {REMOTE}.item_folder f JOIN {REMOTE}.item i ON i.id = f.item_id
+                 WHERE i.uuid IS NOT NULL
+                 ORDER BY i.uuid, f.folder_uuid"
+            ))
+            .map_err(storage)?;
+        stmt.query_map([], |row| {
+            Ok(FolderRow {
+                item_uuid: row.get(0)?,
+                folder: row.get(1)?,
+                added_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                updated_by: row.get(4)?,
+                removed_at: row.get(5)?,
+            })
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?
+    };
+    let ids: BTreeMap<String, i64> = {
+        let mut stmt = tx
+            .prepare("SELECT uuid, id FROM item WHERE uuid IS NOT NULL")
+            .map_err(storage)?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?
+    };
+    let mut changed = 0;
+    for theirs in remote {
+        // A credential that this vault does not keep (deleted here) takes no row.
+        let Some(&id) = ids.get(&theirs.item_uuid) else {
+            continue;
+        };
+        let ours: Option<(i64, i64, String, Option<i64>)> = tx
+            .query_row(
+                "SELECT added_at, updated_at, updated_by, removed_at FROM item_folder
+                 WHERE item_id = ?1 AND folder_uuid = ?2",
+                (id, &theirs.folder),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((added_at, updated_at, updated_by, removed_at)) = ours else {
+            tx.execute(
+                "INSERT INTO item_folder
+                     (item_id, folder_uuid, added_at, updated_at, updated_by, removed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (
+                    id,
+                    &theirs.folder,
+                    theirs.added_at,
+                    theirs.updated_at,
+                    &theirs.updated_by,
+                    theirs.removed_at,
+                ),
+            )
+            .map_err(storage)?;
+            changed += 1;
+            continue;
+        };
+        let theirs_version = (theirs.updated_at, theirs.updated_by.as_str());
+        let ours_version = (updated_at, updated_by.as_str());
+        let take = theirs_version > ours_version
+            || (theirs_version == ours_version
+                && theirs.removed_at.is_some()
+                && removed_at.is_none());
+        let first = added_at.min(theirs.added_at);
+        if take {
+            changed += tx
+                .execute(
+                    "UPDATE item_folder SET added_at = ?1, updated_at = ?2, updated_by = ?3,
+                         removed_at = ?4
+                     WHERE item_id = ?5 AND folder_uuid = ?6",
+                    (
+                        first,
+                        theirs.updated_at,
+                        &theirs.updated_by,
+                        theirs.removed_at,
+                        id,
+                        &theirs.folder,
+                    ),
+                )
+                .map_err(storage)?;
+        } else if first != added_at {
+            changed += tx
+                .execute(
+                    "UPDATE item_folder SET added_at = ?1 WHERE item_id = ?2 AND folder_uuid = ?3",
+                    (first, id, &theirs.folder),
+                )
+                .map_err(storage)?;
+        }
+    }
+    Ok(changed)
+}
+
 /// Replace the local credential `local` with the content and the version of `record`,
 /// with `clock`. The revision grows, so an open edit form refuses its stale save.
+/// `by_row`: as at [`insert_record`]; the folder rows of a copy of schema 35 merge on
+/// their own.
 fn replace_record(
     tx: &rusqlite::Transaction<'_>,
     local: &Record,
     record: &Record,
     clock: &Clock,
+    by_row: bool,
     report: &mut MergeReport,
 ) -> VaultResult<()> {
     delete_children(tx, local.id)?;
@@ -1740,6 +1973,9 @@ fn replace_record(
     .map_err(storage)?;
     set_stamp(tx, &record.uuid, &record.version())?;
     write_children(tx, local.id, record, true, report)?;
+    if !by_row {
+        set_folder_rows(tx, local.id, &record.folders, &record.version())?;
+    }
     // As at "remove variable": without a variable, the process grants go.
     let has_env: Option<i64> = tx
         .query_row(
@@ -2006,6 +2242,8 @@ fn keep_conflict_copy(
     .map_err(storage)?;
     let id = tx.last_insert_rowid();
     write_children(tx, id, loser, false, report)?;
+    // The copy stays in the live folders of the version it keeps.
+    set_folder_rows(tx, id, &loser.folders, &loser.version())?;
     set_stamp(tx, &uuid, &loser.version())?;
     tx.execute(
         "INSERT INTO item_archive (item_id, archived_at) VALUES (?1, ?2)",
@@ -2198,6 +2436,17 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     }
     let local_tombs = load_tombstones(&tx, "main")?;
     let remote_tombs = load_tombstones(&tx, REMOTE)?;
+    // A copy of schema 35 has membership rows with versions of their own: they merge row
+    // by row after the credentials, and the folders are no part of a conflict of a
+    // credential. In a copy of an earlier schema the one folder is part of the credential.
+    let by_row = remote_schema >= schema35::MULTI_FOLDER_SCHEMA_VERSION;
+    let differs = |ours: &Record, theirs: &Record| {
+        if by_row {
+            ours.hash(false) != theirs.hash(false)
+        } else {
+            ours.content_hash() != theirs.content_hash()
+        }
+    };
     let uuids: BTreeSet<&String> = local.keys().chain(remote.keys()).collect();
     for uuid in uuids {
         match (local.get(uuid), remote.get(uuid)) {
@@ -2216,7 +2465,7 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                     .optional()
                     .map_err(storage)?;
                 if !deleted_here && exists.is_none() {
-                    insert_record(&tx, theirs, &mut report)?;
+                    insert_record(&tx, theirs, by_row, &mut report)?;
                     tx.execute("DELETE FROM sync_tombstone WHERE uuid = ?1", [uuid])
                         .map_err(storage)?;
                     report.inserted += 1;
@@ -2239,19 +2488,19 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                 // The same version, or an older copy: nothing to take.
                 Order::Equal | Order::Newer => {}
                 Order::Older => {
-                    replace_record(&tx, ours, theirs, &theirs.clock, &mut report)?;
+                    replace_record(&tx, ours, theirs, &theirs.clock, by_row, &mut report)?;
                     report.updated += 1;
                 }
                 Order::Concurrent => {
                     // Divergent policy/credential edits invalidate local evaluation authority,
                     // including when a stricter remote record loses the conflict.
-                    if ours.content_hash() != theirs.content_hash() {
+                    if differs(ours, theirs) {
                         tx.execute("DELETE FROM bouncer_scope WHERE item_id = ?1", [ours.id])
                             .map_err(storage)?;
                     }
                     let clock = joined(&ours.clock, &theirs.clock);
                     let later = ours.version().max(theirs.version());
-                    if ours.content_hash() == theirs.content_hash() {
+                    if !differs(ours, theirs) {
                         tx.execute(
                             "UPDATE item SET updated_at = ?1, updated_by = ?2, clock = ?3
                              WHERE id = ?4",
@@ -2259,38 +2508,9 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
                         )
                         .map_err(storage)?;
                         set_stamp(&tx, uuid, &later)?;
-                    } else if ours.differs_only_in_folders(theirs) {
-                        // Only the folders differ: the credential is in the folders of
-                        // both versions, each with its earlier `added_at`. Both Macs
-                        // compute the same set, so the copies converge.
-                        let mut union = ours.folders.clone();
-                        for (folder, added_at) in &theirs.folders {
-                            union
-                                .entry(folder.clone())
-                                .and_modify(|at| *at = (*at).min(*added_at))
-                                .or_insert(*added_at);
-                        }
-                        tx.execute("DELETE FROM item_folder WHERE item_id = ?1", [ours.id])
-                            .map_err(storage)?;
-                        for (folder, added_at) in &union {
-                            tx.execute(
-                                "INSERT INTO item_folder (item_id, folder_uuid, added_at)
-                                 VALUES (?1, ?2, ?3)",
-                                (ours.id, folder, added_at),
-                            )
-                            .map_err(storage)?;
-                        }
-                        tx.execute(
-                            "UPDATE item SET revision = revision + 1, updated_at = ?1,
-                                 updated_by = ?2, clock = ?3 WHERE id = ?4",
-                            (later.0, &later.1, clock_text(&clock), ours.id),
-                        )
-                        .map_err(storage)?;
-                        set_stamp(&tx, uuid, &later)?;
-                        report.updated += 1;
                     } else if theirs.version() > ours.version() {
                         keep_conflict_copy(&tx, ours, &mut report)?;
-                        replace_record(&tx, ours, theirs, &clock, &mut report)?;
+                        replace_record(&tx, ours, theirs, &clock, by_row, &mut report)?;
                         report.updated += 1;
                     } else {
                         keep_conflict_copy(&tx, theirs, &mut report)?;
@@ -2335,6 +2555,9 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
             },
             (None, None) => {}
         }
+    }
+    if by_row {
+        report.folders += merge_folder_rows(&tx)?;
     }
     // Tombstones join clocks and take the maximum metadata independently. Both
     // operations are associative, commutative, and idempotent, including under
@@ -3003,7 +3226,12 @@ mod tests {
 
     #[test]
     fn a_copy_of_schema_34_with_one_folder_has_the_same_hash() {
-        // The hashes that the build of schema 34 (0.5.20) computes for these records.
+        // The hashes that the build of schema 34 computes for these records. They come
+        // from a probe test (`zz_golden_probe`, removed again) added to this module at
+        // commit 801dd97e (main before schema 35, version 0.5.20), with the four records
+        // of `vector_record` in the `Record` and the `content_hash` of that commit; it
+        // printed `to_hex(&record.content_hash())`, run with `cargo test --all-features
+        // --lib zz_golden_probe -- --nocapture` on devbox-x86.
         for (folders, always_ask, schema34) in [
             (
                 &[][..],
@@ -3076,6 +3304,59 @@ mod tests {
         );
     }
 
+    /// Two devices of one vault: Mac A with the credential "Mail" and the folders of
+    /// `names`, and Mac B that took a copy of it. Returns the two vaults, the ID of "Mail"
+    /// on each, and the folder UUIDs.
+    fn two_macs(names: &[&str]) -> (tempfile::TempDir, Vault, Vault, u64, u64, Vec<String>) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
+        a.unlock(PASS).unwrap();
+        let mail = a.add(draft("Mail", "SYNTH-mail")).unwrap().id;
+        let folders: Vec<String> = names
+            .iter()
+            .map(|name| a.create_folder(None, name).unwrap().uuid)
+            .collect();
+        let seed = dir.path().join("seed.db");
+        a.write_sync_copy(&seed, "Mac A").unwrap();
+        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
+        b.unlock(PASS).unwrap();
+        let b_mail = b.search("").unwrap()[0].id;
+        (dir, a, b, mail, b_mail, folders)
+    }
+
+    /// One sync round: Mac A merges the copy of Mac B, then Mac B the copy of Mac A.
+    /// Returns the report of Mac A.
+    fn exchange(dir: &tempfile::TempDir, a: &mut Vault, b: &mut Vault) -> MergeReport {
+        // A copy goes to a new file each round: `write_sync_copy` never replaces one.
+        let (from_b, from_a) = (dir.path().join("from-b.db"), dir.path().join("from-a.db"));
+        for old in [&from_b, &from_a] {
+            let _ = std::fs::remove_file(old);
+        }
+        b.write_sync_copy(&from_b, "Mac B").expect("copy of Mac B");
+        let report = a
+            .merge_from(&from_b, &SyncScope::vault())
+            .expect("merge on Mac A");
+        a.write_sync_copy(&from_a, "Mac A").expect("copy of Mac A");
+        b.merge_from(&from_a, &SyncScope::vault())
+            .expect("merge on Mac B");
+        assert_eq!(
+            a.sync_content(&SyncScope::vault()).unwrap(),
+            b.sync_content(&SyncScope::vault()).unwrap(),
+            "both devices hold the same content"
+        );
+        report
+    }
+
+    fn sorted(mut folders: Vec<String>) -> Vec<String> {
+        folders.sort();
+        folders
+    }
+
+    /// A step of the clock, so two changes on two devices have an order.
+    fn tick() {
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
+
     #[test]
     fn a_copy_of_schema_34_keeps_the_other_folders_of_a_credential() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -3090,20 +3371,24 @@ mod tests {
         a.write_sync_copy(&seed, "Mac A").unwrap();
         let (mut old, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("old.db"), PASS).unwrap();
         old.unlock(PASS).unwrap();
-        // Here the credential goes into a second folder; there its title changes.
+        // Here the credential goes into a second folder; there its title changes later.
         a.add_item_to_folder(mail, &home).unwrap();
+        tick();
         let old_id = old.search("").unwrap()[0].id;
         edit(&mut old, old_id, "Mail (old Mac)", "SYNTH-mail");
         let copy = dir.path().join("old-copy.db");
         old.write_sync_copy(&copy, "Old Mac").unwrap();
         make_schema34_copy(&copy);
         let report = a.merge_from(&copy, &SyncScope::vault()).unwrap();
-        // A conflict of the title only: whichever version wins, the credential stays in
-        // both folders.
+        // A conflict of the title only: the later version of the old device wins, and
+        // the credential stays in both folders.
         assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(a.details(mail).unwrap().summary.title, "Mail (old Mac)");
         assert_eq!(a.item_folders(mail).unwrap(), [work.clone(), home.clone()]);
+    }
 
-        // A move on the older device to a folder that is not one of these is a move.
+    #[test]
+    fn a_move_on_a_device_of_schema_34_moves_the_credential() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
         a.unlock(PASS).unwrap();
@@ -3111,163 +3396,219 @@ mod tests {
         let work = a.create_folder(None, "Work").unwrap().uuid;
         let home = a.create_folder(None, "Home").unwrap().uuid;
         let bills = a.create_folder(None, "Bills").unwrap().uuid;
-        a.add_item_to_folder(mail, &work).unwrap();
+        a.set_item_folder(mail, Some(&work)).unwrap();
+        let seed = dir.path().join("seed.db");
+        a.write_sync_copy(&seed, "Mac A").unwrap();
+        let (mut old, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("old.db"), PASS).unwrap();
+        old.unlock(PASS).unwrap();
         a.add_item_to_folder(mail, &home).unwrap();
-        let load = || {
-            load_records(
-                a.conn_ref().unwrap(),
-                "main",
-                &SyncScope::vault(),
-                SCHEMA_VERSION,
-            )
+        tick();
+        // The older device moves it to a folder that is not one of these, and edits it.
+        let old_id = old.search("").unwrap()[0].id;
+        old.set_item_folder(old_id, Some(&bills)).unwrap();
+        edit(&mut old, old_id, "Mail (old Mac)", "SYNTH-mail");
+        let copy = dir.path().join("old-copy.db");
+        old.write_sync_copy(&copy, "Old Mac").unwrap();
+        make_schema34_copy(&copy);
+        let report = a.merge_from(&copy, &SyncScope::vault()).unwrap();
+        // Its version is the later one, so the credential is in "Bills" alone, as on the
+        // older device; the conflict copy keeps the folders of this Mac.
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(a.item_folders(mail).unwrap(), std::slice::from_ref(&bills));
+        let (&copy_id, _) = a.conflict_copies().unwrap().first_key_value().unwrap();
+        assert_eq!(
+            a.item_folders(copy_id).unwrap(),
+            [work.clone(), home.clone()]
+        );
+        // The ended memberships keep tombstones with the version of that record.
+        let tombstones: i64 = a
+            .conn_ref()
             .unwrap()
-        };
-        let mut records = load();
-        let ours = load();
-        let record = records.values_mut().next().unwrap();
-        record.folders = BTreeMap::from([(bills.clone(), 0)]);
-        keep_local_v35(&mut records, &ours);
-        assert_eq!(
-            records
-                .values()
-                .next()
-                .unwrap()
-                .folders
-                .keys()
-                .collect::<Vec<_>>(),
-            [&bills]
-        );
-        let record = records.values_mut().next().unwrap();
-        record.folders = BTreeMap::from([(home.clone(), 0)]);
-        keep_local_v35(&mut records, &ours);
-        assert_eq!(
-            records.values().next().unwrap().folders.keys().count(),
-            2,
-            "one of the folders here keeps both"
-        );
+            .query_row(
+                "SELECT count(*) FROM item_folder f JOIN item i ON i.id = f.item_id
+                 WHERE f.item_id = ?1 AND f.removed_at = i.updated_at",
+                [to_sql_id(mail).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstones, 2);
     }
 
     #[test]
     fn two_macs_add_one_credential_to_two_folders() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
-        a.unlock(PASS).unwrap();
-        let mail = a.add(draft("Mail", "SYNTH-mail")).unwrap().id;
-        let work = a.create_folder(None, "Work").unwrap().uuid;
-        let home = a.create_folder(None, "Home").unwrap().uuid;
-        let seed = dir.path().join("seed.db");
-        a.write_sync_copy(&seed, "Mac A").unwrap();
-        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
-        b.unlock(PASS).unwrap();
-        let b_mail = b.search("").unwrap()[0].id;
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);
+        let (work, home) = (&folders[0], &folders[1]);
         // At the same time: Mac A adds the credential to "Work", Mac B to "Home".
-        a.add_item_to_folder(mail, &work).unwrap();
-        b.add_item_to_folder(b_mail, &home).unwrap();
-        let from_b = dir.path().join("from-b.db");
-        b.write_sync_copy(&from_b, "Mac B").unwrap();
-        let report = a.merge_from(&from_b, &SyncScope::vault()).unwrap();
+        a.add_item_to_folder(mail, work).unwrap();
+        b.add_item_to_folder(b_mail, home).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
         assert!(report.conflicts.is_empty(), "no conflict copy for folders");
-        assert_eq!(report.updated, 1);
+        assert!(report.changed_local());
         assert_eq!(a.search("").unwrap().len(), 1);
-        let both = {
-            let mut both = vec![work.clone(), home.clone()];
-            both.sort();
-            both
-        };
-        let mut in_a = a.item_folders(mail).unwrap();
-        in_a.sort();
-        assert_eq!(in_a, both);
-        // Mac B takes the merged version, and both copies hold the same content.
-        let from_a = dir.path().join("from-a.db");
-        a.write_sync_copy(&from_a, "Mac A").unwrap();
-        let report = b.merge_from(&from_a, &SyncScope::vault()).unwrap();
+        let both = sorted(vec![work.clone(), home.clone()]);
+        assert_eq!(sorted(a.item_folders(mail).unwrap()), both);
+        assert_eq!(sorted(b.item_folders(b_mail).unwrap()), both);
+        // A copy that Mac A merged already changes nothing.
+        let again = exchange(&dir, &mut a, &mut b);
+        assert!(!again.changed_local());
+    }
+
+    #[test]
+    fn two_removals_on_two_devices_both_hold() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);
+        let (work, home) = (&folders[0], &folders[1]);
+        a.add_item_to_folder(mail, work).unwrap();
+        a.add_item_to_folder(mail, home).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        assert_eq!(b.item_folders(b_mail).unwrap().len(), 2);
+        // Mac A takes it out of "Work", Mac B out of "Home", at the same time.
+        tick();
+        a.remove_item_from_folder(mail, work).unwrap();
+        b.remove_item_from_folder(b_mail, home).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
         assert!(report.conflicts.is_empty());
-        let mut in_b = b.item_folders(b_mail).unwrap();
-        in_b.sort();
-        assert_eq!(in_b, both);
-        assert_eq!(
-            a.sync_content(&SyncScope::vault()).unwrap(),
-            b.sync_content(&SyncScope::vault()).unwrap()
-        );
-        // Each Mac also merges in the other order: the same result.
-        let report = a.merge_from(&from_b, &SyncScope::vault()).unwrap();
-        assert!(!report.changed_local());
-        assert_eq!(
-            a.sync_content(&SyncScope::vault()).unwrap(),
-            b.sync_content(&SyncScope::vault()).unwrap()
+        assert!(a.item_folders(mail).unwrap().is_empty());
+        assert!(b.item_folders(b_mail).unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_moves_leave_the_credential_in_both_destinations() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home", "Bills"]);
+        let (work, home, bills) = (&folders[0], &folders[1], &folders[2]);
+        a.set_item_folder(mail, Some(work)).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        // Mac A moves it from "Work" to "Home", Mac B from "Work" to "Bills".
+        tick();
+        a.move_item(mail, Some(work), Some(home)).unwrap();
+        b.move_item(b_mail, Some(work), Some(bills)).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty(), "a move is no conflict copy");
+        let both = sorted(vec![home.clone(), bills.clone()]);
+        assert_eq!(sorted(a.item_folders(mail).unwrap()), both);
+        assert_eq!(sorted(b.item_folders(b_mail).unwrap()), both);
+    }
+
+    #[test]
+    fn a_membership_of_a_folder_deleted_on_the_other_device_stays_gone() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);
+        let (work, home) = (&folders[0], &folders[1]);
+        a.add_item_to_folder(mail, work).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        // Mac A deletes "Work" while Mac B adds the credential to "Home".
+        tick();
+        a.delete_folder(work).unwrap();
+        b.add_item_to_folder(b_mail, home).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty());
+        for (vault, id) in [(&a, mail), (&b, b_mail)] {
+            assert_eq!(vault.item_folders(id).unwrap(), std::slice::from_ref(home));
+            let row: (Option<i64>,) = vault
+                .conn_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT removed_at FROM item_folder WHERE item_id = ?1 AND folder_uuid = ?2",
+                    (to_sql_id(id).unwrap(), work),
+                    |row| Ok((row.get(0)?,)),
+                )
+                .unwrap();
+            assert!(
+                row.0.is_some(),
+                "the membership of the deleted folder ended"
+            );
+        }
+        assert!(
+            b.folder_path(Some(work)).is_err(),
+            "the folder is gone there too"
         );
     }
 
     #[test]
-    fn a_credential_in_two_folders_syncs_and_a_revoked_link_stays_revoked() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut a = Vault::create(&dir.path().join("a.db"), PASS).unwrap();
-        a.unlock(PASS).unwrap();
-        let mail = a.add(draft("Mail", "SYNTH-mail")).unwrap().id;
-        let work = a.create_folder(None, "Work").unwrap().uuid;
-        let home = a.create_folder(None, "Home").unwrap().uuid;
-        let seed = dir.path().join("seed.db");
-        a.write_sync_copy(&seed, "Mac A").unwrap();
-        let (mut b, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("b.db"), PASS).unwrap();
-        b.unlock(PASS).unwrap();
-        a.add_item_to_folder(mail, &home).unwrap();
-        a.add_item_to_folder(mail, &work).unwrap();
-        let link = |vault: &Vault, at: i64, deleted: Option<i64>, name: &str| {
-            vault
-                .conn_ref()
-                .unwrap()
-                .execute(
-                    "INSERT INTO public_link
-                         (uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at,
-                          one_time, access, addresses, created_at, updated_at, updated_by,
-                          deleted_at)
-                     VALUES ('l1', 'd4e59a0011f71c40fb1dfdb1a8446660', 'item', 'root', ?1, ?2,
-                             'https://connect.example.test', 2, 0, 'anyone', '', 1, ?3, 'dev',
-                             ?4)
-                     ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, key = excluded.key,
-                         updated_at = excluded.updated_at, deleted_at = excluded.deleted_at",
-                    rusqlite::params![
-                        name,
-                        if deleted.is_some() {
-                            Vec::new()
-                        } else {
-                            vec![9u8; 32]
-                        },
-                        at,
-                        deleted
-                    ],
-                )
-                .unwrap();
-        };
-        // A revokes the link; B renames it later.
-        link(&a, 1000, None, "Shared");
-        let to_b = dir.path().join("to-b.db");
-        a.write_sync_copy(&to_b, "Mac A").unwrap();
-        let report = b.merge_from(&to_b, &SyncScope::vault()).unwrap();
-        assert!(report.conflicts.is_empty());
-        assert_eq!(report.folders, 1, "the link row");
-        let b_mail = b.search("").unwrap()[0].id;
+    fn the_first_folder_agrees_across_devices() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);
+        let (work, home) = (&folders[0], &folders[1]);
+        // Mac A adds "Work" first; Mac B adds "Home", then "Work".
+        a.add_item_to_folder(mail, work).unwrap();
+        tick();
+        b.add_item_to_folder(b_mail, home).unwrap();
+        tick();
+        b.add_item_to_folder(b_mail, work).unwrap();
+        assert_eq!(b.item_folder(b_mail).unwrap(), Some(home.clone()));
+        exchange(&dir, &mut a, &mut b);
+        // The earliest `added_at` of "Work" wins everywhere, so "Work" is first on both.
+        assert_eq!(a.item_folders(mail).unwrap(), [work.clone(), home.clone()]);
         assert_eq!(
             b.item_folders(b_mail).unwrap(),
-            [home.clone(), work.clone()]
+            [work.clone(), home.clone()]
         );
-        assert_eq!(b.item_folder(b_mail).unwrap(), Some(home.clone()));
-        link(&a, 2000, Some(2), "Shared");
-        link(&b, 3000, None, "Renamed");
-        let from_b = dir.path().join("from-b.db");
-        b.write_sync_copy(&from_b, "Mac B").unwrap();
-        a.merge_from(&from_b, &SyncScope::vault()).unwrap();
-        let (name, deleted, key): (String, Option<i64>, Vec<u8>) = a
+        let mut catalogs = [&a, &b]
+            .map(|vault| vault.catalog().unwrap().remove(0))
+            .into_iter();
+        let (on_a, on_b) = (catalogs.next().unwrap(), catalogs.next().unwrap());
+        assert_eq!(on_a.folder, ["Work"]);
+        assert_eq!(
+            (on_a.folder, on_a.more_folders),
+            (on_b.folder, on_b.more_folders)
+        );
+    }
+
+    /// Write the link row `l1` on `vault`: live with a key, or revoked without one.
+    fn link(vault: &Vault, at: i64, revoked: bool, name: &str) {
+        let (key, deleted) = if revoked {
+            (Vec::new(), Some(2))
+        } else {
+            (vec![9u8; 32], None)
+        };
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute(
+                "INSERT INTO public_link
+                     (uuid, link_id, root_kind, root_uuid, name, key, origin, account_id,
+                      expires_at, one_time, access, addresses, created_at, updated_at,
+                      updated_by, deleted_at)
+                 VALUES ('l1', 'd4e59a0011f71c40fb1dfdb1a8446660', 'item', 'root', ?1, ?2,
+                         'https://connect.example.test', 'acc_synthetic01', 3600, 0, 'anyone',
+                         '', 1, ?3, 'dev', ?4)
+                 ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, key = excluded.key,
+                     updated_at = excluded.updated_at, deleted_at = excluded.deleted_at",
+                rusqlite::params![name, key, at, deleted],
+            )
+            .unwrap();
+    }
+
+    fn link_state(vault: &Vault) -> (String, Option<i64>, i64) {
+        vault
             .conn_ref()
             .unwrap()
             .query_row(
-                "SELECT name, deleted_at, key FROM public_link WHERE uuid = 'l1'",
+                "SELECT name, deleted_at, length(key) FROM public_link WHERE uuid = 'l1'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .unwrap();
-        assert_eq!((name.as_str(), deleted), ("Shared", Some(2)));
-        assert!(key.is_empty());
+            .unwrap()
+    }
+
+    #[test]
+    fn a_revoked_link_stays_revoked_whichever_device_revoked_it() {
+        for a_revokes in [true, false] {
+            let (dir, mut a, mut b, _, _, _) = two_macs(&[]);
+            link(&a, 1000, false, "Shared");
+            let report = exchange(&dir, &mut a, &mut b);
+            assert_eq!(report.folders, 0);
+            assert_eq!(link_state(&b), ("Shared".to_owned(), None, 32));
+            // One device revokes it; the other renames it later.
+            let (revoker, editor) = if a_revokes { (&a, &b) } else { (&b, &a) };
+            link(revoker, 2000, true, "Shared");
+            link(editor, 3000, false, "Renamed");
+            exchange(&dir, &mut a, &mut b);
+            for vault in [&a, &b] {
+                assert_eq!(
+                    link_state(vault),
+                    ("Shared".to_owned(), Some(2), 0),
+                    "a_revokes {a_revokes}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3516,7 +3857,8 @@ mod schema17_tests {
         w.a.write_sync_copy(&push, "Mac A").unwrap();
         assert_eq!(versions(&push), (SCHEMA_VERSION, SCHEMA_VERSION));
         let report = w.b.merge_from(&push, &scope).unwrap();
-        assert_eq!(report.folders, 1);
+        // The folder row, and the memberships of the credential and of its conflict copy.
+        assert_eq!(report.folders, 3);
         assert!(report.changed_local());
         assert!(!report.remote_outdated());
         let mail = id_of(&w.b, "Mail");

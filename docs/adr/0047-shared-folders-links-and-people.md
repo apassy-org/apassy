@@ -52,6 +52,11 @@ e-mail address that shows in the other person's app until it is revoked, with ed
 - It stays a child row of the credential. The content hash of a credential with no folder or one
   folder is the hash of schema 34, so a copy of schema 34 merges without a conflict. Two or more
   folders add a part `v35` with the sorted UUIDs.
+- Each membership is a row with its own version and a tombstone when it ends, and it merges on
+  its own: the later of the add and the removal wins (contract vault-v1, schema 35). Concurrent
+  moves from "Work" to "Home" and from "Work" to "Bills" leave the credential in both.
+- Release B: a removal from a shared folder must win over a concurrent add, so that a secret
+  leaves a share when the owner takes it out; the later version alone does not ensure that.
 - "Move to Folder…" replaces the folder of the list the owner is in. "Add to Folder…" adds one.
   "Remove from This Folder" removes one. Deleting a folder still deletes no credential.
 - The catalog of an agent keeps `folder` (the first path, by `added_at`) and gets `more_folders`

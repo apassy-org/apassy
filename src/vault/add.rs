@@ -390,14 +390,15 @@ fn add_short_lived(
 
 /// Place a newly inserted item. The caller checked the folder while holding the vault.
 pub(super) fn place_item(tx: &Transaction<'_>, item: i64, place: &Place) -> VaultResult<()> {
-    // `added_at` is Unix milliseconds (schema 35): the first folder of the credential.
+    // `added_at` and the version of the row are Unix milliseconds (schema 35).
     let added_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
         });
     tx.execute(
-        "INSERT INTO item_folder (item_id, folder_uuid, added_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO item_folder (item_id, folder_uuid, added_at, updated_at, updated_by)
+         VALUES (?1, ?2, ?3, ?3, COALESCE((SELECT device_id FROM sync_device WHERE id = 1), ''))",
         (item, place.uuid.as_str(), added_at),
     )
     .map_err(|_| err(VaultErrorKind::Storage))?;

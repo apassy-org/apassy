@@ -42,17 +42,18 @@ const MID: i64 = 18;
 const OLD: i64 = 17;
 
 /// What a file of schema 35 has and a file of schema 34 has not (`src/vault/schema35.rs`):
-/// the public links, and several folders per credential. The way back keeps the first
-/// folder of each credential. The rebuilt `item_folder` has no triggers; the step to 35
+/// the public links, and several folders per credential with tombstones. The way back
+/// keeps the first live folder of each credential. The rebuilt `item_folder` has no triggers; the step to 35
 /// makes them again when the file migrates.
 const SCHEMA35_ONLY: &str = "
 DROP TABLE public_link;
 CREATE TABLE item_folder_v34 (item_id INTEGER PRIMARY KEY, folder_uuid TEXT NOT NULL);
 INSERT INTO item_folder_v34 (item_id, folder_uuid)
     SELECT f.item_id, f.folder_uuid FROM item_folder f
-    WHERE NOT EXISTS (
+    WHERE f.removed_at IS NULL AND NOT EXISTS (
         SELECT 1 FROM item_folder g
-        WHERE g.item_id = f.item_id AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
+        WHERE g.item_id = f.item_id AND g.removed_at IS NULL
+            AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
     );
 DROP TABLE item_folder;
 ALTER TABLE item_folder_v34 RENAME TO item_folder;

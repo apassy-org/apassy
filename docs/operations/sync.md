@@ -12,8 +12,8 @@ Syncs: the credentials and their settings.
 
 - each credential: its name, kind, notes, tags, fields and secret values, and whether it is archived,
 - its declaration, its environment variable (with the hosts of placeholder mode), and its connector,
-- its folders: a credential is in any number of folders, or in none (schema 35); the folders themselves sync one by one,
-- the public links of the vault (schema 35), so every device of the owner lists and revokes them; a revoked link stays revoked,
+- its folders: a credential is in any number of folders, or in none (schema 35); each membership and each folder syncs on its own,
+- the public links of the vault (schema 35), so every device of the owner lists them; a revoked link stays revoked,
 - its history: added, edited, archived, declaration, variable, and connector events.
 
 Stays on each Mac and never merges:
@@ -101,7 +101,7 @@ An old copy of the synced file (for example from a backup of the folder) has onl
 
 **A conflict** is a credential that both sides changed since they last saw each other's change, with different content. The later change (by time, then by device) wins. The other version stays as an archived credential "<title> (conflict copy, <device>)", without its variable and connector. Nothing is lost. A note says "Sync kept both versions in …". Open Credentials > Archived to compare, copy what you need, and delete the copy. Each Mac that sees the conflict makes the same copy, so it is there once.
 
-**Folders only.** When both sides changed only the folders of a credential (Mac A put it in "Work", Mac B in "Home"), there is no conflict copy: the credential is in the folders of both. A copy of schema 34 knows one folder per credential; when that folder is one of the folders here, the credential keeps all of them.
+**Folders.** Each folder membership of a credential merges on its own, so a change of folders is never a conflict: the later of an add and a removal wins. Mac A puts a credential in "Work" and Mac B in "Home": it is in both. Mac A takes it out of "Work" and Mac B out of "Home": it is in neither. Mac A moves it from "Work" to "Home" and Mac B from "Work" to "Bills": it is in "Home" and "Bills". A folder that one Mac deleted takes its credentials out of it on every Mac. A copy of schema 34 knows one folder per credential; when that folder is one of the folders here, the credential keeps all of them.
 
 **A variable name** that another credential on this Mac has already: the incoming credential comes without its variable, and a note says so. Rename one of the variables.
 
@@ -333,7 +333,7 @@ The tests use temporary folders. They do not test a sync service itself.
 - A tombstone stays indefinitely. Time alone cannot prove that an offline replica has seen the deletion. Tombstones are retained until replica-aware compaction is designed. Existing files that already lost a tombstone cannot recover that deletion knowledge automatically.
 - Retention adds no table, column, schema version, or digest-format change. Upgrade every sync writer to obtain indefinite retention across the fleet: older writers can still prune deletion knowledge after 180 days. A reader that predates a vault's schema rejects it as unsupported; the retention change does not make a schema-20 file readable by a schema-19 app. Schema 20 was introduced separately for local bouncer scopes.
 - The unit of merge is a credential with all its settings: a change of the variable on one Mac and of the declaration of the same credential on another is a conflict.
-- A credential whose folders changed on both sides at the same time ends in the folders of both: when one Mac took it out of a folder while the other put it in another one, it is in the folder again. Remove it once more.
+- Two moves of one credential at the same time on two Macs leave it in both destinations. Move it once more.
 - A person with the passphrase and the synced folder can write a valid file with any content. The other Macs merge it. The passphrase is the root key of the vault (ADR 0003).
 - Evicted files: Apassy detects a `.<name>.icloud` placeholder and a dataless file (macOS 14 and later). The tests cover the placeholder only.
 - An old copy on this Mac (section 7.1): only iCloud Drive tells it, through the native helper of `Apassy.app`. The tests use a stand-in for iCloud and check the helper on a file outside iCloud; they do not run against iCloud itself. While iCloud says that a newer version exists, this Mac does not push: if iCloud never delivers it, the changes of this Mac wait (the notification after 10 minutes says so).

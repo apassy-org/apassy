@@ -1,38 +1,52 @@
 //! Schema version 35: a credential in several folders, and the public links of the vault
-//! (ADR 0047 sections 2 and 4, release A of sharing).
+//! (ADR 0047 sections 2 and 4, release A of sharing; contract vault-v1, schema 35).
 //!
-//! - `item_folder` gets the key `(item_id, folder_uuid)` and the column `added_at` (Unix
-//!   milliseconds). A credential is in any number of folders, or in none. The rows stay
-//!   child rows of the credential ([`super::merge::CHILD_TABLES`]): the step rebuilds the
-//!   table, so it makes its triggers again (the sync triggers of schema 14 and the
-//!   bouncer scope triggers of schema 20, [`item_folder_triggers_sql`]), and an index on
-//!   `folder_uuid` serves the list of one folder. Every row of schema 34 stays, with the
-//!   `updated_at` of its item as `added_at`; a credential had one folder then, so it
-//!   stays its first folder.
+//! - `item_folder` gets the key `(item_id, folder_uuid)`: a credential is in any number
+//!   of folders, or in none. Each row is one membership and merges on its own
+//!   ([`super::merge`]): `updated_at` (Unix milliseconds) and `updated_by` (the device)
+//!   are its version, and `removed_at` (Unix milliseconds) marks a membership that ended,
+//!   a tombstone that stays so the removal reaches every device. The later version wins,
+//!   a removal wins a tie, and `added_at` (Unix milliseconds) takes the earliest value
+//!   that any device has, so every device agrees on the first folder of a credential.
+//!   Only rows without `removed_at` count. The rows stay child rows of the credential
+//!   ([`super::merge::CHILD_TABLES`]): a change marks a change of the credential. The
+//!   step rebuilds the table, so it makes its triggers again (the sync triggers of schema
+//!   14 and the bouncer scope triggers of schema 20, [`item_folder_triggers_sql`]), and
+//!   an index on `folder_uuid` serves the list of one folder. Every row of schema 34
+//!   stays, with the `updated_at` and `updated_by` of its item as `added_at` and as its
+//!   version; a credential had one folder then, so it stays its first folder.
 //! - `public_link` (synced row by row, [`super::merge`]) holds each public link that the
 //!   owner made: what it shows (`root_kind` `item` or `folder`, `root_uuid`), its name,
-//!   the Connect origin, the expiry, "show once" (`one_time`), and the access: `anyone`,
-//!   or `emails` with `addresses`, the normal forms of the allowed e-mail addresses
-//!   (connect-share-v1 section 6), one a line, for the owner's list only (Connect keeps
-//!   only their hashes). The columns are those of contract vault-v1, schema 35.
-//!   `key` is the 32-byte link key `K`: it is secret material like a field value. It
-//!   leaves the vault only in the link that the owner copies, never in a log or an
-//!   answer to an agent. A revoked link keeps its row with `deleted_at`, so the revoke
-//!   reaches every device and wins over any edit; such a row may drop its key (an empty
-//!   blob) and its addresses. `created_at`, `expires_at`, and `deleted_at` are Unix
-//!   seconds; `updated_at` is Unix milliseconds, the version of the row.
+//!   the Connect origin, `account_id` (the Connect account that made the link), the
+//!   expiry, "show once" (`one_time`), and the access: `anyone`, or `emails` with
+//!   `addresses`, the normal forms of the allowed e-mail addresses (connect-share-v1
+//!   section 6), one a line, 1 to 20, for the owner's list only (Connect keeps only their
+//!   hashes). `key` is the 32-byte link key `K`: it is secret material like a field
+//!   value. It leaves the vault only in the link that the owner copies, never in a log or
+//!   an answer to an agent.
 //!
-//! The content hash of a credential with no folder or one folder is the hash of schema
-//! 34, so a copy of schema 34 merges without a conflict copy. Two or more folders add a
-//! part of their own (`merge::Record::content_hash`).
+//!   A revoke keeps the row with `deleted_at`, an empty `key`, and empty `addresses`, so
+//!   it reaches every device and wins over any edit, also a later one. A device writes it
+//!   only after Connect answered the revoke of the account in `account_id` with a success
+//!   (`200`, or `404` for a link of that account): a device of another account in a
+//!   shared vault shows the link but neither revokes it nor writes a revoke. A link id is
+//!   used once (`UNIQUE`). The origin is `https://…`, or `http://localhost` and
+//!   `http://127.0.0.1` with or without a port for tests, without a path. `created_at`,
+//!   `expires_at` (after `created_at`), and `deleted_at` are Unix seconds; `updated_at`
+//!   is Unix milliseconds, the version of the row.
+//!
+//! The content hash of a credential with no live folder or one is the hash of schema 34,
+//! so a copy of schema 34 merges without a conflict copy. Two or more add a part of their
+//! own (`merge::Record::content_hash`).
 //!
 //! Schema 35 follows [`PREVIOUS_SCHEMA_VERSION`]: a vault of an earlier schema runs the
 //! steps before it and then this one, in one migration. A failure rolls the whole
 //! migration back and the file keeps its old version. A device of the previous schema or
 //! earlier refuses a copy of schema 35 (`UnsupportedSchema`).
 //!
-//! The way back ([`downgrade_sql`], for the fixtures and the rollback notes) keeps the
-//! first folder of each credential (by `added_at`, then UUID) and drops the links.
+//! The way back ([`downgrade_sql`], for the fixtures and the rollback notes) keeps one
+//! live membership of each credential, a folder that is still there first, then by
+//! `added_at` and UUID, and drops the links.
 //!
 //! The number lives in [`MULTI_FOLDER_SCHEMA_VERSION`] only, and the step before it in
 //! [`PREVIOUS_SCHEMA_VERSION`], so a release coordinator that renumbers this step changes
@@ -63,6 +77,9 @@ pub(super) const ACCESS_ANYONE: &str = "anyone";
 /// The stored `access` of a link that opens only for the listed e-mail addresses.
 #[allow(dead_code)]
 pub(super) const ACCESS_EMAILS: &str = "emails";
+/// The most addresses of a link of `emails` (connect-share-v1 section 7).
+#[allow(dead_code)]
+pub(super) const MAX_LINK_ADDRESSES: usize = 20;
 
 /// The rebuilt `item_folder`, then the links. The triggers of `item_folder` come from
 /// [`item_folder_triggers_sql`] after this.
@@ -70,24 +87,34 @@ const SCHEMA_V35_SQL: &str = "
 CREATE TABLE item_folder_v35 (
     item_id INTEGER NOT NULL,
     folder_uuid TEXT NOT NULL,
-    added_at INTEGER NOT NULL DEFAULT 0,
+    added_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT NOT NULL,
+    removed_at INTEGER,
     PRIMARY KEY (item_id, folder_uuid)
 );
-INSERT INTO item_folder_v35 (item_id, folder_uuid, added_at)
-    SELECT f.item_id, f.folder_uuid, COALESCE(i.updated_at, 0)
+INSERT INTO item_folder_v35 (item_id, folder_uuid, added_at, updated_at, updated_by)
+    SELECT f.item_id, f.folder_uuid, COALESCE(i.updated_at, 0), COALESCE(i.updated_at, 0),
+        COALESCE(i.updated_by, '')
     FROM item_folder f LEFT JOIN item i ON i.id = f.item_id;
 DROP TABLE item_folder;
 ALTER TABLE item_folder_v35 RENAME TO item_folder;
 CREATE INDEX item_folder_folder ON item_folder(folder_uuid);
 CREATE TABLE public_link (
     uuid TEXT PRIMARY KEY,
-    link_id TEXT NOT NULL
+    link_id TEXT NOT NULL UNIQUE
         CHECK (length(link_id) = 32 AND link_id NOT GLOB '*[^0-9a-f]*'),
     root_kind TEXT NOT NULL CHECK (root_kind IN ('item', 'folder')),
     root_uuid TEXT NOT NULL,
     name TEXT NOT NULL,
-    key BLOB NOT NULL,
-    origin TEXT NOT NULL,
+    key BLOB NOT NULL CHECK (typeof(key) = 'blob'),
+    origin TEXT NOT NULL CHECK (
+        (origin GLOB 'https://?*'
+            OR origin = 'http://localhost' OR origin GLOB 'http://localhost:[0-9]*'
+            OR origin = 'http://127.0.0.1' OR origin GLOB 'http://127.0.0.1:[0-9]*')
+        AND instr(substr(origin, instr(origin, '://') + 3), '/') = 0
+        AND origin NOT GLOB '*[ ?#]*'),
+    account_id TEXT NOT NULL CHECK (account_id <> ''),
     expires_at INTEGER NOT NULL,
     one_time INTEGER NOT NULL DEFAULT 0 CHECK (one_time IN (0, 1)),
     access TEXT NOT NULL DEFAULT 'anyone' CHECK (access IN ('anyone', 'emails')),
@@ -96,18 +123,28 @@ CREATE TABLE public_link (
     updated_at INTEGER NOT NULL,
     updated_by TEXT NOT NULL,
     deleted_at INTEGER,
-    CHECK (typeof(key) = 'blob' AND (length(key) = 32 OR deleted_at IS NOT NULL)),
-    CHECK (access = 'emails' OR addresses = ''),
-    CHECK (access = 'anyone' OR addresses <> '' OR deleted_at IS NOT NULL)
+    CHECK (expires_at > created_at),
+    CHECK (deleted_at IS NOT NULL OR length(key) = 32),
+    CHECK (deleted_at IS NULL OR (length(key) = 0 AND addresses = '')),
+    CHECK (deleted_at IS NOT NULL
+        OR (access = 'anyone' AND addresses = '')
+        OR (access = 'emails' AND addresses <> ''
+            AND length(addresses) - length(replace(addresses, char(10), '')) < 20
+            AND instr(addresses, char(10) || char(10)) = 0
+            AND substr(addresses, 1, 1) <> char(10)
+            AND substr(addresses, -1, 1) <> char(10)
+            AND instr(addresses, ' ') = 0
+            AND instr(addresses, char(13)) = 0))
 );
 CREATE INDEX public_link_root ON public_link(root_kind, root_uuid);
 ";
 
 /// What `verify_expected_columns_in` reads for schema 35 and later.
 pub(super) const COLUMNS: [&str; 2] = [
-    "SELECT item_id, folder_uuid, added_at FROM item_folder LIMIT 0",
-    "SELECT uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at, one_time,
-         access, addresses, created_at, updated_at, updated_by, deleted_at
+    "SELECT item_id, folder_uuid, added_at, updated_at, updated_by, removed_at
+         FROM item_folder LIMIT 0",
+    "SELECT uuid, link_id, root_kind, root_uuid, name, key, origin, account_id, expires_at,
+         one_time, access, addresses, created_at, updated_at, updated_by, deleted_at
          FROM public_link LIMIT 0",
 ];
 
@@ -151,7 +188,8 @@ pub(super) fn add_schema_v35(tx: &Transaction<'_>) -> VaultResult<()> {
 }
 
 /// The way back to the previous schema, for test fixtures and for the rollback notes:
-/// each credential keeps its first folder (by `added_at`, then UUID), and the links go.
+/// each credential keeps one live membership (a folder that is still there first, then
+/// by `added_at` and UUID), and the links go.
 #[cfg(test)]
 pub(super) fn downgrade_sql() -> String {
     let mut sql = "
@@ -160,11 +198,19 @@ CREATE TABLE item_folder_v34 (
     item_id INTEGER PRIMARY KEY,
     folder_uuid TEXT NOT NULL
 );
+WITH live AS (
+    SELECT f.item_id, f.folder_uuid, f.added_at,
+        CASE WHEN EXISTS (
+            SELECT 1 FROM folder d WHERE d.uuid = f.folder_uuid AND d.deleted_at IS NULL
+        ) THEN 0 ELSE 1 END AS gone
+    FROM item_folder f WHERE f.removed_at IS NULL
+)
 INSERT INTO item_folder_v34 (item_id, folder_uuid)
-    SELECT f.item_id, f.folder_uuid FROM item_folder f
+    SELECT a.item_id, a.folder_uuid FROM live a
     WHERE NOT EXISTS (
-        SELECT 1 FROM item_folder g
-        WHERE g.item_id = f.item_id AND (g.added_at, g.folder_uuid) < (f.added_at, f.folder_uuid)
+        SELECT 1 FROM live b
+        WHERE b.item_id = a.item_id
+            AND (b.gone, b.added_at, b.folder_uuid) < (a.gone, a.added_at, a.folder_uuid)
     );
 DROP TABLE item_folder;
 ALTER TABLE item_folder_v34 RENAME TO item_folder;
@@ -273,21 +319,33 @@ mod tests {
             assert_eq!(version(conn), SCHEMA_VERSION);
             assert_eq!(meta_version(conn), SCHEMA_VERSION);
             assert!(has_table(conn, "public_link"));
-            // The rows of schema 34 take the `updated_at` of their item.
-            let added: Vec<(i64, i64)> = conn
+            // The rows of schema 34 take the `updated_at` and `updated_by` of their item, and
+            // they are live.
+            let rows: Vec<(i64, i64, String, String, Option<i64>)> = conn
                 .prepare(
-                    "SELECT f.added_at, i.updated_at FROM item_folder f
-                     JOIN item i ON i.id = f.item_id ORDER BY f.item_id",
+                    "SELECT f.added_at, f.updated_at, f.updated_by, i.updated_by, f.removed_at
+                     FROM item_folder f JOIN item i ON i.id = f.item_id
+                     WHERE f.added_at = i.updated_at ORDER BY f.item_id",
                 )
                 .unwrap()
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
-            assert_eq!(added.len(), 2);
-            for (added_at, updated_at) in added {
+            assert_eq!(rows.len(), 2);
+            for (added_at, updated_at, by, item_by, removed_at) in rows {
                 assert!(added_at > 0);
                 assert_eq!(added_at, updated_at);
+                assert_eq!(by, item_by);
+                assert!(removed_at.is_none());
             }
             // The child triggers and the index are there again.
             let names: Vec<String> = conn
@@ -406,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn the_way_back_keeps_the_first_folder() {
+    fn the_way_back_keeps_the_first_live_folder() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("down.db");
         let mut vault = Vault::create(&path, PASS).unwrap();
@@ -414,12 +472,40 @@ mod tests {
         let a = add(&mut vault, "Alpha");
         let work = vault.create_folder(None, "Work").unwrap().uuid;
         let home = vault.create_folder(None, "Home").unwrap().uuid;
+        let bills = vault.create_folder(None, "Bills").unwrap().uuid;
+        let gone = vault.create_folder(None, "Gone").unwrap().uuid;
+        let b = add(&mut vault, "Beta");
+        // Alpha: "Bills" first but removed, then "Home", then "Work".
+        vault.add_item_to_folder(a, &bills).unwrap();
         vault.add_item_to_folder(a, &home).unwrap();
         vault.add_item_to_folder(a, &work).unwrap();
+        vault.remove_item_from_folder(a, &bills).unwrap();
+        // Beta: "Gone" first, then "Work"; then "Gone" is deleted elsewhere, so its
+        // membership is still live here.
+        vault.add_item_to_folder(b, &gone).unwrap();
+        vault.add_item_to_folder(b, &work).unwrap();
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute("UPDATE folder SET deleted_at = 1 WHERE uuid = ?1", [&gone])
+            .unwrap();
         vault.lock().unwrap();
         drop(vault);
         let conn = raw(&path);
         conn.execute_batch(&downgrade_sql()).unwrap();
+        let beta: String = conn
+            .query_row(
+                "SELECT folder_uuid FROM item_folder WHERE item_id = ?1",
+                [i64::try_from(b).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(beta, work, "a folder that is still there first");
+        conn.execute(
+            "DELETE FROM item_folder WHERE item_id = ?1",
+            [i64::try_from(b).unwrap()],
+        )
+        .unwrap();
         let kept: Vec<String> = conn
             .prepare("SELECT folder_uuid FROM item_folder")
             .unwrap()
@@ -434,99 +520,278 @@ mod tests {
         assert_eq!(vault.item_folders(a).unwrap(), [home]);
     }
 
+    /// The columns of one link row, for the checks of the table.
+    struct Link {
+        uuid: &'static str,
+        link_id: &'static str,
+        root_kind: &'static str,
+        key: Vec<u8>,
+        origin: &'static str,
+        account_id: &'static str,
+        expires_at: i64,
+        access: &'static str,
+        addresses: String,
+        deleted_at: Option<i64>,
+    }
+
+    impl Link {
+        fn live(uuid: &'static str, link_id: &'static str) -> Self {
+            Self {
+                uuid,
+                link_id,
+                root_kind: ROOT_ITEM,
+                key: vec![7; 32],
+                origin: "https://connect.example.test",
+                account_id: "acc_synthetic01",
+                expires_at: 3600,
+                access: ACCESS_ANYONE,
+                addresses: String::new(),
+                deleted_at: None,
+            }
+        }
+
+        fn insert(&self, conn: &Connection) -> rusqlite::Result<usize> {
+            conn.execute(
+                "INSERT INTO public_link
+                     (uuid, link_id, root_kind, root_uuid, name, key, origin, account_id,
+                      expires_at, one_time, access, addresses, created_at, updated_at,
+                      updated_by, deleted_at)
+                 VALUES (?1, ?2, ?3, 'root', 'Name', ?4, ?5, ?6, ?7, 0, ?8, ?9, 1, 1000, 'dev',
+                         ?10)",
+                rusqlite::params![
+                    self.uuid,
+                    self.link_id,
+                    self.root_kind,
+                    self.key,
+                    self.origin,
+                    self.account_id,
+                    self.expires_at,
+                    self.access,
+                    self.addresses,
+                    self.deleted_at
+                ],
+            )
+        }
+    }
+
+    /// A link id of 32 lowercase hex characters that ends with `n`.
+    fn link_id(n: u8) -> &'static str {
+        Box::leak(format!("d4e59a0011f71c40fb1dfdb1a84466{n:02x}").into_boxed_str())
+    }
+
     #[test]
-    fn a_link_row_holds_a_key_of_32_bytes_until_it_is_revoked() {
+    fn a_link_row_holds_its_key_and_addresses_until_it_is_revoked() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut vault = Vault::create(&dir.path().join("links.db"), PASS).unwrap();
         vault.unlock(PASS).unwrap();
         let conn = vault.conn_ref().unwrap();
-        const LINK_ID: &str = "d4e59a0011f71c40fb1dfdb1a8446660";
-        let insert = |uuid: &str,
-                      link_id: &str,
-                      key: Vec<u8>,
-                      access: &str,
-                      addresses: &str,
-                      deleted: Option<i64>|
-         -> rusqlite::Result<usize> {
-            conn.execute(
-                "INSERT INTO public_link
-                     (uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at,
-                      one_time, access, addresses, created_at, updated_at, updated_by,
-                      deleted_at)
-                 VALUES (?1, ?2, 'item', 'root', 'Name', ?3, 'https://connect.example.test',
-                         2, 0, ?4, ?5, 1, 1000, 'dev', ?6)",
-                rusqlite::params![uuid, link_id, key, access, addresses, deleted],
-            )
+        let emails = |n: usize| {
+            (0..n)
+                .map(|i| format!("person{i}@example.test"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
-        insert("l1", LINK_ID, vec![7; 32], ACCESS_ANYONE, "", None).unwrap();
-        insert(
-            "l2",
-            LINK_ID,
-            vec![7; 32],
-            ACCESS_EMAILS,
-            "ola@example.test\npiotr@example.test",
-            None,
-        )
-        .unwrap();
-        // A revoked link may drop its key and its addresses.
-        insert("l3", LINK_ID, Vec::new(), ACCESS_EMAILS, "", Some(5)).unwrap();
-        for (uuid, link_id, key, access, addresses) in [
-            ("b1", LINK_ID, vec![7; 31], ACCESS_ANYONE, ""),
-            ("b2", LINK_ID, Vec::new(), ACCESS_ANYONE, ""),
+        let good = [
+            Link::live("g1", link_id(1)),
+            Link {
+                access: ACCESS_EMAILS,
+                addresses: emails(1),
+                ..Link::live("g2", link_id(2))
+            },
+            Link {
+                access: ACCESS_EMAILS,
+                addresses: emails(MAX_LINK_ADDRESSES),
+                root_kind: ROOT_FOLDER,
+                ..Link::live("g3", link_id(3))
+            },
+            Link {
+                origin: "http://localhost",
+                ..Link::live("g4", link_id(4))
+            },
+            Link {
+                origin: "http://127.0.0.1:8787",
+                ..Link::live("g5", link_id(5))
+            },
+            // A revoke: no key and no addresses.
+            Link {
+                key: Vec::new(),
+                access: ACCESS_EMAILS,
+                deleted_at: Some(5),
+                ..Link::live("g6", link_id(6))
+            },
+        ];
+        for link in &good {
+            link.insert(conn)
+                .unwrap_or_else(|error| panic!("{}: {error}", link.uuid));
+        }
+        let bad = [
             (
-                "b3",
-                LINK_ID,
-                vec![7; 32],
-                ACCESS_ANYONE,
-                "ola@example.test",
+                "a key of 31 bytes",
+                Link {
+                    key: vec![7; 31],
+                    ..Link::live("b1", link_id(11))
+                },
             ),
-            ("b4", LINK_ID, vec![7; 32], ACCESS_EMAILS, ""),
-            ("b5", LINK_ID, vec![7; 32], "addresses", ""),
             (
-                "b6",
-                "D4E59A0011F71C40FB1DFDB1A8446660",
-                vec![7; 32],
-                ACCESS_ANYONE,
-                "",
+                "a live link without a key",
+                Link {
+                    key: Vec::new(),
+                    ..Link::live("b2", link_id(12))
+                },
             ),
-            ("b7", "d4e59a0011f71c40", vec![7; 32], ACCESS_ANYONE, ""),
-        ] {
-            assert!(
-                insert(uuid, link_id, key, access, addresses, None).is_err(),
-                "{uuid}"
-            );
+            (
+                "addresses for anyone",
+                Link {
+                    addresses: emails(1),
+                    ..Link::live("b3", link_id(13))
+                },
+            ),
+            (
+                "emails without addresses",
+                Link {
+                    access: ACCESS_EMAILS,
+                    ..Link::live("b4", link_id(14))
+                },
+            ),
+            (
+                "21 addresses",
+                Link {
+                    access: ACCESS_EMAILS,
+                    addresses: emails(MAX_LINK_ADDRESSES + 1),
+                    ..Link::live("b5", link_id(15))
+                },
+            ),
+            (
+                "a blank line",
+                Link {
+                    access: ACCESS_EMAILS,
+                    addresses: "a@example.test\n\nb@example.test".to_owned(),
+                    ..Link::live("b6", link_id(16))
+                },
+            ),
+            (
+                "a trailing line break",
+                Link {
+                    access: ACCESS_EMAILS,
+                    addresses: "a@example.test\n".to_owned(),
+                    ..Link::live("b7", link_id(17))
+                },
+            ),
+            (
+                "an unknown access",
+                Link {
+                    access: "addresses",
+                    ..Link::live("b8", link_id(18))
+                },
+            ),
+            (
+                "an id in capitals",
+                Link::live("b9", "D4E59A0011F71C40FB1DFDB1A8446619"),
+            ),
+            ("a short id", Link::live("b10", "d4e59a0011f71c40")),
+            ("a used id", Link::live("b11", link_id(1))),
+            (
+                "another kind",
+                Link {
+                    root_kind: "vault",
+                    ..Link::live("b12", link_id(20))
+                },
+            ),
+            (
+                "plain http",
+                Link {
+                    origin: "http://connect.example.test",
+                    ..Link::live("b13", link_id(21))
+                },
+            ),
+            (
+                "a path",
+                Link {
+                    origin: "https://connect.example.test/s",
+                    ..Link::live("b14", link_id(22))
+                },
+            ),
+            (
+                "a trailing slash",
+                Link {
+                    origin: "https://connect.example.test/",
+                    ..Link::live("b15", link_id(23))
+                },
+            ),
+            (
+                "no host",
+                Link {
+                    origin: "https://",
+                    ..Link::live("b16", link_id(24))
+                },
+            ),
+            (
+                "no account",
+                Link {
+                    account_id: "",
+                    ..Link::live("b17", link_id(25))
+                },
+            ),
+            (
+                "an expiry before the creation",
+                Link {
+                    expires_at: 1,
+                    ..Link::live("b18", link_id(26))
+                },
+            ),
+            (
+                "a revoke that keeps the key",
+                Link {
+                    deleted_at: Some(5),
+                    ..Link::live("b19", link_id(27))
+                },
+            ),
+            (
+                "a revoke that keeps the addresses",
+                Link {
+                    key: Vec::new(),
+                    access: ACCESS_EMAILS,
+                    addresses: emails(1),
+                    deleted_at: Some(5),
+                    ..Link::live("b20", link_id(28))
+                },
+            ),
+        ];
+        for (why, link) in &bad {
+            assert!(link.insert(conn).is_err(), "{why}");
         }
         assert!(
             conn.execute(
                 "INSERT INTO public_link
-                     (uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at,
-                      created_at, updated_at, updated_by)
-                 VALUES ('t1', 'd4e59a0011f71c40fb1dfdb1a8446660', 'item', 'root', 'Name',
-                         ?1, 'o', 2, 1, 1000, 'dev')",
-                [String::from_utf8(vec![b'k'; 32]).unwrap()],
+                     (uuid, link_id, root_kind, root_uuid, name, key, origin, account_id,
+                      expires_at, created_at, updated_at, updated_by)
+                 VALUES ('t1', ?1, 'item', 'root', 'Name', ?2, 'https://connect.example.test',
+                         'acc_synthetic01', 3600, 1, 1000, 'dev')",
+                (link_id(30), String::from_utf8(vec![b'k'; 32]).unwrap()),
             )
             .is_err(),
             "the key is a blob"
         );
+        // The revoke of a live link wipes the key and the addresses in the same write.
+        let revoke = |uuid: &str, wipe: bool| {
+            let sql = if wipe {
+                "UPDATE public_link SET deleted_at = 9, key = X'', addresses = '',
+                     updated_at = 2000 WHERE uuid = ?1"
+            } else {
+                "UPDATE public_link SET deleted_at = 9, updated_at = 2000 WHERE uuid = ?1"
+            };
+            conn.execute(sql, [uuid])
+        };
+        assert!(revoke("g2", false).is_err());
+        revoke("g2", true).unwrap();
+        // A revoked row never becomes live again without a key.
         assert!(
             conn.execute(
-                "INSERT INTO public_link
-                     (uuid, link_id, root_kind, root_uuid, name, key, origin, expires_at,
-                      created_at, updated_at, updated_by)
-                 VALUES ('t2', 'd4e59a0011f71c40fb1dfdb1a8446660', 'vault', 'root', 'Name',
-                         ?1, 'o', 2, 1, 1000, 'dev')",
-                [vec![7u8; 32]],
+                "UPDATE public_link SET deleted_at = NULL WHERE uuid = 'g2'",
+                []
             )
-            .is_err(),
-            "a link shows a credential or a folder"
+            .is_err()
         );
-        // A revoke may clear the key.
-        conn.execute(
-            "UPDATE public_link SET deleted_at = 9, key = X'', addresses = '', updated_at = 2000
-             WHERE uuid = 'l2'",
-            [],
-        )
-        .unwrap();
     }
 
     #[test]
