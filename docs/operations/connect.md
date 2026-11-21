@@ -37,6 +37,9 @@ The relay reads its settings from the environment of its container; secrets are 
 | `APASSY_CONNECT_INGRESS_LISTEN`, `APASSY_CONNECT_ACME_LISTEN` | `0.0.0.0:443`, `0.0.0.0:80` (section 7) | the same |
 | `APASSY_CONNECT_NODE_ZONE` | unset (`node.apassy.wyderka.cc`) | the same |
 | Billing durations and the Family extra price | as R2 set them (OPERATIONS.md 27.6) | the same |
+| `APASSY_RELAY_ACCOUNT_PLANS` | unset: billing, because the Stripe files are set (`open` is refused beside them) | unset: billing (`connect` mode refuses `open`) |
+| `APASSY_CONNECT_SMTP_HOST`, `_PORT`, `_USER`, `_PASSWORD_FILE`, `_FROM` | the code mail of public links (section 12) | the same |
+| Link and mail limits (`APASSY_CONNECT_LINKS*`, `_LINK_CREATES*`, `_MAIL_*`, `_SMTP_PROBE_SECS`) | unset: the defaults of OPERATIONS.md 30.2 | the same |
 | Worker var `RELAY_MODE` | `relay` | `connect` |
 | Worker secrets | `EDGE_SECRET`, `PUSH_SECRET`, `APNS_KEY` | `EDGE_SECRET`; `PUSH_SECRET` and `APNS_KEY` unused (section 9, step 14) |
 
@@ -190,3 +193,13 @@ A restore into an empty volume starts with an empty `links.db`: the live links a
 ## 11. What Connect stores, and what it never holds
 
 It stores, as plain files: accounts (names, the recovery hash, the email copied from Stripe), account devices (names, platforms, public keys, times rounded to the hour), the SHA-256 of every key that ever was a device, link and join hashes, vault stores (one relay-sync team per vault: devices, signed heads, receipts, and the snapshots, which are ciphertext under the vault's passphrase), groups, invites as hashes, Stripe customer and subscription ids and states, event ids, tunnel nodes, grants, and monthly usage counts, entitlement key ids and public keys, and the relay audit (ids, actions, times). It never holds: a master key or any key of a file, a vault passphrase or vault key, an item value, a team vault of items, a question or an answer, a feed, an APNs token, a push secret, a proxy session, a token in a file (account tokens live in memory for 15 minutes), a link code, a recovery code, the signing key in a file other than its secret, or a client address on disk. The trust model ([docs/security/trust-model.md](../security/trust-model.md)) is the full list.
+
+## 12. Public links and the code mail
+
+Public links (ADR 0047 release A, [connect-share-v1](../contracts/connect-share-v1.md)) run on the hosted service in both phases; the relay reference is `crates/apassy-relay/docs/SPEC.md` section 38 and `docs/OPERATIONS.md` section 30.
+
+- **The order of a release with links:** the relay and the edge Worker first (the link routes, the mail, and `LINK_LIMITER` 1009, `LINK_CODE_LIMITER` 1010, `LINK_WRITE_LIMITER` 1011), read back as below, then the apps. No app that makes links goes out before.
+- **The plans.** The hosted relay has the Stripe files, so its plans are billing's with `APASSY_RELAY_ACCOUNT_PLANS` unset, and `open` is refused there; in `connect` mode too. The open default of a relay without Stripe (OPERATIONS.md 30.4) never applies to it.
+- **The mail path.** The hosted relay submits each code mail to the operator's own mail server on the relay host, which delivers it straight to the MX of the recipient's domain: no third-party mail service and no smarthost. `APASSY_CONNECT_SMTP_HOST` is the name on that server's certificate; the relay container resolves it to the host (a hairpin connection to the public address, or `extra_hosts` with `host-gateway` in the compose service, with the mail server listening there). The password file is mode 0600, owned by the relay's uid and gid 10001, and mounted read-only with the other secrets (section 3). The sender is `connect@apassy.wyderka.cc`; SPF, DKIM, and DMARC of its domain name the relay host's mail server.
+- **The check of the session** runs at the start and every 5 minutes; while it fails, the relay sends no code mail and says so in its log (OPERATIONS.md 30.3).
+- **The read-back** after each deploy of the relay or the Worker, and required before the apps of a release with links: OPERATIONS.md 30.6: the public delivery gate with `--links` (`/s` with its headers, and an unknown link 404 with `x-apassy-links: 1`), `docker compose exec -T relay apassy-relay mail-test <an address of the owner>` (the mail arrives with SPF, DKIM, and DMARC `pass`), and one live link for "Only these e-mail addresses" opened with its mailed code.

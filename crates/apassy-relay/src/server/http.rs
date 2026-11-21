@@ -1315,8 +1315,8 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     }
     // The code mail of public links (docs/SPEC.md section 38.7): a thread of its own, so a
     // slow SMTP server never holds a request or the maintenance pass.
-    let mail_sender = (scope == Scope::Node && hub.links().is_some_and(|links| links.mail_on()))
-        .then(|| {
+    let mail_sender =
+        (scope == Scope::Node && hub.links().is_some_and(|links| links.mail_sender())).then(|| {
             let (hub, stop) = (hub.clone(), stop.clone());
             std::thread::Builder::new()
                 .name("relay-mail".to_string())
@@ -2441,6 +2441,21 @@ fn respond_account(
     };
     match account::dispatch(hub, &caller, &endpoint, &body, now) {
         Ok(result) => respond_ok_marked(request, result, marker),
+        // The links of a UTC day: `Retry-After` until the day ends.
+        Err(error) if error.code == codes::LINK_CREATE_LIMIT => respond_json_with(
+            request,
+            error.status(),
+            &error.to_envelope(),
+            false,
+            Header::from_bytes(
+                &b"Retry-After"[..],
+                links::until_tomorrow(now).to_string().as_bytes(),
+            )
+            .ok()
+            .into_iter()
+            .chain(marked(marker))
+            .collect(),
+        ),
         Err(error) => respond_error_marked(request, &error, marker),
     }
 }

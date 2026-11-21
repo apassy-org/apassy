@@ -4452,8 +4452,31 @@ fn open_plans_are_refused_beside_stripe() {
         config.connect.plans,
         apassy_relay::config::AccountPlans::Open
     );
+    // Unset, on a relay with the account routes, without Stripe, and not in `connect`
+    // mode: a relay that you run yourself, so open plans (no link limit).
     assert_eq!(
         with(&[key, accounts]).unwrap().connect.plans,
+        apassy_relay::config::AccountPlans::Open
+    );
+    // `billing` keeps the plans of billing: none without Stripe.
+    assert_eq!(
+        with(&[key, accounts, ("APASSY_RELAY_ACCOUNT_PLANS", "billing")])
+            .unwrap()
+            .connect
+            .plans,
+        apassy_relay::config::AccountPlans::Billing
+    );
+    // `connect` mode (the hosted Connect) takes the plans of billing when unset.
+    assert_eq!(
+        with(&[("APASSY_RELAY_MODE", "connect")])
+            .unwrap()
+            .connect
+            .plans,
+        apassy_relay::config::AccountPlans::Billing
+    );
+    // Without the account routes there are no plans to give: unset stays billing.
+    assert_eq!(
+        with(&[key]).unwrap().connect.plans,
         apassy_relay::config::AccountPlans::Billing
     );
     // Beside either Stripe file, before any file is read.

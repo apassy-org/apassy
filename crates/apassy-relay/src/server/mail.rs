@@ -11,6 +11,10 @@
 //!
 //! No log line holds an address, a code, the text of a mail, or a reply of the server
 //! (a reply may quote the address): a failure names its step and its reply code only.
+//!
+//! The thread checks its session at start and then every `probe_secs` (`Mailer::probe`:
+//! connect, TLS, EHLO, AUTH, `MAIL FROM`, `RSET`, `QUIT`; no mail). While the check fails,
+//! and after a mail fails at AUTH or `MAIL FROM`, the mail is off (`Links::mail_on`).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -26,7 +30,7 @@ use zeroize::Zeroizing;
 use crate::config::MailSettings;
 use crate::error::{RelayError, RelayResult};
 use crate::server::hub::Hub;
-use crate::server::links::MAIL_SUBJECT;
+use crate::server::links::{MAIL_SUBJECT, TEST_SUBJECT, TEST_TEXT};
 
 /// The longest reply line the client reads (RFC 5321 allows 512 bytes).
 const MAX_LINE: u64 = 2048;
@@ -45,11 +49,34 @@ const MAX_RETRY_SECS: u64 = 600;
 pub struct MailError {
     pub step: &'static str,
     pub reply: Option<u16>,
+    /// The failure came before the recipient was named: the connection, TLS, EHLO, AUTH,
+    /// or `MAIL FROM`. That is the relay's own settings or its way to the server, never
+    /// the recipient, so the mail does not count against the caps of the address, the
+    /// recipient, or the account (`Links::mail_dropped`).
+    pub setup: bool,
 }
 
 impl MailError {
     fn at(step: &'static str) -> Self {
-        Self { step, reply: None }
+        Self {
+            step,
+            reply: None,
+            setup: false,
+        }
+    }
+
+    /// The same failure, marked as one before the recipient.
+    fn in_setup(self) -> Self {
+        Self {
+            setup: true,
+            ..self
+        }
+    }
+
+    /// True for a failure at AUTH or `MAIL FROM`: the account or the sender of the relay
+    /// is refused, so no mail can go until the check of the session passes again.
+    pub fn refused_sender(&self) -> bool {
+        self.setup && matches!(self.step, "auth" | "auth offered" | "mail from")
     }
 }
 
@@ -140,14 +167,59 @@ impl Mailer {
         })
     }
 
-    /// Hands one mail to `to` with the subject of the code mail and `text` (CRLF lines) to
-    /// the submission server.
+    /// Hands one code mail to `to` with `text` (CRLF lines) to the submission server.
     pub fn send(&self, to: &str, text: &str, now: u64) -> Result<(), MailError> {
+        self.submit(to, MAIL_SUBJECT, text, now)
+    }
+
+    /// Hands one test mail to `to` with the configured settings (`apassy-relay
+    /// mail-test`): the same session as a code mail, another subject and text, no code.
+    pub fn send_test(&self, to: &str, now: u64) -> Result<(), MailError> {
+        self.submit(to, TEST_SUBJECT, TEST_TEXT, now)
+    }
+
+    /// Checks the session without a mail: connect, TLS, EHLO, AUTH, `MAIL FROM` with the
+    /// sender, then `RSET` and `QUIT`. No recipient is named and nothing is sent.
+    pub fn probe(&self) -> Result<(), MailError> {
+        let mut session = self.open().map_err(MailError::in_setup)?;
+        session
+            .command(&format!("MAIL FROM:<{}>", self.settings.from))
+            .and_then(|()| session.expect("mail from", &[250]).map(drop))
+            .map_err(MailError::in_setup)?;
+        session.command("RSET")?;
+        session.expect("rset", &[250])?;
+        let _ = session.command("QUIT");
+        Ok(())
+    }
+
+    /// One mail with `subject` and `text`. Every failure before `RCPT TO` is marked
+    /// `setup` (`MailError::setup`).
+    fn submit(&self, to: &str, subject: &str, text: &str, now: u64) -> Result<(), MailError> {
         let from = &self.settings.from;
         if !plain_address(to) || !plain_address(from) {
             return Err(MailError::at("address"));
         }
-        let message = Zeroizing::new(message(from, to, text, now)?);
+        let message = Zeroizing::new(message(from, to, subject, text, now)?);
+        let mut session = self.open().map_err(MailError::in_setup)?;
+        session
+            .command(&format!("MAIL FROM:<{from}>"))
+            .and_then(|()| session.expect("mail from", &[250]).map(drop))
+            .map_err(MailError::in_setup)?;
+        session.command(&format!("RCPT TO:<{to}>"))?;
+        session.expect("rcpt to", &[250, 251])?;
+        session.command("DATA")?;
+        session.expect("data", &[354])?;
+        session.write_data(&message)?;
+        session.expect("message", &[250])?;
+        // The mail is taken: a failed QUIT changes nothing.
+        let _ = session.command("QUIT");
+        Ok(())
+    }
+
+    /// The session up to the sender: the greeting, EHLO, STARTTLS (unless TLS from the
+    /// first byte) and EHLO again, and AUTH when the relay has an account.
+    fn open(&self) -> Result<Session, MailError> {
+        let from = &self.settings.from;
         let mut session = self.connect()?;
         session.expect("greeting", &[220])?;
         let helo = from.rsplit('@').next().unwrap_or("localhost").to_string();
@@ -194,17 +266,7 @@ impl Mailer {
                 return Err(MailError::at("auth offered"));
             }
         }
-        session.command(&format!("MAIL FROM:<{from}>"))?;
-        session.expect("mail from", &[250])?;
-        session.command(&format!("RCPT TO:<{to}>"))?;
-        session.expect("rcpt to", &[250, 251])?;
-        session.command("DATA")?;
-        session.expect("data", &[354])?;
-        session.write_data(&message)?;
-        session.expect("message", &[250])?;
-        // The mail is taken: a failed QUIT changes nothing.
-        let _ = session.command("QUIT");
-        Ok(())
+        Ok(session)
     }
 
     /// TCP to the server (a fixed address in tests), and TLS at once on port 465.
@@ -325,6 +387,7 @@ impl Session {
             Err(MailError {
                 step,
                 reply: Some(code),
+                setup: false,
             })
         }
     }
@@ -419,13 +482,13 @@ pub fn rfc5322_date(now: u64) -> String {
 }
 
 /// The whole message: the headers and `text`, every line ending in CRLF.
-fn message(from: &str, to: &str, text: &str, now: u64) -> Result<String, MailError> {
+fn message(from: &str, to: &str, subject: &str, text: &str, now: u64) -> Result<String, MailError> {
     let mut id = [0u8; 16];
     getrandom::fill(&mut id).map_err(|_| MailError::at("message id"))?;
     let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
     let domain = from.rsplit('@').next().unwrap_or("localhost");
     Ok(format!(
-        "Date: {date}\r\nFrom: Apassy <{from}>\r\nTo: <{to}>\r\nSubject: {MAIL_SUBJECT}\r\nMessage-ID: <{id}@{domain}>\r\n\
+        "Date: {date}\r\nFrom: Apassy <{from}>\r\nTo: <{to}>\r\nSubject: {subject}\r\nMessage-ID: <{id}@{domain}>\r\n\
          MIME-Version: 1.0\r\nContent-Type: text/plain; charset=us-ascii\r\nContent-Transfer-Encoding: 7bit\r\n\
          Auto-Submitted: auto-generated\r\n\r\n{text}",
         date = rfc5322_date(now),
@@ -455,12 +518,42 @@ fn permanent(error: &MailError) -> bool {
     error.reply.is_some_and(|code| (500..600).contains(&code))
 }
 
-/// The `relay-mail` thread: it turns the waiting code requests into mails
-/// (`Links::process_jobs`), also between two mails, so a slow server delays them by one
-/// session at most (`SESSION_SECS`); it hands each due mail to the server and deletes it
-/// once the server took it; a 5xx reply drops the mail at once; any other failure waits
-/// longer each time; a mail that is not taken within an hour is deleted
-/// (`Links::mail_failed`, the maintenance pass).
+/// `apassy-relay mail-test <address>`: one test mail (`TEST_SUBJECT`, no code, no link)
+/// to `address` with the mail settings of `config`, over the same session as a code mail.
+/// It reads no `links.db` and runs beside a running relay. Answers the normal form of the
+/// address that the server took; a failure names its step and reply code only.
+pub fn mail_test(config: &crate::config::RelayConfig, address: &str) -> RelayResult<String> {
+    let settings = config.connect.mail.as_ref().ok_or_else(|| {
+        RelayError::invalid(
+            "No mail sender is set: set APASSY_CONNECT_SMTP_HOST and APASSY_CONNECT_SMTP_FROM (docs/OPERATIONS.md 30.2).",
+        )
+    })?;
+    let normal = crate::server::links::normal_address(address)
+        .ok_or_else(|| RelayError::invalid("The address is not an e-mail address."))?;
+    let mailer = Mailer::new(settings)?;
+    mailer
+        .send_test(&normal, crate::now_unix())
+        .map_err(|error| {
+            RelayError::internal(format!(
+                "The SMTP server did not take the test mail: step {error}{}.",
+                if error.setup {
+                    " (before the recipient: the host, its certificate, the account, or the sender)"
+                } else {
+                    ""
+                }
+            ))
+        })?;
+    Ok(normal)
+}
+
+/// The `relay-mail` thread: it checks its SMTP session at start and then every
+/// `probe_secs` (`Mailer::probe`, `Links::probed`); it turns the waiting code requests
+/// into mails (`Links::process_jobs`), also between two mails, so a slow server delays
+/// them by one session at most (`SESSION_SECS`); it hands each due mail to the server and
+/// deletes it once the server took it; a 5xx reply drops the mail at once; any other
+/// failure waits longer each time; a mail that is not taken within an hour is deleted
+/// (`Links::mail_failed`, the maintenance pass). A mail lost before its recipient was
+/// named (`MailError::setup`) gives its counts back (`Links::mail_dropped`).
 pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
     let Some(links) = hub.links().cloned() else {
         return;
@@ -474,7 +567,15 @@ pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
             eprintln!("apassy-relay: a code request could not be made into a mail");
         }
     };
+    let probe_every = links.probe_secs().map(Duration::from_secs);
+    let mut next_probe = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if let Some(every) = probe_every
+            && std::time::Instant::now() >= next_probe
+        {
+            links.probed(mailer.probe().err().as_ref());
+            next_probe = std::time::Instant::now() + every;
+        }
         jobs();
         let now = crate::now_unix();
         let due = match links.due_mail(now, BATCH) {
@@ -492,18 +593,22 @@ pub fn run(hub: Arc<Hub>, stop: Arc<AtomicBool>) {
             let now = crate::now_unix();
             let stored = match mailer.send(recipient, text, now) {
                 Ok(()) => links.mail_sent(*id),
-                Err(error) if permanent(&error) => {
-                    eprintln!(
-                        "apassy-relay: a code mail was refused by the SMTP server at step {error}: it is dropped"
-                    );
-                    links.mail_sent(*id)
-                }
                 Err(error) => {
-                    eprintln!(
-                        "apassy-relay: a code mail was not taken by the SMTP server at step {error} (try {})",
-                        tries + 1
-                    );
-                    links.mail_failed(*id, now, retry_after(*tries))
+                    if error.refused_sender() {
+                        links.sender_refused(&error);
+                    }
+                    if permanent(&error) {
+                        eprintln!(
+                            "apassy-relay: a code mail was refused by the SMTP server at step {error}: it is dropped"
+                        );
+                        links.mail_dropped(*id, error.setup)
+                    } else {
+                        eprintln!(
+                            "apassy-relay: a code mail was not taken by the SMTP server at step {error} (try {})",
+                            tries + 1
+                        );
+                        links.mail_failed(*id, now, retry_after(*tries), error.setup)
+                    }
                 }
             };
             if stored.is_err() {
@@ -530,6 +635,34 @@ mod tests {
     }
 
     #[test]
+    fn only_a_failure_before_the_recipient_is_the_relays_own() {
+        let refused_auth = MailError {
+            step: "auth",
+            reply: Some(535),
+            setup: false,
+        }
+        .in_setup();
+        assert!(refused_auth.setup && refused_auth.refused_sender());
+        let refused_sender = MailError {
+            step: "mail from",
+            reply: Some(553),
+            setup: true,
+        };
+        assert!(refused_sender.refused_sender());
+        // A failed connection or TLS is the relay's own, but does not stop the mail: the
+        // next check of the session does that.
+        let tls = MailError::at("tls").in_setup();
+        assert!(tls.setup && !tls.refused_sender());
+        // A refused recipient counts.
+        let recipient = MailError {
+            step: "rcpt to",
+            reply: Some(550),
+            setup: false,
+        };
+        assert!(!recipient.setup && !recipient.refused_sender());
+    }
+
+    #[test]
     fn retries_wait_longer_up_to_ten_minutes() {
         assert_eq!(retry_after(0), 30);
         assert_eq!(retry_after(1), 60);
@@ -553,7 +686,14 @@ mod tests {
     #[test]
     fn the_message_has_the_contract_text_and_no_link() {
         let text = "Your code to open a shared Apassy item: 12345678\r\n\r\nIt works for 15 minutes. If you did not ask for it, ignore this mail.\r\n";
-        let message = message("connect@apassy.example", "ada@example.com", text, 0).unwrap();
+        let message = message(
+            "connect@apassy.example",
+            "ada@example.com",
+            MAIL_SUBJECT,
+            text,
+            0,
+        )
+        .unwrap();
         assert!(message.contains("\r\nSubject: Your Apassy code\r\n"));
         assert!(message.ends_with(&format!("\r\n\r\n{text}")));
         assert!(!message.contains("http"));

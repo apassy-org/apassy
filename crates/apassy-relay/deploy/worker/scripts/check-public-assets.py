@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import secrets
 import http.client
 import json
 import pathlib
@@ -77,6 +78,67 @@ def expected_assets(public, version, commit):
             for path, blob in blobs.items()]
 
 
+# The headers of the viewer of public links (connect-share-v1 section 5), as the Worker and
+# the relay serve them.
+VIEWER_HEADERS = {
+    "content-security-policy": "default-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; "
+    "trusted-types 'none'",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-robots-tag": "noindex, nofollow",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "cross-origin-opener-policy": "same-origin",
+}
+
+
+def fetch(opener, url, user_agent, method="GET", body=None):
+    """One request without redirects: (status, headers, body of at most 64 KiB)."""
+    headers = {"User-Agent": user_agent}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        response = opener.open(request, timeout=60)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.status, response.headers, response.read(64 * 1024)
+
+
+def check_links(args, opener, user_agent):
+    """The read-back of public links after a deploy (docs/OPERATIONS.md 30.6): `/s` is the
+    staged viewer with its headers, and an unknown link is 404 `not_found` with the marker
+    `x-apassy-links: 1`, so the relay behind the Worker serves the link routes."""
+    base = args.base_url.rstrip("/")
+    viewer = (args.public_dir / "share.html").read_bytes()
+    status, headers, body = fetch(opener, base + "/s", user_agent)
+    print("GET /s HTTP " + str(status), flush=True)
+    if status != 200 or body != viewer:
+        raise RuntimeError("Public links: /s is not the staged viewer (HTTP " + str(status) + ")")
+    for name, value in VIEWER_HEADERS.items():
+        if headers.get(name) != value:
+            raise RuntimeError("Public links: /s has " + name + ": " + str(headers.get(name)))
+    print("PASS /s viewer bytes and headers", flush=True)
+    # A random id: no link has it, and no answer of it says anything about another link.
+    path = "/v1/links/" + secrets.token_hex(16) + "/open"
+    body = b'{"confirm":false,"email":null,"address_key":null,"code":null}'
+    status, headers, answer = fetch(opener, base + path, user_agent, "POST", body)
+    print("POST /v1/links/<unknown>/open HTTP " + str(status), flush=True)
+    try:
+        code = json.loads(answer)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        code = None
+    if status != 404 or code != "not_found" or headers.get("x-apassy-links") != "1":
+        raise RuntimeError("Public links: an unknown link is not 404 not_found with x-apassy-links: 1 "
+                           "(HTTP " + str(status) + ", x-apassy-links " + str(headers.get("x-apassy-links")) + ")")
+    for name in ["cache-control", "referrer-policy"]:
+        if headers.get(name) != VIEWER_HEADERS[name]:
+            raise RuntimeError("Public links: the link route has " + name + ": " + str(headers.get(name)))
+    print("PASS public links: the viewer and the marked 404", flush=True)
+
+
 def check(args):
     base = urllib.parse.urlsplit(args.base_url)
     if (base.scheme not in ["https", "http"] or not base.hostname or base.username
@@ -132,6 +194,8 @@ def check(args):
             delay = min(args.backoff * (2 ** (attempt - 1)), 30)
             print("Retry in " + str(delay) + "s; no rollout acceptance yet", flush=True)
             time.sleep(delay)
+    if args.links:
+        check_links(args, opener, user_agent)
     print("PASS public delivery: " + args.version + " " + args.commit, flush=True)
 
 
@@ -145,6 +209,8 @@ def main():
     parser.add_argument("--evidence-dir", type=pathlib.Path, required=True)
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--backoff", type=float, default=2)
+    parser.add_argument("--links", action="store_true",
+                        help="also read back the viewer /s and the marked 404 of an unknown link")
     try:
         check(parser.parse_args())
     except (OSError, ValueError, KeyError, RuntimeError) as error:

@@ -2193,33 +2193,53 @@ Links for "Only these e-mail addresses" need a mail sender. Without `APASSY_CONN
 
 | Setting | Value on the hosted relay |
 | --- | --- |
-| `APASSY_CONNECT_SMTP_HOST` | The submission host of the mail server; its certificate must name it |
+| `APASSY_CONNECT_SMTP_HOST` | The submission host of the mail server: the name on its certificate (below) |
 | `APASSY_CONNECT_SMTP_PORT` | `587` (STARTTLS) or `465` (TLS) |
 | `APASSY_CONNECT_SMTP_USER` | The submission account of the sender |
-| `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password (mode 0600, mounted read-only) |
+| `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password: mode 0600, owned by the relay's uid (below), mounted read-only |
 | `APASSY_CONNECT_SMTP_FROM` | `connect@apassy.wyderka.cc` |
+| `APASSY_CONNECT_SMTP_PROBE_SECS` | The default (300): the check of the session at start and every 5 minutes |
 | `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_LINK` | The defaults (50, 200, 500, 2000, 20) unless the owner decides otherwise |
+| `APASSY_CONNECT_MAIL_NO_PLAN`, `APASSY_CONNECT_MAIL_PER_RECIPIENT` | The defaults (500 of the relay's 2000 for all accounts without a plan; 10 a day for one address) |
+| `APASSY_CONNECT_LINK_CREATES`, `_TEAM` | The defaults (100 and 400 new links of one account in a UTC day) |
 
-The sending domain needs its records before the first mail: SPF that names the mail server (or its relay), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
+**The hosted mail.** The hosted relay submits each code mail to the operator's own mail server on the relay host, which delivers it straight to the MX of the recipient's domain: no third-party mail service and no smarthost. So the mail server's own address is the one that the receiving servers see.
+
+**The host name and its certificate.** The relay checks the server's certificate for `APASSY_CONNECT_SMTP_HOST` (the platform roots), so set the name on that certificate, never an IP address or `localhost`. A relay container that reaches a mail server on the same host must resolve that name to the host: either the public address works from inside the container (the host's firewall and NAT take a hairpin connection), or the compose service maps the name to the host with `extra_hosts` (`"<that name>:host-gateway"`), and the mail server listens on the address it maps to. Read it back with `apassy-relay mail-test` (30.6), never with a check that skips the certificate.
+
+**The password file.** The image runs as uid and gid 10001 (`Dockerfile`: `USER 10001:10001`), so the file is mode 0600 and owned by 10001:10001 on the host (`install -m 0600 -o 10001 -g 10001 …`), mounted read-only. A file the relay cannot read stops its start (`APASSY_CONNECT_SMTP_PASSWORD_FILE cannot be read`).
+
+The sending domain needs its records before the first mail: SPF that names the mail server (the relay host, since it delivers itself), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
 
 ### 30.3 What to watch
 
-- `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted.
+- `the check of the SMTP session failed at step …` in the relay log: the check at start or every 5 minutes (connect, TLS, EHLO, AUTH, `MAIL FROM`, `RSET`; no mail) failed, and the mail is off (`mail: false`; links for e-mail addresses and code requests answer 503 `mail_unavailable`) until a check passes, which logs `the check of the SMTP session passes again`. One line per change, not per check. `a code mail failed at step auth (…)` or `… mail from (…)`: a mail found the account or the sender refused; the mail is off the same way until the next check passes. Fix the setting, then `apassy-relay mail-test` (30.6).
+- `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted. A mail lost before `RCPT TO` (the relay's own settings: the connection, TLS, AUTH, `MAIL FROM`) gives back its counts of the account, the recipient, and the link and address; the relay's daily count keeps it.
 - A relay whose mail sender cannot be built does not start (the system roots, or the host name).
 - `the mail thread cannot start: no code mail is sent`: the mail is off until a restart; links for e-mail addresses and code requests answer 503 `mail_unavailable`.
 - `a code mail was refused by the SMTP server at step … (5xx): it is dropped`: a permanent refusal; the reader may ask for a new code.
-- Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day (the counts are in `links.db`, so a restart keeps them).
+- Many 503 `mail_unavailable` answers: the mail is off (the lines above), or a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_NO_PLAN` for all accounts without a plan, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); the caps end with the UTC day (the counts are in `links.db`, so a restart keeps them).
+- Many 429 `link_create_limit` answers: accounts at their budget of new links of the day (`APASSY_CONNECT_LINK_CREATES`, `_TEAM`). The Worker's `LINK_WRITE_LIMITER` (20 creates and revokes a minute for one address) answers 429 `rate_limited` before the relay.
 
 ### 30.4 Settings of a relay that you run yourself
 
-`APASSY_RELAY_ACCOUNT_PLANS=open` gives every account a plan without Stripe and no plan limit on links. It needs `APASSY_RELAY_CONNECT_ACCOUNTS=1`, and the relay refuses it beside the Stripe files and in `connect` mode. A link needs an `https:` public URL (`APASSY_RELAY_PUBLIC_URL`).
+A relay that you run yourself has no link limit. With `APASSY_RELAY_CONNECT_ACCOUNTS=1`, without the Stripe files, and not in `connect` mode, the plans are open when `APASSY_RELAY_ACCOUNT_PLANS` is unset: every account has a plan without Stripe, no plan limit on links, and no budget of new links. `APASSY_RELAY_ACCOUNT_PLANS=open` says the same explicitly; the relay refuses it beside the Stripe files and in `connect` mode. `APASSY_RELAY_ACCOUNT_PLANS=billing` keeps the plans of billing: without Stripe no account has a plan, and the limits of an account without a plan hold. With the Stripe files (the hosted relay) and in `connect` mode the plans are billing's. A link needs an `https:` public URL (`APASSY_RELAY_PUBLIC_URL`).
 
 ### 30.5 Rollback
 
-An image before public links never opens `links.db` and leaves it in place; its link routes are 404 without the marker `x-apassy-links: 1`, so a device that revokes a link meanwhile keeps the revoke pending and sends it again on the way forward (connect-share-v1 section 4.3). An app before that rule took any 404 for a done revoke: so before going forward after such a rollback:
+An image before public links never opens `links.db` and leaves it in place; its link routes are 404 without the marker `x-apassy-links: 1`, so a device that revokes a link meanwhile keeps the revoke pending and sends it again on the way forward (connect-share-v1 section 4.3). Every released app has that rule, so going forward needs no step: start the new image, and the pending revokes arrive.
 
-1. Keep the relay stopped.
-2. Run `apassy-relay purge-links` with the configuration of the new image. Every link goes; the ids stay used.
-3. Start the new image. The owners make new links where they need them.
+An image of an earlier `links.db` version (2) refuses a file of version 3 unchanged: go back only to an image before public links, or forward.
 
-The edge Worker's `LINK_LIMITER` and `LINK_CODE_LIMITER` bindings are unused by an older Worker.
+Note, for a relay that served links to an app build from before the marker rule (no such build was released): such a build took any 404 for a done revoke. Before going forward after a rollback to an image without links, keep the relay stopped, run `apassy-relay purge-links` with the configuration of the new image (every link goes; the ids stay used), then start it; the owners make new links where they need them.
+
+The edge Worker's `LINK_LIMITER`, `LINK_CODE_LIMITER`, and `LINK_WRITE_LIMITER` bindings are unused by an older Worker.
+
+### 30.6 Deploy order and read-back
+
+Release the relay and the edge Worker first, then the apps: an app that makes links needs the routes, the mail, and the limiters in place. After the deploy of the relay and of the Worker, and before the apps go out:
+
+1. **The viewer and the routes:** `python3 deploy/worker/scripts/check-public-assets.py --links --version <version> --commit <full SHA> --evidence-dir <new folder>` (the public delivery gate of the release runbook, with `--links`): it also checks that `GET /s` is the staged `share.html` with the viewer headers (CSP with Trusted Types, `no-store`, `no-referrer`, `noindex, nofollow`, `nosniff`, `DENY`, `same-origin`), and that `POST /v1/links/<a random id>/open` is 404 `not_found` with `x-apassy-links: 1`, `no-store`, and `no-referrer`. By hand: `curl -sI https://apassy-relay.wyderka.cc/s` and `curl -s -D - -X POST https://apassy-relay.wyderka.cc/v1/links/$(openssl rand -hex 16)/open -H 'content-type: application/json' -d '{"confirm":false,"email":null,"address_key":null,"code":null}'`.
+2. **The mail settings:** `docker compose exec -T relay apassy-relay mail-test <an address of the owner>`: exit 0 and `{"sent":true}`; the mail arrives, and its headers show SPF, DKIM, and DMARC `pass`. A failure names its step (`tls`: the host name or its certificate; `auth`: the account or the password file; `mail from`: the sender). The relay log has no `the check of the SMTP session failed` line since the start, and `GET /v1/account/links` of a signed-in account says `"mail": true`.
+3. **A live link for "Only these e-mail addresses":** on the owner's Mac, make a one-time link of a test item for one address of the owner; open it in a browser, ask for the code, open it with the mailed code, and see the item; then the list shows it opened. Revoke any test link that is left. Required: a release whose mail is not read back this way ships no app that makes such links.
+4. **The limiters:** `wrangler.jsonc` of the deployed Worker has the three link bindings (1009, 1010, 1011).

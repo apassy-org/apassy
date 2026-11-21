@@ -1040,3 +1040,110 @@ fn every_answer_of_the_link_routes_carries_the_marker() {
         assert_eq!(header(&answer, "x-apassy-links"), None, "{method} {path}");
     }
 }
+
+/// The links that an account may make in one UTC day (`creates`, Team `creates_team`):
+/// over it `POST /v1/account/links` is 429 `link_create_limit` with `Retry-After` until
+/// the day ends and the marker, and nothing is kept. Every try past a retry counts, also
+/// a refused one; a retry of a made link does not. Another account has its own budget,
+/// and the rows of past days go at the maintenance pass.
+#[test]
+fn the_links_of_a_day_stop_at_the_create_budget() {
+    let c = connect::start_with_config(|cfg| {
+        cfg.connect.links = LinkSettings {
+            creates: 3,
+            creates_team: 4,
+            ..LinkSettings::default()
+        };
+    });
+    let plans = Arc::new(TestPlans::default());
+    c.relay.hub().set_plans(plans.clone());
+    let a = c.account("Ada");
+    let team = c.account("Tom");
+    plans.set(&team.account, "team");
+    let made = anyone_body(false, 3600);
+    create_ok(&c, &a, &made);
+    // A retry of the made link counts nothing.
+    for _ in 0..3 {
+        create_ok(&c, &a, &made);
+    }
+    // A refused try (an id in use with another body) counts.
+    let mut conflict = made.clone();
+    conflict["one_time"] = json!(true);
+    assert_eq!(create(&c, &a, &conflict).0, 409);
+    create_ok(&c, &a, &anyone_body(false, 3600));
+    let over = anyone_body(false, 3600);
+    let (status, headers, text) = call_with_headers(
+        &c.relay.url,
+        EDGE_SECRET,
+        "POST",
+        "/v1/account/links",
+        &[("Authorization", &format!("Bearer {}", a.token))],
+        Some(&over),
+    );
+    assert_eq!(status, 429, "{text}");
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(answer["error"]["code"], "link_create_limit");
+    let message = answer["error"]["message"].as_str().unwrap();
+    assert!(message.contains('3') && !message.contains('€'), "{message}");
+    assert_eq!(header(&headers, "x-apassy-links"), Some("1"));
+    let retry: u64 = header(&headers, "retry-after").unwrap().parse().unwrap();
+    assert!((1..=86_400).contains(&retry), "{retry}");
+    // Nothing was kept, and a retry of the made link still answers its view.
+    assert_eq!(
+        open(&c, over["link_id"].as_str().unwrap(), &open_body(false)).0,
+        404
+    );
+    assert_eq!(list(&c, &a)["live"], 2);
+    create_ok(&c, &a, &made);
+    // A Team member has the Team budget; another account its own.
+    for _ in 0..4 {
+        create_ok(&c, &team, &anyone_body(false, 3600));
+    }
+    assert_eq!(create(&c, &team, &anyone_body(false, 3600)).0, 429);
+    let b = c.account("Bea");
+    create_ok(&c, &b, &anyone_body(false, 3600));
+    // A revoke is not a create: it is not refused, and it makes no room today.
+    let ids: Vec<String> = list(&c, &a)["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|link| link["link_id"].as_str().unwrap().to_string())
+        .collect();
+    c.ok(
+        "DELETE",
+        &format!("/v1/account/links/{}", ids[0]),
+        Some(&a.token),
+        None,
+    );
+    assert_eq!(create(&c, &a, &anyone_body(false, 3600)).0, 429);
+    // The next UTC day: the budget is whole again, and the old rows go.
+    edit_links(&c, "UPDATE link_creates SET day = day - 1;");
+    prune(&c);
+    let conn = rusqlite::Connection::open(c.relay.config.links_path()).unwrap();
+    conn.execute_batch(&format!("PRAGMA key = '{VAULT_KEY}';"))
+        .unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM link_creates", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+    create_ok(&c, &a, &anyone_body(false, 3600));
+}
+
+/// Open plans (a relay that you run yourself) have no budget of new links.
+#[test]
+fn open_plans_have_no_create_budget() {
+    let c = connect::start_with_config(|cfg| {
+        cfg.connect.links = LinkSettings {
+            creates: 2,
+            ..LinkSettings::default()
+        };
+    });
+    c.relay
+        .hub()
+        .set_plans(Arc::new(apassy_relay::server::account::OpenPlans));
+    let a = c.account("Ada");
+    for _ in 0..4 {
+        create_ok(&c, &a, &anyone_body(false, 3600));
+    }
+    assert_eq!(list(&c, &a)["limit"], Value::Null);
+}

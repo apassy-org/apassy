@@ -671,6 +671,20 @@ fn the_settings_need_both_stripe_files_and_take_the_api_base_from_code_only() {
     .unwrap();
     let billing = config.connect.billing.clone().unwrap();
     assert_eq!(billing.stripe_api_base, "https://api.stripe.com");
+    // With Stripe, the plans are billing's when APASSY_RELAY_ACCOUNT_PLANS is unset (the
+    // hosted relay), and `open` is refused.
+    assert_eq!(
+        config.connect.plans,
+        apassy_relay::config::AccountPlans::Billing
+    );
+    assert!(
+        with(&[
+            ("STRIPE_SECRET_KEY_FILE", &key),
+            ("STRIPE_WEBHOOK_SECRET_FILE", &webhook),
+            ("APASSY_RELAY_ACCOUNT_PLANS", "open"),
+        ])
+        .is_err()
+    );
     assert_eq!(billing.config.durations.grace_days, 7);
     assert_eq!(billing.config.family_extra_cents, 150);
     assert_eq!(billing.config.site_url, "https://site.example.test");

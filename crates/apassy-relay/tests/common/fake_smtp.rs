@@ -1,7 +1,7 @@
 //! A fake SMTP submission server for the tests of the code mail (docs/SPEC.md section
 //! 38.7): on a free loopback port, with its own test certificate authority, STARTTLS (or
-//! TLS from the first byte), AUTH PLAIN and LOGIN, and one mail per session. It records
-//! each mail it takes, and the commands it saw before TLS. Synthetic values only.
+//! TLS from the first byte), AUTH PLAIN and LOGIN, `RSET`, and one mail per session. It
+//! records each mail it takes, and every command it saw. Synthetic values only.
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -69,6 +69,10 @@ pub struct FakeSmtp {
     commands: Arc<Mutex<Vec<String>>>,
     /// While true, every `RCPT TO` is refused with 451 (a server that fails for now).
     pub refuse: Arc<AtomicBool>,
+    /// While true, every AUTH is refused with 535 (a wrong password of the relay).
+    pub refuse_auth: Arc<AtomicBool>,
+    /// While true, every `MAIL FROM` is refused with 553 (a sender the account may not use).
+    pub refuse_from: Arc<AtomicBool>,
     pub sessions: Arc<AtomicUsize>,
     implicit: bool,
 }
@@ -129,11 +133,17 @@ pub fn start_with(implicit: bool, mode: Mode, cert_host: &str) -> FakeSmtp {
     let addr = listener.local_addr().expect("addr");
     let mails = Arc::new(Mutex::new(Vec::new()));
     let refuse = Arc::new(AtomicBool::new(false));
+    let refuse_auth = Arc::new(AtomicBool::new(false));
+    let refuse_from = Arc::new(AtomicBool::new(false));
     let sessions = Arc::new(AtomicUsize::new(0));
     let commands = Arc::new(Mutex::new(Vec::new()));
     let (thread_mails, thread_refuse, thread_sessions, thread_commands) = (
         mails.clone(),
-        refuse.clone(),
+        Refusals {
+            rcpt: refuse.clone(),
+            auth: refuse_auth.clone(),
+            from: refuse_from.clone(),
+        },
         sessions.clone(),
         commands.clone(),
     );
@@ -158,9 +168,19 @@ pub fn start_with(implicit: bool, mode: Mode, cert_host: &str) -> FakeSmtp {
         mails,
         commands,
         refuse,
+        refuse_auth,
+        refuse_from,
         sessions,
         implicit,
     }
+}
+
+/// The switches of a server's refusals.
+#[derive(Clone)]
+struct Refusals {
+    rcpt: Arc<AtomicBool>,
+    auth: Arc<AtomicBool>,
+    from: Arc<AtomicBool>,
 }
 
 impl FakeSmtp {
@@ -178,6 +198,14 @@ impl FakeSmtp {
     /// Every command line the server got so far.
     pub fn commands(&self) -> Vec<String> {
         self.commands.lock().unwrap().clone()
+    }
+
+    /// The checks of the session (a `RSET` after `MAIL FROM`, no recipient) so far.
+    pub fn probes(&self) -> usize {
+        self.commands()
+            .iter()
+            .filter(|line| line.ends_with("RSET"))
+            .count()
     }
 
     /// Every mail taken so far.
@@ -242,7 +270,7 @@ fn session(
     implicit: bool,
     mode: Mode,
     mails: &Mutex<Vec<Mail>>,
-    refuse: &AtomicBool,
+    refuse: &Refusals,
     commands: &Mutex<Vec<String>>,
 ) -> std::io::Result<()> {
     let wire = if implicit {
@@ -299,7 +327,12 @@ fn session(
             }
             let decoded = BASE64_STANDARD.decode(token).unwrap_or_default();
             let parts: Vec<&[u8]> = decoded.split(|byte| *byte == 0).collect();
-            if parts.len() == 3 && parts[1] == USER.as_bytes() && parts[2] == PASSWORD.as_bytes() {
+            if refuse.auth.load(Ordering::SeqCst) {
+                send(&mut reader, "535 bad credentials")?;
+            } else if parts.len() == 3
+                && parts[1] == USER.as_bytes()
+                && parts[2] == PASSWORD.as_bytes()
+            {
                 user = Some(USER.to_string());
                 send(&mut reader, "235 ok")?;
             } else {
@@ -310,6 +343,10 @@ fn session(
                 send(&mut reader, "530 authentication required")?;
                 continue;
             }
+            if refuse.from.load(Ordering::SeqCst) {
+                send(&mut reader, "553 sender not owned by the user")?;
+                continue;
+            }
             from = Some(address.trim_matches(['<', '>']).to_string());
             send(&mut reader, "250 ok")?;
         } else if let Some(address) = line.strip_prefix("RCPT TO:") {
@@ -317,7 +354,7 @@ fn session(
                 send(&mut reader, "550 no such user here")?;
                 continue;
             }
-            if refuse.load(Ordering::SeqCst) {
+            if refuse.rcpt.load(Ordering::SeqCst) {
                 send(&mut reader, "451 try later")?;
                 continue;
             }
@@ -345,6 +382,10 @@ fn session(
                 tls: secure,
             });
             send(&mut reader, "250 queued")?;
+        } else if upper == "RSET" {
+            from = None;
+            to = None;
+            send(&mut reader, "250 reset")?;
         } else if upper == "QUIT" {
             send(&mut reader, "221 bye")?;
             return Ok(());

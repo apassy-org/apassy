@@ -179,11 +179,15 @@ pub trait Plans: Send + Sync {
     }
 
     /// What the plan of `account` gives for sharing (connect-share-v1 section 7): a Team
-    /// member with an entitled plan has the Team limits; every other account, also one
-    /// without a plan, the standard ones.
+    /// member with an entitled plan has the Team limits; an account on another entitled
+    /// plan the standard ones; an account without an entitled plan the standard ones too,
+    /// and its code mails count in the share of the relay's mails for accounts without a
+    /// plan (`Sharing::NoPlan`).
     fn sharing(&self, directory: &Store, account: &str, now: u64) -> RelayResult<Sharing> {
         let view = self.plan(directory, account, now)?;
-        Ok(if view.entitled && view.plan.as_deref() == Some("team") {
+        Ok(if !view.entitled {
+            Sharing::NoPlan
+        } else if view.plan.as_deref() == Some("team") {
             Sharing::Team
         } else {
             Sharing::Standard
@@ -195,7 +199,10 @@ pub trait Plans: Send + Sync {
 /// the relay's settings (`config::LinkSettings`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sharing {
-    /// No plan, Personal, or Family.
+    /// No entitled plan: the standard limits, and its code mails count in the share of
+    /// the relay's mails for accounts without a plan.
+    NoPlan,
+    /// Personal or Family.
     Standard,
     /// A Team member.
     Team,

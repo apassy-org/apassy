@@ -72,6 +72,8 @@ export interface Env extends PushEnv {
   LINK_LIMITER?: CreateLimiter;
   /** Code requests of public links (`POST /v1/links/{id}/code`), per IPv4 address or IPv6 /64: a budget of their own. */
   LINK_CODE_LIMITER?: CreateLimiter;
+  /** Creates and revokes of public links (`POST /v1/account/links`, `DELETE /v1/account/links/{id}`), per IPv4 address or IPv6 /64. */
+  LINK_WRITE_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
   /** `relay` (or unset) before the cutover, `connect` after it. A var. */
@@ -129,6 +131,14 @@ const NODE_PATH = "/v1/tunnel/node";
 const LINK_PREFIX = "/v1/links/";
 const LINK_OPEN_PATH = /^\/v1\/links\/[^/]+\/open$/;
 const LINK_CODE_PATH = /^\/v1\/links\/[^/]+\/code$/;
+/** The account routes that write links (connect-share-v1 sections 4.1 and 4.3): a create and a revoke. */
+const ACCOUNT_LINKS_PATH = "/v1/account/links";
+const ACCOUNT_LINK_PATH = /^\/v1\/account\/links\/[^/]+$/;
+
+/** True for a create (`POST /v1/account/links`) or a revoke (`DELETE /v1/account/links/{id}`) of a link. */
+function isLinkWrite(method: string, path: string): boolean {
+  return (method === "POST" && path === ACCOUNT_LINKS_PATH) || (method === "DELETE" && ACCOUNT_LINK_PATH.test(path));
+}
 
 // A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
 // header with the token `upgrade`.
@@ -360,6 +370,9 @@ const HOSTED_RETIRED =
 // would drop paid events; its signature is the relay's check.
 function limiterFor(method: string, path: string, env: Env): CreateLimiter | undefined {
   if (method === "PUT" && path === SNAPSHOT_PATH) return env.SYNC_LIMITER;
+  // The creates and revokes of public links. The relay also limits the creates of each
+  // account in a UTC day.
+  if (isLinkWrite(method, path)) return env.LINK_WRITE_LIMITER;
   if (method !== "POST") return undefined;
   switch (path) {
     case STRIPE_WEBHOOK_PATH:
@@ -469,6 +482,8 @@ export default {
     // The public routes of a link: the opens and, in a budget of their own, the code requests.
     const isLinkOpen = request.method === "POST" && LINK_OPEN_PATH.test(url.pathname);
     const isLinkCode = request.method === "POST" && LINK_CODE_PATH.test(url.pathname);
+    // The creates and revokes of links, keyed the same way (limiterFor gives the binding).
+    const linkWrite = isLinkWrite(request.method, url.pathname);
     // The routes of shared vaults (connect-account-v1 section 16), every method, in budgets
     // of AUTH_LIMITER of their own: the reads of other accounts' lists (`POST
     // /v1/account/peers/lists`, `GET /v1/account/peers/acc_…`; key `peer-reads:` and the /64
@@ -481,7 +496,7 @@ export default {
       (request.method === "GET" && PEER_VIEW_PATH.test(url.pathname));
     const isPeers = url.pathname === ACCOUNT_LIST_PATH || url.pathname.startsWith(PEERS_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect || isAccount || isDial || isNode || isPeers || isLinkOpen || isLinkCode) {
+    if (limiter || isConnect || isAccount || isDial || isNode || isPeers || isLinkOpen || isLinkCode || linkWrite) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
@@ -499,11 +514,13 @@ export default {
                 ? [[env.LINK_LIMITER, key]]
                 : isLinkCode
                   ? [[env.LINK_CODE_LIMITER, key]]
-                  : isPeerRead
-                    ? [[env.AUTH_LIMITER, `peer-reads:${key}`]]
-                    : isPeers
-                      ? [[env.AUTH_LIMITER, `peers:${key}`]]
-                      : [[limiter, address]];
+                  : linkWrite
+                    ? [[env.LINK_WRITE_LIMITER, key]]
+                    : isPeerRead
+                      ? [[env.AUTH_LIMITER, `peer-reads:${key}`]]
+                      : isPeers
+                        ? [[env.AUTH_LIMITER, `peers:${key}`]]
+                        : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {
