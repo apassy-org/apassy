@@ -222,6 +222,8 @@ impl Vault {
                  ORDER BY position",
             )
             .map_err(|_| err(VaultErrorKind::Storage))?;
+        // The folders of every credential in one read of the tree.
+        let index = self.folder_index()?;
         let mut catalog = Vec::new();
         for row in rows {
             let (id, name, kind) = row.map_err(|_| err(VaultErrorKind::Storage))?;
@@ -241,10 +243,10 @@ impl Vault {
                 details.push((label, value));
             }
             let item_id = to_public_id(id)?;
-            let mut paths = self
-                .item_folders(item_id)?
-                .into_iter()
-                .map(|folder| self.folder_path(Some(&folder)).unwrap_or_default());
+            let mut paths = index
+                .folders(item_id)
+                .iter()
+                .map(|folder| index.path(folder));
             let folder = paths.next().unwrap_or_default();
             catalog.push(CatalogEntry {
                 item_id,

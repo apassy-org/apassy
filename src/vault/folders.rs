@@ -3,9 +3,15 @@
 //! A folder has a random UUID, a name, an optional parent, and a position among its
 //! siblings. A credential is in any number of folders (schema 35, ADR 0047 §2): each
 //! membership is an `item_folder` row, a child row of the credential, with the time it
-//! was added. A credential without a folder is at the top level. Its first folder (by
+//! was added and a version of its own. A membership that ends keeps its row with
+//! `removed_at`, so the removal reaches the other devices; the reads see only the rows
+//! without it. A credential without a folder is at the top level. Its first folder (by
 //! `added_at`, then UUID) is the one that a single-folder reader shows
 //! ([`Vault::item_folder`]). Folders nest to [`MAX_FOLDER_DEPTH`] levels.
+//!
+//! A membership of a folder that this device does not have (yet) stays as it is through
+//! every change here, a move and an Undo included: the folder can arrive with the next
+//! sync.
 //!
 //! [`Vault::set_item_folder`] and [`Vault::move_items_to_folder`] replace every folder of
 //! a credential; [`Vault::add_item_to_folder`] adds one, [`Vault::remove_item_from_folder`]
@@ -65,6 +71,28 @@ pub struct ItemFolderMove {
     from_all: Vec<(String, i64)>,
     epoch: [u8; 32],
     move_event: i64,
+}
+
+/// The live folders of every credential and the path of every folder, read once for a
+/// whole list (the agent catalog, the list of the iPhone) instead of once per credential.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderIndex {
+    items: BTreeMap<u64, Vec<String>>,
+    paths: BTreeMap<String, Vec<String>>,
+}
+
+impl FolderIndex {
+    /// The folders of a credential, first folder first, as [`Vault::item_folders`]
+    /// answers. Empty: the top level, also for an ID that is not a credential.
+    pub fn folders(&self, item_id: u64) -> &[String] {
+        self.items.get(&item_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The names from the top level to `folder`, as [`Vault::folder_path`] answers;
+    /// empty for a folder that is not here.
+    pub fn path(&self, folder: &str) -> Vec<String> {
+        self.paths.get(folder).cloned().unwrap_or_default()
+    }
 }
 
 /// The folders that are not deleted, with each parent resolved (see the module
@@ -285,7 +313,8 @@ fn stored_folders(conn: &Connection, item: i64) -> VaultResult<Vec<(String, i64)
     let storage = |_| err(VaultErrorKind::Storage);
     let mut stmt = conn
         .prepare(
-            "SELECT folder_uuid, added_at FROM item_folder WHERE item_id = ?1
+            "SELECT folder_uuid, added_at FROM item_folder
+             WHERE item_id = ?1 AND removed_at IS NULL
              ORDER BY added_at, folder_uuid",
         )
         .map_err(storage)?;
@@ -304,9 +333,13 @@ fn last_move_event(conn: &Connection, item: i64) -> VaultResult<Option<i64>> {
     .map_err(|_| err(VaultErrorKind::Storage))
 }
 
-/// Make `folders` (each with its `added_at`) the folders of the item, and record a
-/// "moved" event with the path of each folder that is not gone. Rows of folders that are
-/// gone go too. The caller checked the item and the folders.
+/// Make `folders` (each with its `added_at`) the live folders of the item that this
+/// device knows, and record a "moved" event with the path of each of its folders that is
+/// here. A membership of a folder that is not here (yet, or any more) stays as it is: a
+/// folder of another device can arrive with the next sync. A membership that ends keeps
+/// its row with `removed_at`, so the removal syncs (schema 35); a folder that the item was
+/// in before comes back on the same row. Each changed row gets this device and a version
+/// after its last one. The caller checked the item and the folders.
 fn set_folders(
     tx: &rusqlite::Transaction<'_>,
     tree: &Tree,
@@ -314,21 +347,58 @@ fn set_folders(
     folders: &[(String, i64)],
 ) -> VaultResult<()> {
     let storage = |_| err(VaultErrorKind::Storage);
-    tx.execute("DELETE FROM item_folder WHERE item_id = ?1", [item])
-        .map_err(storage)?;
-    for (folder, added_at) in folders {
-        tx.execute(
-            "INSERT INTO item_folder (item_id, folder_uuid, added_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(item_id, folder_uuid) DO NOTHING",
-            (item, folder, added_at),
-        )
-        .map_err(storage)?;
+    let rows: Vec<(String, i64, bool)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT folder_uuid, updated_at, removed_at IS NOT NULL FROM item_folder
+                 WHERE item_id = ?1",
+            )
+            .map_err(storage)?;
+        stmt.query_map([item], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(storage)?
+            .collect::<Result<_, _>>()
+            .map_err(storage)?
+    };
+    let (now, device) = version(tx)?;
+    let at = |last: i64| now.max(last.saturating_add(1));
+    let wanted = |uuid: &str| folders.iter().any(|(folder, _)| folder == uuid);
+    for (folder, last, removed) in &rows {
+        if !removed && !wanted(folder) && tree.folders.contains_key(folder) {
+            let at = at(*last);
+            tx.execute(
+                "UPDATE item_folder SET removed_at = ?1, updated_at = ?1, updated_by = ?2
+                 WHERE item_id = ?3 AND folder_uuid = ?4",
+                (at, &device, item, folder),
+            )
+            .map_err(storage)?;
+        }
     }
-    let mut ordered: Vec<&(String, i64)> = folders.iter().collect();
-    ordered.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
-    let detail = ordered
+    for (folder, added_at) in folders {
+        match rows.iter().find(|(uuid, _, _)| uuid == folder) {
+            Some((_, _, false)) => {}
+            Some((_, last, true)) => {
+                tx.execute(
+                    "UPDATE item_folder SET removed_at = NULL, added_at = ?1, updated_at = ?2,
+                         updated_by = ?3
+                     WHERE item_id = ?4 AND folder_uuid = ?5",
+                    (added_at, at(*last), &device, item, folder),
+                )
+                .map_err(storage)?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO item_folder
+                         (item_id, folder_uuid, added_at, updated_at, updated_by)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (item, folder, added_at, now, &device),
+                )
+                .map_err(storage)?;
+            }
+        }
+    }
+    let detail = tree
+        .resolve(stored_folders(tx, item)?)
         .iter()
-        .filter(|(uuid, _)| tree.folders.contains_key(uuid))
         .map(|(uuid, _)| tree.path(uuid).join(PATH_SEPARATOR))
         .collect::<Vec<_>>()
         .join(FOLDERS_SEPARATOR);
@@ -502,7 +572,10 @@ impl Vault {
         let parent = tree.get(uuid)?.parent.clone();
         let items: Vec<i64> = {
             let mut stmt = tx
-                .prepare("SELECT item_id FROM item_folder WHERE folder_uuid = ?1 ORDER BY item_id")
+                .prepare(
+                    "SELECT item_id FROM item_folder
+                     WHERE folder_uuid = ?1 AND removed_at IS NULL ORDER BY item_id",
+                )
                 .map_err(storage)?;
             stmt.query_map([uuid], |row| row.get(0))
                 .map_err(storage)?
@@ -556,6 +629,38 @@ impl Vault {
     /// the top level, also when its folders are gone. `NotFound`: no such credential.
     pub fn item_folder(&self, item_id: u64) -> VaultResult<Option<String>> {
         Ok(self.item_folders(item_id)?.into_iter().next())
+    }
+
+    /// The live folders of every credential and the path of every folder, in one read of
+    /// the folder tree ([`FolderIndex`]).
+    pub fn folder_index(&self) -> VaultResult<FolderIndex> {
+        let storage = |_| err(VaultErrorKind::Storage);
+        let conn = self.conn_ref()?;
+        let tree = Tree::load(conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT item_id, folder_uuid FROM item_folder WHERE removed_at IS NULL
+                 ORDER BY item_id, added_at, folder_uuid",
+            )
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage)?;
+        let mut items: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for row in rows {
+            let (id, folder) = row.map_err(storage)?;
+            if tree.folders.contains_key(&folder) {
+                items.entry(to_public_id(id)?).or_default().push(folder);
+            }
+        }
+        let paths = tree
+            .folders
+            .keys()
+            .map(|uuid| (uuid.clone(), tree.path(uuid)))
+            .collect();
+        Ok(FolderIndex { items, paths })
     }
 
     /// Every folder of a credential, first folder first (by the time it was added, then
@@ -825,7 +930,8 @@ impl Vault {
         let mut stmt = conn
             .prepare(
                 "SELECT i.id, p.folder_uuid FROM item i
-                 LEFT JOIN item_folder p ON p.item_id = i.id ORDER BY i.id",
+                 LEFT JOIN item_folder p ON p.item_id = i.id AND p.removed_at IS NULL
+                 ORDER BY i.id",
             )
             .map_err(storage)?;
         let rows = stmt
@@ -1133,7 +1239,8 @@ mod tests {
         // two concurrent moves made a cycle.
         let conn = v.conn_ref().unwrap();
         conn.execute(
-            "INSERT INTO item_folder (item_id, folder_uuid) VALUES (?1, 'ffff')",
+            "INSERT INTO item_folder (item_id, folder_uuid, added_at, updated_at, updated_by)
+             VALUES (?1, 'ffff', 1, 1, 'other')",
             [a as i64],
         )
         .unwrap();
@@ -1325,29 +1432,152 @@ mod tests {
         );
     }
 
+    /// The live rows and the tombstones of an item: (folder, removed).
+    fn rows(v: &Vault, item: u64) -> Vec<(String, bool)> {
+        v.conn_ref()
+            .unwrap()
+            .prepare(
+                "SELECT folder_uuid, removed_at IS NOT NULL FROM item_folder
+                 WHERE item_id = ?1 ORDER BY folder_uuid",
+            )
+            .unwrap()
+            .query_map([i64::try_from(item).unwrap()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
-    fn a_row_of_a_folder_that_is_not_here_stays_when_another_folder_is_added() {
+    fn a_row_of_a_folder_that_is_not_here_stays_through_every_change() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut v = vault(&dir);
         let a = add(&mut v, "Alpha");
         let work = v.create_folder(None, "Work").unwrap().uuid;
+        let home = v.create_folder(None, "Home").unwrap().uuid;
+        // A membership of a folder that only another device has, as after a merge.
         v.conn_ref()
             .unwrap()
             .execute(
-                "INSERT INTO item_folder (item_id, folder_uuid, added_at) VALUES (?1, 'ffff', 5)",
+                "INSERT INTO item_folder (item_id, folder_uuid, added_at, updated_at, updated_by)
+                 VALUES (?1, 'ffff', 5, 5, 'other')",
                 [i64::try_from(a).unwrap()],
             )
             .unwrap();
+        let other = ("ffff".to_owned(), false);
         assert!(v.item_folders(a).unwrap().is_empty());
         v.add_item_to_folder(a, &work).unwrap();
         assert_eq!(v.item_folders(a).unwrap(), std::slice::from_ref(&work));
-        let rows: i64 = v
-            .conn_ref()
-            .unwrap()
-            .query_row("SELECT count(*) FROM item_folder", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(rows, 2, "the folder of the other Mac can still arrive");
+        assert!(rows(&v, a).contains(&other));
         let events = v.item_events(a, MAX_ITEM_EVENTS).unwrap();
         assert_eq!(events[0].detail, "Work");
+        // `set_item_folder` replaces the folders here and keeps that one.
+        v.set_item_folder(a, Some(&home)).unwrap();
+        assert_eq!(v.item_folders(a).unwrap(), std::slice::from_ref(&home));
+        assert!(rows(&v, a).contains(&other));
+        v.set_item_folder(a, None).unwrap();
+        assert!(v.item_folders(a).unwrap().is_empty());
+        assert!(rows(&v, a).contains(&other));
+        // A batch move and its Undo keep it too.
+        v.add_item_to_folder(a, &work).unwrap();
+        let moves = v.move_items_to_folder(&[a], Some(&home)).unwrap();
+        assert!(rows(&v, a).contains(&other));
+        v.undo_item_folder_moves(&moves).unwrap();
+        assert_eq!(v.item_folders(a).unwrap(), std::slice::from_ref(&work));
+        assert!(rows(&v, a).contains(&other));
+    }
+
+    #[test]
+    fn a_removed_membership_keeps_a_tombstone_and_comes_back_on_its_row() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut v = vault(&dir);
+        let a = add(&mut v, "Alpha");
+        let work = v.create_folder(None, "Work").unwrap().uuid;
+        let home = v.create_folder(None, "Home").unwrap().uuid;
+        v.add_item_to_folder(a, &work).unwrap();
+        v.add_item_to_folder(a, &home).unwrap();
+        v.remove_item_from_folder(a, &work).unwrap();
+        let mut expected = vec![(work.clone(), true), (home.clone(), false)];
+        expected.sort();
+        assert_eq!(rows(&v, a), expected);
+        assert!(v.items_in_folder(Some(&work), false).unwrap().is_empty());
+        v.add_item_to_folder(a, &work).unwrap();
+        assert_eq!(
+            rows(&v, a).iter().filter(|(_, removed)| *removed).count(),
+            0
+        );
+        assert_eq!(rows(&v, a).len(), 2, "the same row again");
+        // The version of a row grows with each change, also with a clock that stepped
+        // back.
+        let version = |v: &Vault| -> i64 {
+            v.conn_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT updated_at FROM item_folder WHERE folder_uuid = ?1",
+                    [&work],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        v.conn_ref()
+            .unwrap()
+            .execute(
+                "UPDATE item_folder SET updated_at = 9000000000000 WHERE folder_uuid = ?1",
+                [&work],
+            )
+            .unwrap();
+        v.remove_item_from_folder(a, &work).unwrap();
+        assert_eq!(version(&v), 9_000_000_000_001);
+    }
+
+    #[test]
+    fn a_folder_change_ends_the_bouncer_scopes_of_the_credential() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut v = vault(&dir);
+        let a = add(&mut v, "Alpha");
+        let b = add(&mut v, "Beta");
+        let work = v.create_folder(None, "Work").unwrap().uuid;
+        let scope = |v: &Vault, item: u64| {
+            v.conn_ref()
+                .unwrap()
+                .execute(
+                    "INSERT INTO bouncer_scope
+                         (agent_id, item_id, item_uuid, project_key, project_label, action_kind,
+                          revision, hosts, answered_on)
+                     VALUES (1, ?1, 'uuid', ?2, 'Project', 'read', 1, '[]', 'mac')",
+                    (i64::try_from(item).unwrap(), format!("project-{item}")),
+                )
+                .unwrap();
+        };
+        let scopes = |v: &Vault, item: u64| -> i64 {
+            v.conn_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM bouncer_scope WHERE item_id = ?1",
+                    [i64::try_from(item).unwrap()],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        for change in 0..3 {
+            scope(&v, a);
+            scope(&v, b);
+            match change {
+                0 => v.add_item_to_folder(a, &work).unwrap(),
+                1 => v.move_item(a, Some(&work), None).unwrap(),
+                _ => {
+                    v.add_item_to_folder(a, &work).unwrap();
+                    scope(&v, a);
+                    v.remove_item_from_folder(a, &work).unwrap();
+                }
+            }
+            assert_eq!(scopes(&v, a), 0, "change {change}");
+            assert_eq!(scopes(&v, b), 1, "the other credential keeps its scope");
+            v.conn_ref()
+                .unwrap()
+                .execute("DELETE FROM bouncer_scope", [])
+                .unwrap();
+        }
     }
 }

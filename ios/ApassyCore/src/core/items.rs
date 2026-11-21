@@ -250,6 +250,8 @@ pub struct Context {
     times: BTreeMap<u64, apassy::vault::ItemTimes>,
     conflicts: BTreeMap<u64, Option<u64>>,
     passkeys: BTreeMap<u64, apassy::vault::passkey::PasskeyInfo>,
+    /// The folders of every item, in one read of the folder tree.
+    folders: apassy::vault::FolderIndex,
 }
 
 impl Context {
@@ -262,6 +264,7 @@ impl Context {
                 .into_iter()
                 .map(|info| (info.item_id, info))
                 .collect(),
+            folders: vault.folder_index()?,
         })
     }
 }
@@ -345,7 +348,7 @@ fn row_of(vault: &Vault, context: &Context, details: &ItemDetails) -> CoreResult
         ),
         _ => false,
     };
-    let folders = vault.item_folders(id)?;
+    let folders = context.folders.folders(id).to_vec();
     Ok(Row {
         id,
         revision: details.summary.revision,
@@ -425,7 +428,11 @@ pub fn detail(vault: &Vault, id: u64) -> CoreResult<Detail> {
             custom: custom_detail_label(&field.name).is_some(),
         });
     }
-    let folder_path = vault.folder_path(row.folder.as_deref())?;
+    let folder_path = row
+        .folder
+        .as_deref()
+        .map(|folder| context.folders.path(folder))
+        .unwrap_or_default();
     let declaration = vault.declaration(id)?;
     let environment_source = match declaration {
         Some(_) => Some(vault.declaration_sources(id)?.environment.as_str()),
