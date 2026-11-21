@@ -49,8 +49,8 @@ use crate::server::hub::Hub;
 use crate::server::questions::{self, Qid};
 use crate::server::sync::{PushRequest, SyncError};
 use crate::server::{
-    Core, account, admin, approvals, billing_store, connect, decide, devices, host, joins, mcp,
-    oauth, push, sync, tunnel_routes,
+    Core, account, admin, approvals, billing_store, connect, decide, devices, host, joins, links,
+    mail, mcp, oauth, push, sync, tunnel_routes,
 };
 use crate::session::SessionSource;
 
@@ -834,6 +834,8 @@ pub fn retired_in_connect_mode(method: &str, path: &str) -> bool {
     if account::is_account_path(path)
         || billing_store::is_billing_path(path)
         || tunnel_routes::is_tunnel_path(path)
+        || links::is_public_path(path)
+        || links::viewer_file(path).is_some()
     {
         return false;
     }
@@ -1311,6 +1313,18 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if billing_maintenance.as_ref().is_some_and(Result::is_err) {
         eprintln!("apassy-relay: the billing maintenance thread cannot start");
     }
+    // The code mail of public links (docs/SPEC.md section 38.7): a thread of its own, so a
+    // slow SMTP server never holds a request or the maintenance pass.
+    let mail_sender = (scope == Scope::Node && hub.links().is_some_and(|links| links.mail_on()))
+        .then(|| {
+            let (hub, stop) = (hub.clone(), stop.clone());
+            std::thread::Builder::new()
+                .name("relay-mail".to_string())
+                .spawn(move || mail::run(hub, stop))
+        });
+    if mail_sender.as_ref().is_some_and(Result::is_err) {
+        eprintln!("apassy-relay: the mail thread cannot start");
+    }
     let mut probed = Instant::now();
     let mut failed_probes = 0;
     let mut outcome = Ok(());
@@ -1438,6 +1452,12 @@ pub fn serve(serving: Serving) -> RelayResult<()> {
     if let Some(Ok(handle)) = billing_maintenance {
         let _ = handle.join();
     }
+    if let Some(Ok(handle)) = mail_sender {
+        if let Some(links) = hub.links() {
+            links.wake();
+        }
+        let _ = handle.join();
+    }
     outcome
 }
 
@@ -1488,6 +1508,11 @@ pub fn maintain_teams(hub: &Hub, now: u64) {
     // account audit rows (docs/SPEC.md section 33).
     if hub.config.connect.accounts {
         account::maintain(hub, now);
+    }
+    // Public links: expired links and codes, old mails, and the links of deleted accounts
+    // (docs/SPEC.md section 38).
+    if let Some(links) = hub.links() {
+        links.maintain(&hub.directory.store, now);
     }
 }
 
@@ -1645,6 +1670,22 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
         Some((path, query)) => (path.to_string(), query.to_string()),
         None => (url.clone(), String::new()),
     };
+    // A relay that serves public links serves no service worker script, on any path
+    // (connect-share-v1 section 5): a worker registered on this origin could see every
+    // later open of a link. A browser names such a request with `Service-Worker: script`.
+    if hub.config.connect.accounts
+        && header_value(&request, "Service-Worker")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("script"))
+    {
+        request.abort_input();
+        respond_json(
+            request,
+            400,
+            &RelayError::invalid("This relay serves no service worker.").to_envelope(),
+            true,
+        );
+        return;
+    }
     // Only the two tunnel routes take an `Upgrade` (docs/SPEC.md section 35.6). Every
     // other request that asks for one is 400 before any handler sees it or a body is read,
     // on every listener. (The transport refuses an upgrade with a body or of another
@@ -1763,6 +1804,18 @@ fn handle(hub: &Hub, proxy: Option<&Proxy>, listener: &Listener, mut request: Re
     // the paths fall through to the route table and are 404.
     if hub.config.connect.accounts && account::is_account_path(&path) {
         respond_account(hub, listener, counted, request, &method, &path, now);
+        return;
+    }
+    // Public links (connect-share-v1): the public routes and the viewer page, only where
+    // the account routes are.
+    if hub.config.connect.accounts && links::is_public_path(&path) {
+        respond_public_link(hub, request, &method, &path, now);
+        return;
+    }
+    if hub.config.connect.accounts
+        && let Some((content_type, body)) = links::viewer_file(&path)
+    {
+        respond_viewer(request, &method, content_type, body);
         return;
     }
     // Connect billing (connect-billing-v1): the public plans and Stripe's webhook, only
@@ -2381,6 +2434,98 @@ fn respond_account(
         Ok(result) => respond_ok(request, result),
         Err(error) => respond_error(request, &error),
     }
+}
+
+/// `Referrer-Policy: no-referrer`, on every answer of the public link routes.
+fn no_referrer_header() -> Header {
+    Header::from_bytes(&b"Referrer-Policy"[..], &b"no-referrer"[..]).expect("static header")
+}
+
+/// `POST /v1/links/{link_id}/open` and `…/code` (connect-share-v1 sections 4.4 and 4.5):
+/// edge routes, so an `Authorization` header is 400. Every answer has `no-store` and
+/// `no-referrer`; a refusal of the code route may carry its `Retry-After`.
+fn respond_public_link(hub: &Hub, mut request: Request, method: &str, path: &str, now: u64) {
+    let refuse = |request: Request, error: &RelayError, retry_after: Option<u64>| {
+        let mut headers = vec![no_referrer_header()];
+        if let Some(seconds) = retry_after
+            && let Ok(header) =
+                Header::from_bytes(&b"Retry-After"[..], seconds.to_string().as_bytes())
+        {
+            headers.push(header);
+        }
+        let close = error.code == codes::PAYLOAD_TOO_LARGE;
+        respond_json_with(
+            request,
+            error.status(),
+            &error.to_envelope(),
+            close,
+            headers,
+        );
+    };
+    let endpoint = match links::public_route(method, path) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            request.abort_input();
+            refuse(request, &error, None);
+            return;
+        }
+    };
+    if header_value(&request, "Authorization").is_some() {
+        request.abort_input();
+        refuse(
+            request,
+            &RelayError::invalid("A public link route takes no Authorization."),
+            None,
+        );
+        return;
+    }
+    let body = match read_body(&mut request, method) {
+        Ok(body) => body,
+        Err(error) => {
+            refuse(request, &error, None);
+            return;
+        }
+    };
+    let answer = match &endpoint {
+        links::PublicLinkEndpoint::Open(link_id) => {
+            links::open(hub, link_id, &body, now).map_err(links::CodeRefusal::from)
+        }
+        links::PublicLinkEndpoint::Code(link_id) => links::request_code(hub, link_id, &body, now),
+    };
+    match answer {
+        Ok(result) => respond_json_with(
+            request,
+            200,
+            &Envelope::success(result),
+            false,
+            vec![no_referrer_header()],
+        ),
+        Err(refusal) => refuse(request, &refusal.error, refusal.retry_after),
+    }
+}
+
+/// The viewer of public links (`/s`, `/share.js`, `/share.css`, connect-share-v1 section
+/// 5) for a relay without the edge Worker: the same files and headers. `GET` and `HEAD`
+/// only.
+fn respond_viewer(request: Request, method: &str, content_type: &str, body: &'static str) {
+    request.abort_input();
+    let (status, content_type, body) = if method == "GET" || method == "HEAD" {
+        (200, content_type, body)
+    } else {
+        (405, "text/plain; charset=utf-8", "method not allowed\n")
+    };
+    let mut response = Response::from_data(body.as_bytes().to_vec())
+        .with_status_code(status)
+        .with_chunked_threshold(usize::MAX);
+    if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes()) {
+        response.add_header(header);
+    }
+    for (name, value) in links::VIEWER_HEADERS {
+        if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+            response.add_header(header);
+        }
+    }
+    let _ = request.respond(response);
 }
 
 /// `GET /v1/plans` (public: no `Authorization`, 400 with one) and `POST

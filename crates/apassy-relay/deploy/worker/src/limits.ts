@@ -13,3 +13,5 @@ export const MAX_JSON_LENGTH = 64 * 1024 + LENGTH_MARGIN;
 export const MAX_FEED_LENGTH = 352 * 1024;
 /** The largest Stripe webhook body (connect-billing-v1 section 7), the same as the relay's limit. Only for `POST /v1/stripe/webhook`. */
 export const MAX_STRIPE_WEBHOOK_LENGTH = 256 * 1024;
+/** The largest body of the public link routes (`POST /v1/links/{id}/open` and `…/code`, connect-share-v1 section 4): their bodies are a few hundred bytes. */
+export const MAX_LINK_LENGTH = 4 * 1024;

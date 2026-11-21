@@ -2021,6 +2021,15 @@ fn finish(
     left.sort();
     left.dedup();
     report.left = left;
+    // The public links of the relay (`links.db`, docs/SPEC.md section 38) are keyed with
+    // the master key, which `connect` mode does not have, and no backup keeps them: they
+    // go, so Connect starts with an empty file of its own.
+    remove_if_there(&config.links_path())?;
+    remove_if_there(
+        &config
+            .data_dir
+            .join(format!("{}-journal", crate::config::LINKS_FILE)),
+    )?;
     // Step 6: the record, and last the file with the keys of the team files, once it is
     // proven to be the relay.db that the backup holds.
     check_keyed_copy(config, &report)?;

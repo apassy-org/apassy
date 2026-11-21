@@ -30,7 +30,7 @@
 // the length limits live in limits.ts. Type exports are fine: they are erased.
 
 import { handleInternal, type PushEnv } from "./apns.ts";
-import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "./limits.ts";
+import { MAX_FEED_LENGTH, MAX_JSON_LENGTH, MAX_LINK_LENGTH, MAX_PROXY_LENGTH, MAX_SNAPSHOT_LENGTH, MAX_STRIPE_WEBHOOK_LENGTH } from "./limits.ts";
 
 /** A Workers VPC service binding: a tunnel from the relay's host, no public origin. */
 export interface RelayService {
@@ -68,6 +68,10 @@ export interface Env extends PushEnv {
   TUNNEL_LIMITER?: CreateLimiter;
   /** Node WebSockets (`GET /v1/tunnel/node`, connect-tunnel-v1), per IPv4 address or IPv6 /64: a budget of their own, apart from the dials. */
   TUNNEL_NODE_LIMITER?: CreateLimiter;
+  /** Opens of public links (`POST /v1/links/{id}/open`, connect-share-v1), per IPv4 address or IPv6 /64. */
+  LINK_LIMITER?: CreateLimiter;
+  /** Code requests of public links (`POST /v1/links/{id}/code`), per IPv4 address or IPv6 /64: a budget of their own. */
+  LINK_CODE_LIMITER?: CreateLimiter;
   /** Static files served without the relay or its edge secret. */
   ASSETS?: AssetService;
   /** `relay` (or unset) before the cutover, `connect` after it. A var. */
@@ -121,6 +125,10 @@ const PEER_LISTS_PATH = "/v1/account/peers/lists";
 const PEER_VIEW_PATH = /^\/v1\/account\/peers\/acc_[a-z2-7]{10}$/;
 /** The WebSocket of a node (connect-tunnel-v1 section 3.2), limited apart from the dials. */
 const NODE_PATH = "/v1/tunnel/node";
+/** The public routes of a link (connect-share-v1 section 4): any id, so a made-up one is limited too. */
+const LINK_PREFIX = "/v1/links/";
+const LINK_OPEN_PATH = /^\/v1\/links\/[^/]+\/open$/;
+const LINK_CODE_PATH = /^\/v1\/links\/[^/]+\/code$/;
 
 // A request that asks to upgrade its connection: an `Upgrade` header, or a `Connection`
 // header with the token `upgrade`.
@@ -143,6 +151,13 @@ function jsonError(status: number, code: string, message: string, extra: Record<
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store", ...extra },
   });
+}
+
+// A browser asks for a service worker script with `Service-Worker: script`. This origin
+// serves the viewer of public links, so it never answers one (connect-share-v1 section 5):
+// a script registered here could see every later open of a link.
+function serviceWorkerRequest(request: Request): boolean {
+  return (request.headers.get("service-worker") ?? "").trim().toLowerCase() === "script";
 }
 
 // tiny_http reads and drops the rest of a declared body after an early answer, on any
@@ -186,6 +201,10 @@ function lengthError(request: Request, path: string, connectMode: boolean): Resp
   } else if (webhook) {
     if (Number(length) > MAX_STRIPE_WEBHOOK_LENGTH) {
       return jsonError(413, "payload_too_large", "The webhook body is larger than 256 KiB.");
+    }
+  } else if (path.startsWith(LINK_PREFIX)) {
+    if (Number(length) > MAX_LINK_LENGTH) {
+      return jsonError(413, "payload_too_large", "The body is larger than 4 KiB.");
     }
   } else if (path.startsWith(PROXY_PREFIX) && !connectMode) {
     if (Number(length) > MAX_PROXY_LENGTH) {
@@ -392,6 +411,10 @@ export default {
         return handleInternal(request, env);
       }
     }
+    // No service worker script, on any path, before the static files and the relay.
+    if (serviceWorkerRequest(request)) {
+      return jsonError(400, "invalid_request", "This origin serves no service worker.");
+    }
     // The relay refuses an upgrade on every other route too; it never reaches it from here.
     if (wantsUpgrade(request)) {
       const tunnel = request.method === "GET" && rawPath === url.pathname && url.pathname.startsWith(TUNNEL_PREFIX);
@@ -454,6 +477,9 @@ export default {
     // and the node still connects.
     const isDial = request.method === "GET" && url.pathname.startsWith(DIAL_PREFIX);
     const isNode = request.method === "GET" && url.pathname === NODE_PATH;
+    // The public routes of a link: the opens and, in a budget of their own, the code requests.
+    const isLinkOpen = request.method === "POST" && LINK_OPEN_PATH.test(url.pathname);
+    const isLinkCode = request.method === "POST" && LINK_CODE_PATH.test(url.pathname);
     // The routes of shared vaults (connect-account-v1 section 16), every method, in budgets
     // of AUTH_LIMITER of their own: the reads of other accounts' lists (`POST
     // /v1/account/peers/lists`, `GET /v1/account/peers/acc_…`; key `peer-reads:` and the /64
@@ -466,24 +492,29 @@ export default {
       (request.method === "GET" && PEER_VIEW_PATH.test(url.pathname));
     const isPeers = url.pathname === ACCOUNT_LIST_PATH || url.pathname.startsWith(PEERS_PREFIX);
     const limiter = limiterFor(request.method, url.pathname, env);
-    if (limiter || isConnect || isAccount || isDial || isNode || isPeers) {
+    if (limiter || isConnect || isAccount || isDial || isNode || isPeers || isLinkOpen || isLinkCode) {
       // Fail open if a binding is missing or fails: the relay itself checks codes, keys, and
       // signatures; this limit is a guard against floods, not an authorization check.
       // For Connect the relay also caps the teams of a day for everyone.
       const address = request.headers.get("cf-connecting-ip") ?? "unknown";
+      const key = connectKey(address);
       const guards: [CreateLimiter | undefined, string][] = isConnect
-        ? [[env.CONNECT_LIMITER, connectKey(address)], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
+        ? [[env.CONNECT_LIMITER, key], [env.CONNECT_PREFIX_LIMITER, connectPrefix(address)]]
         : isAccount
-          ? [[env.ACCOUNT_LIMITER, connectKey(address)]]
+          ? [[env.ACCOUNT_LIMITER, key]]
           : isDial
-            ? [[env.TUNNEL_LIMITER, connectKey(address)]]
+            ? [[env.TUNNEL_LIMITER, key]]
             : isNode
-              ? [[env.TUNNEL_NODE_LIMITER, connectKey(address)]]
-              : isPeerRead
-                ? [[env.AUTH_LIMITER, `peer-reads:${connectKey(address)}`]]
-                : isPeers
-                  ? [[env.AUTH_LIMITER, `peers:${connectKey(address)}`]]
-                  : [[limiter, address]];
+              ? [[env.TUNNEL_NODE_LIMITER, key]]
+              : isLinkOpen
+                ? [[env.LINK_LIMITER, key]]
+                : isLinkCode
+                  ? [[env.LINK_CODE_LIMITER, key]]
+                  : isPeerRead
+                    ? [[env.AUTH_LIMITER, `peer-reads:${key}`]]
+                    : isPeers
+                      ? [[env.AUTH_LIMITER, `peers:${key}`]]
+                      : [[limiter, address]];
       for (const [guard, key] of guards) {
         if (!guard) continue;
         try {

@@ -2174,3 +2174,42 @@ state). Stripe does not send again an event that the relay already answered: res
 events of the subscriptions that changed since the backup from the Stripe dashboard
 (Developers › Events › the event › Resend), or reconcile them by hand. The Worker goes back
 with `RELAY_MODE=relay`.
+
+## 30. Public links (`links.db`) and the code mail
+
+Public links (ADR 0047 release A, connect-share-v1, docs/SPEC.md section 38) live in `links.db` beside `relay.db`, made at the first start with the account routes: plain in `connect` mode, keyed with the master key otherwise.
+
+### 30.1 Backups
+
+- `links.db` is in no backup: not in `admin backup`, not in the stopped backup, not in the backup check of a cutover. This is on purpose: no restore brings back a link that its owner revoked or that expired.
+- A restore of a backup leaves `links.db` as it is. To start with no links, stop the relay and remove `links.db` (and `links.db-journal`); the owners' devices still list their links and show them as gone.
+- A start that refuses `links.db` (another form, such as a keyed file after a change to `connect` mode, or another version) says so; removing the file is the fix. Live links are then gone.
+
+### 30.2 The code mail
+
+Links for "Only these e-mail addresses" need a mail sender. Without `APASSY_CONNECT_SMTP_HOST` the relay makes no such link and answers their code requests with 503 `mail_unavailable`; links for anyone work.
+
+| Setting | Value on the hosted relay |
+| --- | --- |
+| `APASSY_CONNECT_SMTP_HOST` | The submission host of the mail server; its certificate must name it |
+| `APASSY_CONNECT_SMTP_PORT` | `587` (STARTTLS) or `465` (TLS) |
+| `APASSY_CONNECT_SMTP_USER` | The submission account of the sender |
+| `APASSY_CONNECT_SMTP_PASSWORD_FILE` | A file with its password (mode 0600, mounted read-only) |
+| `APASSY_CONNECT_SMTP_FROM` | `connect@apassy.wyderka.cc` |
+| `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN`, `_PER_DAY`, `_PER_ADDRESS`, `_PER_LINK` | The defaults (50, 200, 500, 500, 3, 20) unless the owner decides otherwise |
+
+The sending domain needs its records before the first mail: SPF that names the mail server (or its relay), a DKIM key that the server signs with, and a DMARC policy. The mail server must allow the account to send as the `From` address.
+
+### 30.3 What to watch
+
+- `a code mail was not taken by the SMTP server at step …` in the relay log: the step and the reply code tell where it failed (`connect`, `tls`, `auth (535)`, `rcpt to (550)`). The log never names the address. A mail that is not taken within an hour is deleted.
+- `the mail sender cannot start`: the system roots or the host name; no code mail is sent until a restart with a fix.
+- Many 503 `mail_unavailable` answers: a daily cap was reached (`APASSY_CONNECT_MAIL_PER_DAY` for the relay, `APASSY_CONNECT_MAIL_PER_ACCOUNT*` for one account); they end with the UTC day or a restart.
+
+### 30.4 Settings of a relay that you run yourself
+
+`APASSY_RELAY_ACCOUNT_PLANS=open` gives every account a plan without Stripe and no plan limit on links. It needs `APASSY_RELAY_CONNECT_ACCOUNTS=1`, and the relay refuses it beside the Stripe files and in `connect` mode. A link needs an `https:` public URL (`APASSY_RELAY_PUBLIC_URL`).
+
+### 30.5 Rollback
+
+An image before public links never opens `links.db` and leaves it in place; its routes are 404 there. Going forward again keeps the links that did not expire meanwhile. The edge Worker's `LINK_LIMITER` and `LINK_CODE_LIMITER` bindings are unused by an older Worker.
