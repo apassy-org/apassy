@@ -37,6 +37,7 @@ pub mod overview;
 pub mod passkey;
 mod policy;
 pub mod providers;
+mod public_link;
 pub mod questions;
 mod relay_device;
 mod run_bindings;
@@ -136,6 +137,10 @@ pub use passkey::{
     PasskeyPrfInput, PasskeyPrfOutput, PasskeyPrfSecrets, PasskeyTarget,
 };
 pub use policy::{DeclarationSource, DeclarationSources};
+#[cfg(test)]
+pub(crate) use public_link::public_link_for_test;
+pub use public_link::{LinkRoot, MAX_LINK_ADDRESSES, MAX_LINK_NAME_BYTES, PublicLink};
+pub(crate) use public_link::{NewPublicLink, valid_link_origin};
 pub use questions::{QUESTION_KEY_NAME, QuestionKey, question_key_id};
 pub use relay_device::RelayDevice;
 pub use run_bindings::{

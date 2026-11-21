@@ -1347,6 +1347,15 @@ impl ShareUi {
         self.stores.iter().any(|store| store.team_id == team_id)
     }
 
+    /// Connect's names of the people of the shared vaults, by account id: "Made by
+    /// <name>" of a public link that another account made.
+    pub(crate) fn people_names(&self) -> BTreeMap<String, String> {
+        self.status
+            .as_ref()
+            .map(ShareStatus::hints)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn is_shared(&self, team_id: &str) -> bool {
         self.status
             .as_ref()

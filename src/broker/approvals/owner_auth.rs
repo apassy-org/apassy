@@ -475,6 +475,22 @@ pub enum OwnerAction {
         public_key: Vec<u8>,
         words: String,
     },
+    /// Make a public link (connect-share-v1, ADR 0047 section 4): a sealed snapshot at
+    /// Apassy Connect that anyone with the link, or only the listed e-mail addresses,
+    /// can open until `expires_at`. The proof names the account, the link id of the
+    /// sealed body, the name of the secret or folder, every secret of the snapshot, the
+    /// expiry, "show once", and the addresses (empty: anyone with the link). Only a fresh
+    /// check on this computer makes it ([`OwnerAction::needs_fresh_local_check`]). A
+    /// revoke needs no check.
+    CreatePublicLink {
+        account_id: String,
+        link_id: String,
+        name: String,
+        secrets: Vec<String>,
+        expires_at: u64,
+        one_time: bool,
+        addresses: Vec<String>,
+    },
     /// Revoke a device of the Apassy Connect account (section 7.4), also this Mac
     /// itself ("Forget this device"). The proof names the account, the device, the name
     /// that the signed device list holds for its key, and the short fingerprint of that
@@ -898,6 +914,7 @@ impl OwnerAction {
             Self::ChangeShortLivedSettings { .. } => "Change temporary credentials",
             Self::ConfirmConnectDevice { .. } => "Add a device to Apassy Connect",
             Self::RevokeConnectDevice { .. } => "Remove a device from Apassy Connect",
+            Self::CreatePublicLink { .. } => "Make a public link",
             Self::DeleteConnectAccount { .. } => "Delete the Apassy Connect account",
             Self::NewRecoveryCode { .. } => "Make a new recovery code",
             Self::RecoverConnectAccount { .. } => "Recover the Apassy Connect account",
@@ -1154,6 +1171,14 @@ impl OwnerAction {
                     .take(14)
                     .collect::<String>()
             ),
+            Self::CreatePublicLink {
+                name,
+                secrets,
+                expires_at,
+                one_time,
+                addresses,
+                ..
+            } => public_link_reason(name, secrets.len(), *expires_at, *one_time, addresses.len()),
             Self::DeleteConnectAccount { .. } => {
                 "delete your Apassy Connect account, its vault stores, and its plan".to_owned()
             }
@@ -1370,6 +1395,7 @@ impl OwnerAction {
                 | Self::ChangeDelivery { on: false, .. }
                 | Self::ConfirmConnectDevice { .. }
                 | Self::RevokeConnectDevice { .. }
+                | Self::CreatePublicLink { .. }
                 | Self::DeleteConnectAccount { .. }
                 | Self::NewRecoveryCode { .. }
                 | Self::RecoverConnectAccount { .. }
@@ -1402,6 +1428,54 @@ impl OwnerAction {
             _ => None,
         }
     }
+}
+
+/// How long a link lasts from now, in words: minutes, hours, or days.
+pub fn link_lasts(expires_at: u64, now: u64) -> String {
+    let left = expires_at.saturating_sub(now);
+    let plural = |n: u64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit}")
+        } else {
+            format!("{n} {unit}s")
+        }
+    };
+    if left >= 2 * 24 * 60 * 60 - 60 {
+        plural((left + 12 * 60 * 60) / (24 * 60 * 60), "day")
+    } else if left >= 2 * 60 * 60 - 60 {
+        plural((left + 30 * 60) / (60 * 60), "hour")
+    } else {
+        plural(((left + 30) / 60).max(1), "minute")
+    }
+}
+
+/// The reason of [`OwnerAction::CreatePublicLink`]: what the link shows, how long it
+/// lasts, and who opens it.
+fn public_link_reason(
+    name: &str,
+    secrets: usize,
+    expires_at: u64,
+    one_time: bool,
+    addresses: usize,
+) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let what = match secrets {
+        1 => "1 secret".to_owned(),
+        n => format!("{n} secrets"),
+    };
+    let who = match addresses {
+        0 => "anyone with the link".to_owned(),
+        1 => "1 e-mail address".to_owned(),
+        n => format!("{n} e-mail addresses"),
+    };
+    format!(
+        "make a public link to \"{}\" ({what}) for {}, for {who}{}",
+        short_device_name(name),
+        link_lasts(expires_at, now),
+        if one_time { ", shown once" } else { "" }
+    )
 }
 
 /// The kind of action for a prompt (ADR 0025 §3a).

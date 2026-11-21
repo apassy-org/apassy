@@ -498,6 +498,8 @@ pub fn history(vault: &Vault, id: u64) -> CoreResult<Vec<Event>> {
                 ItemEventKind::ReviewConfirmed => "Agent settings confirmed".to_owned(),
                 ItemEventKind::Moved if event.detail.is_empty() => "Moved to the top".to_owned(),
                 ItemEventKind::Moved => format!("Moved to {}", event.detail),
+                ItemEventKind::LinkCreated => format!("Public link made: {detail}"),
+                ItemEventKind::LinkRevoked => format!("Public link revoked: {detail}"),
             };
             Event {
                 at: event.at,

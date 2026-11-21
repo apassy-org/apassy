@@ -112,6 +112,9 @@ mod scope_bar;
 mod settings;
 /// Settings as a view of the window (ADR 0026 §3).
 mod settings_view;
+/// The Share sheet of a secret or a folder: its public links (ADR 0047).
+#[cfg(feature = "vault")]
+pub(crate) mod share_sheet;
 mod shell;
 /// The sidebar: full, as a rail of icons, or floating over the list.
 mod sidebar;
@@ -588,10 +591,15 @@ pub(crate) enum Sheet {
     DeleteFolder {
         uuid: String,
     },
-    /// Share a credential in shared vaults (ADR 0026 §6). A stub for now.
+    /// "Share…" of a credential: its public links (ADR 0047).
     #[cfg(feature = "vault")]
     Share {
         item_id: u64,
+    },
+    /// "Share…" of a folder: the public links of the folder with its subfolders.
+    #[cfg(feature = "vault")]
+    ShareFolder {
+        uuid: String,
     },
     /// "Use My Server": the address, the token and the consent of the bouncer brain
     /// host (ADR 0035). The draft with the token is in `app.bouncer_host.draft`.

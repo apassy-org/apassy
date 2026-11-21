@@ -1012,6 +1012,43 @@ impl ConnectClient {
         ))
     }
 
+    // ---- Public links (connect-share-v1 sections 4.1 to 4.3, `super::link`). ----
+
+    /// `POST /v1/account/links` with the exact body of the pending link.
+    pub(super) fn create_link(
+        &self,
+        token: &str,
+        body: &super::link::CreateBody,
+    ) -> Result<super::link::LinkView, ConnectError> {
+        self.post("/v1/account/links", Some(token), body)
+    }
+
+    /// `GET /v1/account/links`.
+    pub(super) fn links(&self, token: &str) -> Result<super::link::LinkList, ConnectError> {
+        self.get("/v1/account/links", Some(token))
+    }
+
+    /// `DELETE /v1/account/links/{link_id}`. A link id of another form is never sent.
+    pub(super) fn delete_link(
+        &self,
+        token: &str,
+        link_id: &str,
+    ) -> Result<super::link::LinkDeleted, ConnectError> {
+        if link_id.len() != 32
+            || !link_id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(ConnectError::Invalid);
+        }
+        self.send(json_request(
+            "DELETE",
+            &format!("/v1/account/links/{link_id}"),
+            Some(token),
+            &Empty {},
+        ))
+    }
+
     pub(super) fn entitlement(&self, token: &str) -> Result<EntitlementAnswer, ConnectError> {
         self.get("/v1/account/entitlement", Some(token))
     }

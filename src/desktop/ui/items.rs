@@ -1124,6 +1124,7 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
     let history_open = app.ui.is_expanded(&history_key(id));
     let mut edit = false;
     let mut move_to = false;
+    let mut share = false;
     let mut add_detail = false;
     let mut history = false;
     let mut archive = false;
@@ -1134,6 +1135,7 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         egui::Popup::menu(&more).show(|ui| {
             ui.set_min_width(200.0);
             move_to = ui.selectable_label(false, "Move to Folder…").clicked();
+            share = ui.selectable_label(false, "Share…").clicked();
             if details.details.len() < MAX_DETAILS {
                 add_detail = ui.selectable_label(false, "Add Custom Detail…").clicked();
             }
@@ -1149,14 +1151,14 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
             }
             delete = ui.selectable_label(false, "Delete…").clicked();
             // A choice with Return or Space closes the menu, as a click does.
-            if move_to || add_detail || history || archive || delete {
+            if move_to || share || add_detail || history || archive || delete {
                 ui.close();
             }
         });
         // A choice closes the menu. For a keyboard user the focus goes back to "⋯", so
         // a sheet or an alert that the choice opens gives it back there, not to an item
         // of the closed menu.
-        let chosen = move_to || add_detail || history || archive || delete;
+        let chosen = move_to || share || add_detail || history || archive || delete;
         if chosen && kit::keyboard_mode(ui.ctx()) {
             more.request_focus();
         }
@@ -1166,6 +1168,8 @@ fn detail_toolbar(app: &mut DesktopApp, ui: &mut egui::Ui, details: &OwnerDetail
         open_edit(app, details, false);
     } else if move_to {
         super::folders::open_move(app, id);
+    } else if share {
+        app.ui.sheet = Some(Sheet::Share { item_id: id });
     } else if add_detail {
         open_edit(app, details, true);
     } else if history {
@@ -1321,38 +1325,6 @@ fn draw_detail(app: &mut DesktopApp, ui: &mut egui::Ui) {
     if app.selected_item_id.is_some() {
         draw_detail_body(app, ui);
     }
-}
-
-/// The Share sheet (ADR 0026 §6). Shared vaults come later, so it says so and closes.
-/// Returns true on Escape.
-pub(super) fn share_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64) -> bool {
-    let name = app
-        .owner_ui
-        .session
-        .details(item_id)
-        .map(|details| details.name)
-        .unwrap_or_default();
-    let mut done = false;
-    let response = kit::sheet(ctx, "share-credential", 440.0, |ui| {
-        kit::sheet_title(
-            ui,
-            &format!("Share “{name}”"),
-            Some(concat!(
-                "A shared vault gets the same credential, not a copy. This ",
-                crate::computer!(),
-                " has no shared vault yet."
-            )),
-        );
-        kit::sheet_buttons(
-            ui,
-            |_| {},
-            |ui| done = kit::button(ui, "Done", Style::Prominent).clicked(),
-        );
-    });
-    if done || super::save_pressed(app, ctx) {
-        close_sheet(app, ctx);
-    }
-    response.escape
 }
 
 pub(super) fn draw_detail_body(app: &mut DesktopApp, ui: &mut egui::Ui) {

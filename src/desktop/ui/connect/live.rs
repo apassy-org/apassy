@@ -659,6 +659,7 @@ impl DesktopApp {
         live.epoch = None;
         self.ui.connect.sheet = None;
         self.ui.connect.share.reset();
+        self.ui.connect.links.reset();
     }
 
     /// A link for the origin of this device's Connect account on the start screen, while
@@ -889,6 +890,7 @@ pub(crate) fn section(app: &mut DesktopApp, ui: &mut egui::Ui) {
     }
     if matches!(view.shown, Shown::Account(_)) && !view.locked {
         super::share::section(app, ui);
+        super::super::share_sheet::settings_section(app, ui);
     }
     sheets(app, &ctx);
 }
@@ -952,6 +954,7 @@ pub(crate) fn step(app: &mut DesktopApp, ctx: &egui::Context) {
     // only with an unlocked vault (not for the start-screen step of the session).
     if app.ui.connect.live.session.is_open() && app.owner_ui.session.epoch().is_some() {
         super::share::step(app, ctx);
+        super::super::share_sheet::step(app, ctx);
     }
 }
 

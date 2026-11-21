@@ -120,6 +120,8 @@ fn event_text(event: &ItemEvent) -> (String, Option<String>, Tone) {
         ),
         ItemEventKind::ReviewConfirmed => ("Agent settings confirmed".to_owned(), None, Tone::Good),
         ItemEventKind::Moved => ("Moved".to_owned(), detail(), Tone::Neutral),
+        ItemEventKind::LinkCreated => ("Public link made".to_owned(), detail(), Tone::Accent),
+        ItemEventKind::LinkRevoked => ("Public link revoked".to_owned(), detail(), Tone::Neutral),
     }
 }
 

@@ -22,6 +22,9 @@
 //!   the pin of another account's root by a ceremony with six words, the entries of the
 //!   device list that name another account, the trust store of the peers and the shared
 //!   stores in the account file, and the signers of each shared store.
+//! - [`link`]: public links (contract connect-share-v1): the snapshot of a secret or a
+//!   folder, sealed with a key that only the link holds, and the calls that keep, list,
+//!   and revoke it.
 //! - [`entitlement`]: the check of an entitlement token (section 10).
 //! - [`session`]: the one account session of the app (plan s7 unit M5b): opened with the
 //!   vault unlock, closed at a lock and a quit; Settings › Connect, the sync of the vault
@@ -38,6 +41,7 @@ pub mod client;
 pub mod device_key;
 pub mod entitlement;
 pub mod key_file;
+pub mod link;
 pub mod session;
 pub mod share;
 pub mod trust;
