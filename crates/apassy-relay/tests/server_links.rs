@@ -929,3 +929,114 @@ fn a_retry_gets_the_stored_view_before_the_expiry_check() {
     // ...and the retry of the first gets its stored view.
     assert_eq!(create_ok(&c, &a, &body), made);
 }
+
+/// A request of the marker test: method, path, headers, body, and the status it gets.
+type MarkerCase<'a> = (
+    &'a str,
+    String,
+    &'a [(&'a str, &'a str)],
+    Option<Value>,
+    u16,
+);
+
+/// Every answer of the routes of public links carries `x-apassy-links: 1`, errors
+/// included, so a client takes a 404 for a revoke as done only with it; a 404 of another
+/// route, or of a relay without these routes (an older image), has none.
+#[test]
+fn every_answer_of_the_link_routes_carries_the_marker() {
+    let c = connect::start();
+    let a = c.account("Ada");
+    let bearer = format!("Bearer {}", a.token);
+    let auth: &[(&str, &str)] = &[("Authorization", bearer.as_str())];
+    let body = anyone_body(false, 3600);
+    let link_id = body["link_id"].as_str().unwrap().to_string();
+    let revoke_path = format!("/v1/account/links/{link_id}");
+    let open_path = format!("/v1/links/{link_id}/open");
+    let code_path = format!("/v1/links/{link_id}/code");
+    let code_body =
+        json!({"email": "ada@example.com", "address_key": vector("anyone")["address_key_b64u"]});
+    let cases: Vec<MarkerCase> = vec![
+        (
+            "POST",
+            "/v1/account/links".to_string(),
+            auth,
+            Some(body.clone()),
+            200,
+        ),
+        ("GET", "/v1/account/links".to_string(), auth, None, 200),
+        ("GET", "/v1/account/links".to_string(), &[], None, 401),
+        (
+            "POST",
+            "/v1/account/links".to_string(),
+            auth,
+            Some(json!({"x": 1})),
+            400,
+        ),
+        ("POST", open_path.clone(), &[], Some(open_body(false)), 200),
+        ("POST", code_path.clone(), &[], Some(code_body.clone()), 404),
+        ("DELETE", revoke_path.clone(), auth, None, 200),
+        // The revoke is done: its 404 has the marker.
+        ("DELETE", revoke_path.clone(), auth, None, 404),
+        (
+            "DELETE",
+            "/v1/account/links/NOT-AN-ID".to_string(),
+            auth,
+            None,
+            404,
+        ),
+        ("POST", open_path.clone(), &[], Some(open_body(false)), 404),
+        (
+            "POST",
+            "/v1/links/NOT-AN-ID/open".to_string(),
+            &[],
+            Some(open_body(false)),
+            404,
+        ),
+        ("GET", open_path.clone(), &[], None, 405),
+    ];
+    for (method, path, headers, body, status) in cases {
+        let (got, answer, text) = call_with_headers(
+            &c.relay.url,
+            EDGE_SECRET,
+            method,
+            &path,
+            headers,
+            body.as_ref(),
+        );
+        assert_eq!(got, status, "{method} {path}: {text}");
+        assert_eq!(
+            header(&answer, "x-apassy-links"),
+            Some("1"),
+            "{method} {path}"
+        );
+    }
+    // Another route's 404 has no marker.
+    let (status, answer, _) = call_with_headers(
+        &c.relay.url,
+        EDGE_SECRET,
+        "GET",
+        "/v1/account/nothing",
+        auth,
+        None,
+    );
+    assert_eq!(status, 404);
+    assert_eq!(header(&answer, "x-apassy-links"), None);
+    // A relay without the routes of public links (as an image before them): a revoke is a
+    // 404 without the marker, which a client takes for "not done".
+    let older = relay::start(apassy_relay::config::UpstreamOptions::default());
+    for (method, path) in [
+        ("DELETE", revoke_path.as_str()),
+        ("POST", open_path.as_str()),
+    ] {
+        let (status, answer, _) = call_with_headers(
+            &older.url,
+            EDGE_SECRET,
+            method,
+            path,
+            auth,
+            (method == "POST").then(|| open_body(false)).as_ref(),
+        );
+        assert_eq!(status, 404, "{method} {path}");
+        assert_eq!(header(&answer, "x-apassy-links"), None, "{method} {path}");
+    }
+}

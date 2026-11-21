@@ -34,7 +34,9 @@ use crate::server::store::{Store, db, is_unique_violation, to_i, to_u};
 // ---- The contract's numbers (sections 2, 3, and 7). ----
 
 /// The schema version of `links.db`.
-pub const LINKS_VERSION: i64 = 1;
+pub const LINKS_VERSION: i64 = 2;
+/// The first version of `links.db`, before `link.code_failures` and `link.code_requests`.
+const LINKS_VERSION_1: i64 = 1;
 /// The padding block of the plaintext, and its smallest and largest padded length.
 pub const PAD: usize = 1024;
 pub const MIN_PLAINTEXT: usize = PAD;
@@ -122,8 +124,29 @@ CREATE TABLE mail_outbox (
   next_at INTEGER NOT NULL,
   tries INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX mail_outbox_next ON mail_outbox(next_at);
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ";
+
+/// Moves a `links.db` of version 1 to `LINKS_VERSION`, in one transaction: the two counts
+/// of the link row, when they are missing (a file of a build before them). A file of the
+/// current version is left as it is; any other version is refused by the caller.
+fn migrate(store: &Store) -> RelayResult<()> {
+    if store.user_version()? != LINKS_VERSION_1 {
+        return Ok(());
+    }
+    store.tx(|tx| {
+        for column in ["code_failures", "code_requests"] {
+            if !crate::server::store::has_column(tx, "link", column)? {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE link ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
+                ))
+                .map_err(db)?;
+            }
+        }
+        tx.execute_batch(&format!("PRAGMA user_version = {LINKS_VERSION};"))
+            .map_err(db)
+    })
+}
 
 // ---- Errors. ----
 
@@ -318,6 +341,16 @@ pub const MAX_PUBLIC_BODY: usize = 4096;
 
 /// The prefix of the public routes.
 pub const PUBLIC_PREFIX: &str = "/v1/links/";
+
+/// The header that every answer of the routes of public links carries (connect-share-v1
+/// section 4), errors included: a client takes a `404` for a revoke as done only with it,
+/// and one without it (a relay or image without these routes) as not done.
+pub const MARKER: (&str, &str) = ("x-apassy-links", "1");
+
+/// True for an account route of public links: `/v1/account/links` and below.
+pub fn is_account_links_path(path: &str) -> bool {
+    path == "/v1/account/links" || path.starts_with("/v1/account/links/")
+}
 
 /// True for a public route of this contract: `/v1/links` and below.
 pub fn is_public_path(path: &str) -> bool {
@@ -561,6 +594,7 @@ impl Links {
             )
         };
         let store = opened.map_err(|_| refused())?;
+        migrate(&store).map_err(|_| refused())?;
         // The mail sender is built here, so a relay whose sender cannot be built (no
         // system roots, a host that is no name) does not start.
         let mailer = config
@@ -849,6 +883,7 @@ pub fn purge_stopped(config: &RelayConfig) -> RelayResult<Value> {
             "links.db does not open in this mode: nothing was changed. Run the purge with the configuration of the relay that wrote it.",
         )
     })?;
+    migrate(&store)?;
     if store.user_version()? != LINKS_VERSION {
         return Err(RelayError::internal(
             "links.db is of another version: nothing was changed. Run the purge of the image that wrote it.",
@@ -1496,8 +1531,10 @@ impl Links {
         let stored = code_hash(&job.address_key, &job.link_id, &code);
         let text = zeroize::Zeroizing::new(MAIL_TEXT.replace("{code}", &code));
         // The same reads and the same statements for every request, for an address of the
-        // link and for any other: whether a code is made is a parameter of each write, so
-        // the transaction holds the lock of `links.db` as long on both paths.
+        // link and for any other: whether a code is made is a parameter of each write. The
+        // rows that the writes touch differ (none when no code is made), so the time of the
+        // transaction, of its lock of `links.db` and of its commit, is close on both paths,
+        // not equal: the accepted signal of contract section 4.5.
         self.store.tx(|tx| {
             let live = live_link(tx, &job.link_id, now)?.is_some();
             let pair: Option<(i64, i64, i64)> = tx
@@ -1584,6 +1621,45 @@ mod tests {
         ] {
             assert_eq!(normal_address(refused), None, "{refused}");
         }
+    }
+
+    #[test]
+    fn a_links_db_of_version_1_gets_the_two_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("links.db");
+        let key = crate::secret::SecretString::new("a synthetic master key for tests".into());
+        let version_1 = SCHEMA
+            .replace(
+                "  code_failures INTEGER NOT NULL DEFAULT 0,\n  code_requests INTEGER NOT NULL DEFAULT 0,\n",
+                "",
+            )
+            .replace("PRAGMA user_version = 2;", "PRAGMA user_version = 1;");
+        assert!(!version_1.contains("code_failures"));
+        let store = Store::create_at(&path, &key, &version_1).unwrap();
+        store
+            .with(|conn| {
+                conn.execute(
+                    "INSERT INTO link (link_id, account_id, created_at, expires_at, one_time, access, addresses, sealed, create_hash) \
+                     VALUES ('d4e59a0011f71c40fb1dfdb1a8446660', 'acc_aaaaaaaaaa', 1, 2, 0, 'anyone', 0, 'x', x'00')",
+                    [],
+                )
+                .map_err(db)
+            })
+            .unwrap();
+        migrate(&store).unwrap();
+        assert_eq!(store.user_version().unwrap(), LINKS_VERSION);
+        let counts: (i64, i64) = store
+            .with(|conn| {
+                conn.query_row("SELECT code_failures, code_requests FROM link", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(db)
+            })
+            .unwrap();
+        assert_eq!(counts, (0, 0));
+        // Again: nothing changes.
+        migrate(&store).unwrap();
+        assert_eq!(store.user_version().unwrap(), LINKS_VERSION);
     }
 
     #[test]

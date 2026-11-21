@@ -78,7 +78,7 @@ The encodings of connect-account-v1 section 2 apply: b64u without padding, lower
 | `POST /v1/links/{link_id}/open` | edge (no `Authorization`) | 4.4 |
 | `POST /v1/links/{link_id}/code` | edge (no `Authorization`) | 4.5 |
 
-The public routes refuse an `Authorization` header with `400 invalid_request`. Every answer of this contract carries `Cache-Control: no-store`, and the public ones also `Referrer-Policy: no-referrer`. Connect logs no link id with a client address, and no address.
+The public routes refuse an `Authorization` header with `400 invalid_request`. Every answer of this contract carries `Cache-Control: no-store`, and the public ones also `Referrer-Policy: no-referrer`. Every answer of the routes of this section, errors included, carries the header `x-apassy-links: 1`: it tells an answer of these routes from one of a relay that does not have them (an older image, a route that does not exist). Connect logs no link id with a client address, and no address.
 
 ### 4.1 `POST /v1/account/links`
 
@@ -109,7 +109,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 ### 4.3 `DELETE /v1/account/links/{link_id}`
 
 - Deletes the row, the sealed form, the address hashes, and the codes of the link in one transaction. The answer is `{"link_id":"…","deleted":true}`. From that moment the public routes answer `404 not_found`.
-- A link of another account, and an unknown one, is `404 not_found`. A client takes a `404` for a revoke that is done.
+- A link of another account, and an unknown one, is `404 not_found`. A client takes a `404` for a revoke that is done only when the answer carries `x-apassy-links: 1` (section 4). A `404` without it (a route that this relay does not serve, such as an image before public links, or an edge in front of one) means that the revoke is **not** done: the client keeps it and tries again later, so a link that its owner revoked never comes back with the newer image.
 - A revoke needs no owner check.
 
 ### 4.4 `POST /v1/links/{link_id}/open`
@@ -138,7 +138,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
   | `emails`, one-time | a valid code and `confirm` `true` | the sealed form; the code is used and Connect deletes the sealed form in the same transaction |
 
 - So a link of `anyone` that is not one-time opens with one request, and a one-time link opens only after the reader said yes. Of two opens of a one-time link at the same moment, one gets the sealed form and the other `404 not_found`.
-- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, a code that ended, and a pair of link and address that used its wrong tries (section 7) are `403 code_invalid`, after the same work. A wrong try counts only while a code is live for that link and address: each `403 code_invalid` of a live code counts a try of that code (the fifth ends the code) and a wrong try of the pair over the life of the link (the tenth ends codes for that pair: no new code is sent to that address for that link, and the answers stay the same). A guess with no live code is `403 code_invalid` and counts nothing, so a holder of the link cannot lock a reader out without a mail to that reader.
+- A code is valid when Connect holds a live code for this link and the address hash of `email` under `address_key` (section 6), and `code` is that code. Any other code, an address that is not on the link, a code that ended, and a pair of link and address that used its wrong tries (section 7) are `403 code_invalid`, with the same statements; with a live code, its try is also written. A wrong try counts only while a code is live for that link and address: each `403 code_invalid` of a live code counts a try of that code (the fifth ends the code) and a wrong try of the pair over the life of the link (the tenth ends codes for that pair: no new code is sent to that address for that link, and the answers stay the same). A guess with no live code is `403 code_invalid` and counts nothing, so a holder of the link cannot lock a reader out without a mail to that reader.
 - An unknown, expired, revoked, or opened link is `404 not_found` (section 1), before any other check of the body except its form.
 
 ### 4.5 `POST /v1/links/{link_id}/code`
@@ -149,7 +149,7 @@ The device that makes a link keeps it in the vault table `public_link` ([vault-v
 
 - **The answer comes before any look at the addresses.** Connect checks, in this order and only these: the form of the body; that `email` has a normal form (section 6; else `400 invalid_request`) and `address_key` is 32 bytes; that the link is live and has the access `emails` (else `404 not_found`); that the relay has a mail sender and that neither the daily mail cap of the sharing account nor the one of the relay is reached (else `503 mail_unavailable`); and the code requests of the link (section 7; else `429 rate_limited`). None of these depends on the address. It then answers `{"expires_in":900}` and hands the normal form, the address key, and the link id in memory to the mail thread.
 - **The mail thread** makes the address hash and compares it with the hashes of the link. When it is one of them, and the pair of link and address has codes left for the UTC day and wrong tries left over the life of the link (section 7), it makes a code, ends the code before for that pair, writes the code row and the outbox row (section 10) in one transaction, and counts the mail for the account and the relay. Otherwise it writes nothing and sends nothing. The request has its answer before any of this, so both paths are the same on the wire and in time.
-- **Accepted.** The mail caps count the mails that were made. So a relay near its cap can tell a holder of `K`, by the answer to the next request, whether one more mail was made, and so whether an address that the holder asked for is on the link. A holder of `K` reads the link anyway; the caps say nothing about an address to anyone without `K`.
+- **Accepted.** Two signals can tell a holder of `K` whether the mail thread made a mail for an address they asked for: a relay near its daily cap answers the next request with `503 mail_unavailable` or not; and the transaction of the mail thread, which runs the same statements on both paths, writes rows only when it makes a code, so its lock of `links.db` and its commit take a little longer then, which a request at the same moment may see. A holder of `K` learns from either only whether an address they guessed is on the link, and that reader gets a mail. Without `K` neither signal says anything about an address.
 - Only the person who reads the mail learns that the address may open the link.
 - Above a mail cap, every code request of that link gets `503 mail_unavailable`, whatever the address, until the UTC day ends.
 - Connect MUST NOT store or log `address_key`: it lives in the memory of the request and of the mail thread only, and goes when the thread has handled it.

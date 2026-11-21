@@ -2216,7 +2216,7 @@ The sending domain needs its records before the first mail: SPF that names the m
 
 ### 30.5 Rollback
 
-An image before public links never opens `links.db` and leaves it in place; its link routes are 404. A device that revokes a link meanwhile takes the 404 for a revoke that is done, so that link would be live again on the way forward. Before going forward after such a rollback:
+An image before public links never opens `links.db` and leaves it in place; its link routes are 404 without the marker `x-apassy-links: 1`, so a device that revokes a link meanwhile keeps the revoke pending and sends it again on the way forward (connect-share-v1 section 4.3). An app before that rule took any 404 for a done revoke: so before going forward after such a rollback:
 
 1. Keep the relay stopped.
 2. Run `apassy-relay purge-links` with the configuration of the new image. Every link goes; the ids stay used.

@@ -2305,10 +2305,13 @@ fn respond_account(
     path: &str,
     now: u64,
 ) {
+    // Every answer of the routes of public links carries the marker (connect-share-v1
+    // section 4): a client takes a 404 for a revoke as done only with it.
+    let marker = links::is_account_links_path(path);
     let (need, endpoint) = match account::route(method, path) {
         Ok(routed) => routed,
         Err(error) => {
-            respond_error(request, &error);
+            respond_error_marked(request, &error, marker);
             return;
         }
     };
@@ -2317,16 +2320,17 @@ fn respond_account(
     let authorization = header_value(&request, "Authorization");
     if need == Need::Edge {
         if authorization.is_some() {
-            respond_error(
+            respond_error_marked(
                 request,
                 &RelayError::invalid("An edge route of Apassy Connect takes no Authorization."),
+                marker,
             );
             return;
         }
         let body = match read_body(&mut request, body_method) {
             Ok(body) => body,
             Err(error) => {
-                respond_error(request, &error);
+                respond_error_marked(request, &error, marker);
                 return;
             }
         };
@@ -2350,7 +2354,7 @@ fn respond_account(
         };
         let created = endpoint == account::AccountEndpoint::Create;
         match account::dispatch_edge(hub, &endpoint, &body, prefix, now) {
-            Ok(result) => respond_ok(request, result),
+            Ok(result) => respond_ok_marked(request, result, marker),
             Err(error)
                 if error.code == codes::RATE_LIMITED || (created && error.code == codes::BUSY) =>
             {
@@ -2362,10 +2366,11 @@ fn respond_account(
                     Header::from_bytes(&b"Retry-After"[..], b"3600")
                         .ok()
                         .into_iter()
+                        .chain(marked(marker))
                         .collect(),
                 )
             }
-            Err(error) => respond_error(request, &error),
+            Err(error) => respond_error_marked(request, &error, marker),
         }
         return;
     }
@@ -2385,7 +2390,7 @@ fn respond_account(
         Ok(caller) => caller,
         Err(error) => {
             refused(&error);
-            respond_error(request, &error);
+            respond_error_marked(request, &error, marker);
             return;
         }
     };
@@ -2411,6 +2416,7 @@ fn respond_account(
             )
             .ok()
             .into_iter()
+            .chain(marked(marker))
             .collect(),
         );
         return;
@@ -2418,7 +2424,7 @@ fn respond_account(
     let body = match read_body(&mut request, body_method) {
         Ok(body) => body,
         Err(error) => {
-            respond_error(request, &error);
+            respond_error_marked(request, &error, marker);
             return;
         }
     };
@@ -2429,14 +2435,50 @@ fn respond_account(
         Ok(caller) => caller,
         Err(error) => {
             refused(&error);
-            respond_error(request, &error);
+            respond_error_marked(request, &error, marker);
             return;
         }
     };
     match account::dispatch(hub, &caller, &endpoint, &body, now) {
-        Ok(result) => respond_ok(request, result),
-        Err(error) => respond_error(request, &error),
+        Ok(result) => respond_ok_marked(request, result, marker),
+        Err(error) => respond_error_marked(request, &error, marker),
     }
+}
+
+/// `x-apassy-links: 1` (`links::MARKER`), on every answer of the routes of public links.
+fn links_marker() -> Header {
+    Header::from_bytes(links::MARKER.0.as_bytes(), links::MARKER.1.as_bytes())
+        .expect("static header")
+}
+
+/// The marker as extra headers, when `marker`.
+fn marked(marker: bool) -> Vec<Header> {
+    if marker {
+        vec![links_marker()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn respond_error_marked(request: Request, error: &RelayError, marker: bool) {
+    let close = error.code == codes::PAYLOAD_TOO_LARGE;
+    respond_json_with(
+        request,
+        error.status(),
+        &error.to_envelope(),
+        close,
+        marked(marker),
+    );
+}
+
+fn respond_ok_marked(request: Request, result: Value, marker: bool) {
+    respond_json_with(
+        request,
+        200,
+        &Envelope::success(result),
+        false,
+        marked(marker),
+    );
 }
 
 /// `Referrer-Policy: no-referrer`, on every answer of the public link routes.
@@ -2449,7 +2491,7 @@ fn no_referrer_header() -> Header {
 /// `no-referrer`; a refusal of the code route may carry its `Retry-After`.
 fn respond_public_link(hub: &Hub, mut request: Request, method: &str, path: &str, now: u64) {
     let refuse = |request: Request, error: &RelayError, retry_after: Option<u64>| {
-        let mut headers = vec![no_referrer_header()];
+        let mut headers = vec![no_referrer_header(), links_marker()];
         if let Some(seconds) = retry_after
             && let Ok(header) =
                 Header::from_bytes(&b"Retry-After"[..], seconds.to_string().as_bytes())
@@ -2501,7 +2543,7 @@ fn respond_public_link(hub: &Hub, mut request: Request, method: &str, path: &str
             200,
             &Envelope::success(result),
             false,
-            vec![no_referrer_header()],
+            vec![no_referrer_header(), links_marker()],
         ),
         Err(refusal) => refuse(request, &refusal.error, refusal.retry_after),
     }

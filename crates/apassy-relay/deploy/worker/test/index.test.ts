@@ -1969,3 +1969,33 @@ describe("service worker", () => {
     assert.equal(response.status, 201);
   });
 });
+
+describe("public link marker", () => {
+  it("passes the relay's x-apassy-links header of every link route through unchanged", async () => {
+    const ID = "d4e59a0011f71c40fb1dfdb1a8446660";
+    for (const [method, path, status] of [
+      ["DELETE", `/v1/account/links/${ID}`, 404],
+      ["GET", "/v1/account/links", 200],
+      ["POST", "/v1/account/links", 409],
+      ["POST", `/v1/links/${ID}/open`, 404],
+      ["POST", `/v1/links/${ID}/code`, 200],
+    ] as const) {
+      const relay: RelayService = {
+        async fetch() {
+          return new Response('{"ok":false,"error":{"code":"not_found","message":"This link does not open."}}', {
+            status,
+            headers: { "content-type": "application/json", "x-apassy-links": "1" },
+          });
+        },
+      };
+      const response = await call(path, { method, ...(method === "POST" ? { body: "{}" } : {}) }, { RELAY: relay });
+      assert.equal(response.status, status, `${method} ${path}`);
+      assert.equal(response.headers.get("x-apassy-links"), "1", `${method} ${path}`);
+    }
+    // The Worker never adds it: a relay without the routes answers without it.
+    const plain: RelayService = { async fetch() { return new Response("{}", { status: 404 }); } };
+    const response = await call(`/v1/account/links/${ID}`, { method: "DELETE" }, { RELAY: plain });
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("x-apassy-links"), null);
+  });
+});
