@@ -583,7 +583,6 @@ fn a_link_never_holds_a_code_seed_or_a_passkey() {
     assert!(!json.contains(SEED), "{json}");
     assert!(!json.contains("otpauth"), "{json}");
     assert!(!json.contains("passkey_"), "{json}");
-    assert!(!json.contains("synthetic-passkey-user"), "{json}");
     assert!(!json.contains("synthetic-archived-token"), "{json}");
     assert!(!json.contains("Old key"), "{json}");
     assert!(!json.contains("revealed"), "{json}");
@@ -620,6 +619,14 @@ fn a_link_never_holds_a_code_seed_or_a_passkey() {
         .map(|f| f["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["Username", "Password"]);
+    // The passkey's login keeps its plain user name; no field of the passkey leaves.
+    let login: Vec<&str> = opened["items"][2]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(login, ["Username"]);
     assert_eq!(opened["title"], "Team");
     // An archived secret alone makes no link.
     let refused = computer.vault(|vault| {
