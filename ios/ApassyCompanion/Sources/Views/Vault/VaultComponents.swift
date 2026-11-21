@@ -34,8 +34,10 @@ enum VaultSheet: Identifiable {
     /// "New Credential" (ADR 0026 §4): paste, then Add, into the folder on the screen (nil at the
     /// root and in "All credentials").
     case newCredential(folder: String?)
-    /// "Move to Folder" for a credential.
+    /// "Move to Folder" for a credential: it leaves its other folders.
     case moveItem(ItemRow)
+    /// "Add to Folder" for a credential: it stays in its other folders.
+    case addItemToFolder(ItemRow)
     /// "Move" for a folder.
     case moveFolder(Folder)
 
@@ -50,6 +52,7 @@ enum VaultSheet: Identifiable {
         case .exchange: "exchange"
         case .newCredential(let folder): "new-credential-\(folder ?? "")"
         case .moveItem(let item): "move-item-\(item.id)"
+        case .addItemToFolder(let item): "add-item-folder-\(item.id)"
         case .moveFolder(let folder): "move-folder-\(folder.uuid)"
         }
     }
@@ -267,6 +270,8 @@ struct ItemRowView: View {
 /// A row that opens the item, with the swipe actions and the context menu of the lists.
 struct ItemListRow: View {
     let item: ItemRow
+    /// The folder of the list: its context menu can take the item out of it.
+    var folder: String? = nil
     @Environment(VaultModel.self) private var vault
     @Environment(VaultUI.self) private var ui
     @Environment(\.openURL) private var openURL
@@ -323,6 +328,14 @@ struct ItemListRow: View {
             }
             if vault.hasFolders, !item.archived {
                 Button("Move to Folder…", systemImage: "folder") { ui.sheet = .moveItem(item) }
+                if !vault.folderTree.folders.isEmpty {
+                    Button("Add to Folder…", systemImage: "folder.badge.plus") { ui.sheet = .addItemToFolder(item) }
+                }
+                if let folder {
+                    Button("Remove from This Folder", systemImage: "folder.badge.minus") {
+                        Task { await vault.removeFromFolder(item.id, folder: folder) }
+                    }
+                }
             }
             Divider()
             if !item.archived {

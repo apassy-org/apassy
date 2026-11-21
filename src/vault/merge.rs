@@ -26,9 +26,11 @@
 //!
 //! A credential is in any number of folders (schema 35). Each `item_folder` row is one
 //! membership with its own version and a tombstone (`removed_at`) when it ended, and it
-//! merges on its own ([`merge_folder_rows`]): the later of the add and the removal wins,
-//! a removal wins a tie, and `added_at` takes the earliest value, so every device agrees
-//! on the first folder. So two removals on two devices both hold, a membership of a
+//! merges on its own ([`merge_folder_rows`]): the later of the add and the removal wins
+//! with all its values, `added_at` included, and a removal wins a tie, so every device
+//! agrees on the first folder. A change of a membership does not change the version of
+//! the credential, so a folder change on one device and an edit of the credential on
+//! another make no conflict copy. So two removals on two devices both hold, a membership of a
 //! folder that another device deleted stays gone, and concurrent moves of one credential
 //! from "Work" to "Home" and from "Work" to "Bills" leave it in "Home" and "Bills". Between
 //! two copies of schema 35 the folders are no part of a conflict of the credential. The
@@ -1468,6 +1470,12 @@ pub struct MergeReport {
     /// devices (schema 19), and of public links and folder memberships (schema 35) that
     /// took the version of the other copy.
     pub folders: usize,
+    /// Link ids (schema 35) that two link rows with different UUIDs held. The merge kept
+    /// one of them by a fixed rule: a revoked row first, then the smallest UUID.
+    pub link_collisions: Vec<String>,
+    /// UUIDs of link rows of the other copy that this vault refused: a row that fails a
+    /// check of the table does not merge and stops nothing else.
+    pub refused_links: Vec<String>,
     /// The sync record of the other copy.
     pub remote: SyncIdentity,
     /// The synced-content digest of the other copy, as the copy holds it (before an
@@ -1752,34 +1760,39 @@ fn insert_record(
     Ok(id)
 }
 
-/// Make `folders` the live memberships of the item `id`, as one change with `version`: a
-/// live row that is not in it gets its tombstone, and a folder of it that has no live row
-/// gets one. A row that stays live keeps the earlier `added_at`. For a credential of a
-/// copy of schema 34, whose one folder is part of the credential, and for a conflict
-/// copy; every device that takes the same version writes the same rows. Returns the count
-/// of rows that changed.
+/// Make `folders` the live memberships of the item `id`, as writes with `version` that
+/// follow the rule of [`merge_folder_rows`]: a row changes only where `version` is later
+/// than its own, so the change of a credential of a copy of schema 34 never lowers the
+/// version of a row. A live row that is not in `folders` gets its tombstone; a folder of
+/// it without a live row gets one, with its `added_at`. A row that stays live keeps its
+/// values. For a credential of a copy of schema 34, whose one folder is part of the
+/// credential, and for a conflict copy; every device that takes the same version writes
+/// the same rows. Returns the count of rows that changed.
 fn set_folder_rows(
     tx: &rusqlite::Transaction<'_>,
     id: i64,
     folders: &BTreeMap<String, i64>,
     version: &Version,
 ) -> VaultResult<usize> {
-    let rows: Vec<(String, i64, bool)> = {
+    let rows: Vec<(String, i64, String, bool)> = {
         let mut stmt = tx
             .prepare(
-                "SELECT folder_uuid, added_at, removed_at IS NOT NULL FROM item_folder
-                 WHERE item_id = ?1",
+                "SELECT folder_uuid, updated_at, updated_by, removed_at IS NOT NULL
+                 FROM item_folder WHERE item_id = ?1",
             )
             .map_err(storage)?;
-        stmt.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .map_err(storage)?
-            .collect::<Result<_, _>>()
-            .map_err(storage)?
+        stmt.query_map([id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<_, _>>()
+        .map_err(storage)?
     };
     let (at, by) = version;
+    let later = |row_at: i64, row_by: &str| (*at, by.as_str()) > (row_at, row_by);
     let mut changed = 0;
-    for (folder, _, removed) in &rows {
-        if !removed && !folders.contains_key(folder) {
+    for (folder, row_at, row_by, removed) in &rows {
+        if !removed && !folders.contains_key(folder) && later(*row_at, row_by) {
             changed += tx
                 .execute(
                     "UPDATE item_folder SET removed_at = ?1, updated_at = ?1, updated_by = ?2
@@ -1790,27 +1803,19 @@ fn set_folder_rows(
         }
     }
     for (folder, added_at) in folders {
-        match rows.iter().find(|(uuid, _, _)| uuid == folder) {
-            Some((_, old, false)) => {
-                if added_at < old {
+        match rows.iter().find(|(uuid, _, _, _)| uuid == folder) {
+            Some((_, _, _, false)) => {}
+            Some((_, row_at, row_by, true)) => {
+                if later(*row_at, row_by) {
                     changed += tx
                         .execute(
-                            "UPDATE item_folder SET added_at = ?1
-                             WHERE item_id = ?2 AND folder_uuid = ?3",
-                            (added_at, id, folder),
+                            "UPDATE item_folder SET removed_at = NULL, added_at = ?1,
+                                 updated_at = ?2, updated_by = ?3
+                             WHERE item_id = ?4 AND folder_uuid = ?5",
+                            (added_at, at, by, id, folder),
                         )
                         .map_err(storage)?;
                 }
-            }
-            Some((_, old, true)) => {
-                changed += tx
-                    .execute(
-                        "UPDATE item_folder SET removed_at = NULL, added_at = ?1,
-                             updated_at = ?2, updated_by = ?3
-                         WHERE item_id = ?4 AND folder_uuid = ?5",
-                        ((*added_at).min(*old), at, by, id, folder),
-                    )
-                    .map_err(storage)?;
             }
             None => {
                 changed += tx
@@ -1838,19 +1843,21 @@ struct FolderRow {
 }
 
 /// Take the membership rows of the other copy (schema 35), each on its own, for the
-/// credentials that this vault has after the merge of the credentials. The later
-/// `(updated_at, updated_by)` wins; at the same version a removal wins; `added_at` is the
-/// earlier of the two. The order is total, so every device ends with the same rows.
-/// Returns the count of rows that changed.
-fn merge_folder_rows(tx: &rusqlite::Transaction<'_>) -> VaultResult<usize> {
+/// credentials of the scope that this vault has after the merge of the credentials. Each
+/// row is one register: the later `(updated_at, updated_by)` wins with all its values,
+/// `added_at` included, and at the same version a removal wins. The order is total, so
+/// every device ends with the same rows and the same first folder. Returns the count of
+/// rows that changed.
+fn merge_folder_rows(tx: &rusqlite::Transaction<'_>, scope: &SyncScope) -> VaultResult<usize> {
     let remote: Vec<FolderRow> = {
         let mut stmt = tx
             .prepare(&format!(
                 "SELECT i.uuid, f.folder_uuid, f.added_at, f.updated_at, f.updated_by,
                      f.removed_at
                  FROM {REMOTE}.item_folder f JOIN {REMOTE}.item i ON i.id = f.item_id
-                 WHERE i.uuid IS NOT NULL
-                 ORDER BY i.uuid, f.folder_uuid"
+                 WHERE i.uuid IS NOT NULL AND ({})
+                 ORDER BY i.uuid, f.folder_uuid",
+                scope.item_filter()
             ))
             .map_err(storage)?;
         stmt.query_map([], |row| {
@@ -1882,16 +1889,16 @@ fn merge_folder_rows(tx: &rusqlite::Transaction<'_>) -> VaultResult<usize> {
         let Some(&id) = ids.get(&theirs.item_uuid) else {
             continue;
         };
-        let ours: Option<(i64, i64, String, Option<i64>)> = tx
+        let ours: Option<(i64, String, Option<i64>)> = tx
             .query_row(
-                "SELECT added_at, updated_at, updated_by, removed_at FROM item_folder
+                "SELECT updated_at, updated_by, removed_at FROM item_folder
                  WHERE item_id = ?1 AND folder_uuid = ?2",
                 (id, &theirs.folder),
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(storage)?;
-        let Some((added_at, updated_at, updated_by, removed_at)) = ours else {
+        let Some((updated_at, updated_by, removed_at)) = ours else {
             tx.execute(
                 "INSERT INTO item_folder
                      (item_id, folder_uuid, added_at, updated_at, updated_by, removed_at)
@@ -1915,7 +1922,6 @@ fn merge_folder_rows(tx: &rusqlite::Transaction<'_>) -> VaultResult<usize> {
             || (theirs_version == ours_version
                 && theirs.removed_at.is_some()
                 && removed_at.is_none());
-        let first = added_at.min(theirs.added_at);
         if take {
             changed += tx
                 .execute(
@@ -1923,20 +1929,13 @@ fn merge_folder_rows(tx: &rusqlite::Transaction<'_>) -> VaultResult<usize> {
                          removed_at = ?4
                      WHERE item_id = ?5 AND folder_uuid = ?6",
                     (
-                        first,
+                        theirs.added_at,
                         theirs.updated_at,
                         &theirs.updated_by,
                         theirs.removed_at,
                         id,
                         &theirs.folder,
                     ),
-                )
-                .map_err(storage)?;
-        } else if first != added_at {
-            changed += tx
-                .execute(
-                    "UPDATE item_folder SET added_at = ?1 WHERE item_id = ?2 AND folder_uuid = ?3",
-                    (first, id, &theirs.folder),
                 )
                 .map_err(storage)?;
         }
@@ -2057,6 +2056,153 @@ fn merge_lww(
         [],
     )
     .map_err(storage)
+}
+
+/// What the merge of `public_link` reads of one row.
+struct LinkMeta {
+    link_id: String,
+    updated_at: i64,
+    updated_by: String,
+    revoked: bool,
+}
+
+/// The rows of `public_link` in `schema`, by UUID.
+fn link_rows(
+    tx: &rusqlite::Transaction<'_>,
+    schema: &str,
+) -> VaultResult<BTreeMap<String, LinkMeta>> {
+    let mut stmt = tx
+        .prepare(&format!(
+            "SELECT uuid, link_id, updated_at, updated_by, deleted_at IS NOT NULL
+             FROM {schema}.public_link"
+        ))
+        .map_err(storage)?;
+    stmt.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            LinkMeta {
+                link_id: row.get(1)?,
+                updated_at: row.get(2)?,
+                updated_by: row.get(3)?,
+                revoked: row.get(4)?,
+            },
+        ))
+    })
+    .map_err(storage)?
+    .collect::<Result<_, _>>()
+    .map_err(storage)
+}
+
+/// Merge the public links of the other copy (schema 35). First each UUID on its own, as
+/// [`merge_lww`] with `removal_wins`: a revoked row wins over a live one, else the later
+/// `(updated_at, updated_by)`. Then each link id once (`UNIQUE`): when rows of two UUIDs
+/// hold one link id, a revoked row wins, then the smallest UUID; a losing row here is
+/// deleted and a losing row of the copy is not taken (`link_collisions`). Each link id
+/// writes in a savepoint: a row of the copy that fails a check of the table is not taken,
+/// the rows here stay, and the merge goes on (`refused_links`). Every device takes the
+/// same rows by the same total order. Returns the count of rows written.
+fn merge_public_links(
+    tx: &rusqlite::Transaction<'_>,
+    remote_version: i64,
+    report: &mut MergeReport,
+) -> VaultResult<usize> {
+    let Some(lww) = LWW_TABLES.iter().find(|lww| lww.table == "public_link") else {
+        return Ok(0);
+    };
+    if remote_version < lww.since {
+        return Ok(0);
+    }
+    let local = link_rows(tx, "main")?;
+    let remote = link_rows(tx, REMOTE)?;
+    let takes = |theirs: &LinkMeta, ours: &LinkMeta| {
+        (theirs.revoked && !ours.revoked)
+            || (theirs.revoked == ours.revoked
+                && (theirs.updated_at, theirs.updated_by.as_str())
+                    > (ours.updated_at, ours.updated_by.as_str()))
+    };
+    // The state of each UUID after the merge of its own rows, and whether it comes from
+    // the copy.
+    let mut candidates: BTreeMap<&str, (&LinkMeta, bool)> = local
+        .iter()
+        .map(|(uuid, meta)| (uuid.as_str(), (meta, false)))
+        .collect();
+    for (uuid, theirs) in &remote {
+        match local.get(uuid) {
+            Some(ours) if !takes(theirs, ours) => {}
+            _ => {
+                candidates.insert(uuid.as_str(), (theirs, true));
+            }
+        }
+    }
+    let mut groups: BTreeMap<&str, Vec<(&str, &LinkMeta, bool)>> = BTreeMap::new();
+    for (uuid, (meta, from_copy)) in &candidates {
+        groups
+            .entry(meta.link_id.as_str())
+            .or_default()
+            .push((uuid, meta, *from_copy));
+    }
+    let columns = lww.columns.join(", ");
+    let set = lww
+        .columns
+        .iter()
+        .map(|column| format!("{column} = excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let upsert = format!(
+        "INSERT INTO main.public_link (uuid, {columns})
+         SELECT uuid, {columns} FROM {REMOTE}.public_link WHERE uuid = ?1
+         ON CONFLICT(uuid) DO UPDATE SET {set}"
+    );
+    let mut written = 0;
+    for (link_id, rows) in groups {
+        let Some(&(winner, _, winner_from_copy)) = rows
+            .iter()
+            .min_by_key(|(uuid, meta, _)| (!meta.revoked, *uuid))
+        else {
+            continue;
+        };
+        if rows.len() > 1 {
+            report.link_collisions.push(link_id.to_owned());
+        }
+        let losers_here: Vec<&str> = rows
+            .iter()
+            .map(|(uuid, _, _)| *uuid)
+            .filter(|uuid| {
+                *uuid != winner && local.get(*uuid).is_some_and(|ours| ours.link_id == link_id)
+            })
+            .collect();
+        if !winner_from_copy && losers_here.is_empty() {
+            continue;
+        }
+        tx.execute_batch("SAVEPOINT public_link_merge")
+            .map_err(storage)?;
+        let mut result: rusqlite::Result<usize> = Ok(0);
+        for loser in &losers_here {
+            result = result.and_then(|count| {
+                tx.execute("DELETE FROM main.public_link WHERE uuid = ?1", [loser])
+                    .map(|deleted| count + deleted)
+            });
+        }
+        if winner_from_copy {
+            result = result.and_then(|count| {
+                tx.execute(&upsert, [winner])
+                    .map(|upserted| count + upserted)
+            });
+        }
+        match result {
+            Ok(count) => {
+                tx.execute_batch("RELEASE public_link_merge")
+                    .map_err(storage)?;
+                written += count;
+            }
+            Err(_) => {
+                tx.execute_batch("ROLLBACK TO public_link_merge; RELEASE public_link_merge")
+                    .map_err(storage)?;
+                report.refused_links.push(winner.to_owned());
+            }
+        }
+    }
+    Ok(written)
 }
 
 fn conflict_origin_event_uuid(copy: &str, origin: &str) -> String {
@@ -2377,6 +2523,8 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
         conflicts: Vec::new(),
         skipped_variables: Vec::new(),
         folders: 0,
+        link_collisions: Vec::new(),
+        refused_links: Vec::new(),
         remote: remote_identity,
         remote_content,
         remote_schema,
@@ -2431,9 +2579,11 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
     }
     // Folders, shared vaults, vault secrets, trusted devices, and public links: the later
     // row wins.
-    for lww in &LWW_TABLES {
+    for lww in LWW_TABLES.iter().filter(|lww| lww.table != "public_link") {
         report.folders += merge_lww(&tx, lww, remote_schema)?;
     }
+    let links = merge_public_links(&tx, remote_schema, &mut report)?;
+    report.folders += links;
     let local_tombs = load_tombstones(&tx, "main")?;
     let remote_tombs = load_tombstones(&tx, REMOTE)?;
     // A copy of schema 35 has membership rows with versions of their own: they merge row
@@ -2557,7 +2707,7 @@ fn merge_attached(conn: &mut Connection, scope: &SyncScope) -> VaultResult<Merge
         }
     }
     if by_row {
-        report.folders += merge_folder_rows(&tx)?;
+        report.folders += merge_folder_rows(&tx, scope)?;
     }
     // Tombstones join clocks and take the maximum metadata independently. Both
     // operations are associative, commutative, and idempotent, including under
@@ -3380,9 +3530,10 @@ mod tests {
         old.write_sync_copy(&copy, "Old Mac").unwrap();
         make_schema34_copy(&copy);
         let report = a.merge_from(&copy, &SyncScope::vault()).unwrap();
-        // A conflict of the title only: the later version of the old device wins, and
-        // the credential stays in both folders.
-        assert_eq!(report.conflicts.len(), 1);
+        // The folder change here did not change the version of the credential, so the
+        // later edit of the old device is no conflict: it wins, and the credential stays
+        // in both folders.
+        assert!(report.conflicts.is_empty());
         assert_eq!(a.details(mail).unwrap().summary.title, "Mail (old Mac)");
         assert_eq!(a.item_folders(mail).unwrap(), [work.clone(), home.clone()]);
     }
@@ -3411,15 +3562,12 @@ mod tests {
         old.write_sync_copy(&copy, "Old Mac").unwrap();
         make_schema34_copy(&copy);
         let report = a.merge_from(&copy, &SyncScope::vault()).unwrap();
-        // Its version is the later one, so the credential is in "Bills" alone, as on the
-        // older device; the conflict copy keeps the folders of this Mac.
-        assert_eq!(report.conflicts.len(), 1);
+        // Its version is the later one (the folder change here did not change the version
+        // of the credential), so the credential is in "Bills" alone, as on the older
+        // device, without a conflict copy.
+        assert!(report.conflicts.is_empty());
         assert_eq!(a.item_folders(mail).unwrap(), std::slice::from_ref(&bills));
-        let (&copy_id, _) = a.conflict_copies().unwrap().first_key_value().unwrap();
-        assert_eq!(
-            a.item_folders(copy_id).unwrap(),
-            [work.clone(), home.clone()]
-        );
+        assert!(a.conflict_copies().unwrap().is_empty());
         // The ended memberships keep tombstones with the version of that record.
         let tombstones: i64 = a
             .conn_ref()
@@ -3534,17 +3682,18 @@ mod tests {
         b.add_item_to_folder(b_mail, work).unwrap();
         assert_eq!(b.item_folder(b_mail).unwrap(), Some(home.clone()));
         exchange(&dir, &mut a, &mut b);
-        // The earliest `added_at` of "Work" wins everywhere, so "Work" is first on both.
-        assert_eq!(a.item_folders(mail).unwrap(), [work.clone(), home.clone()]);
+        // The later version of the row of "Work" (Mac B's) wins with its `added_at`, so
+        // "Home" is first on both.
+        assert_eq!(a.item_folders(mail).unwrap(), [home.clone(), work.clone()]);
         assert_eq!(
             b.item_folders(b_mail).unwrap(),
-            [work.clone(), home.clone()]
+            [home.clone(), work.clone()]
         );
         let mut catalogs = [&a, &b]
             .map(|vault| vault.catalog().unwrap().remove(0))
             .into_iter();
         let (on_a, on_b) = (catalogs.next().unwrap(), catalogs.next().unwrap());
-        assert_eq!(on_a.folder, ["Work"]);
+        assert_eq!(on_a.folder, ["Home"]);
         assert_eq!(
             (on_a.folder, on_a.more_folders),
             (on_b.folder, on_b.more_folders)
@@ -3608,6 +3757,479 @@ mod tests {
                     "a_revokes {a_revokes}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_folder_change_and_an_edit_on_another_device_make_no_conflict_copy() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work"]);
+        // Mac B edits the title; a moment later Mac A only adds the credential to "Work".
+        edit(&mut b, b_mail, "Mail renamed on B", "SYNTH-mail");
+        tick();
+        a.add_item_to_folder(mail, &folders[0]).unwrap();
+        let report = exchange(&dir, &mut a, &mut b);
+        assert!(report.conflicts.is_empty(), "a folder change is no edit");
+        assert!(a.conflict_copies().unwrap().is_empty());
+        for (vault, id) in [(&a, mail), (&b, b_mail)] {
+            assert_eq!(
+                vault.details(id).unwrap().summary.title,
+                "Mail renamed on B"
+            );
+            assert_eq!(
+                vault.item_folders(id).unwrap(),
+                std::slice::from_ref(&folders[0])
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_folder_stays_after_a_sync_with_no_change_elsewhere() {
+        let (dir, mut a, mut b, mail, b_mail, folders) = two_macs(&["Work", "Home"]);
+        let (work, home) = (&folders[0], &folders[1]);
+        a.add_item_to_folder(mail, work).unwrap();
+        tick();
+        a.remove_item_from_folder(mail, work).unwrap();
+        exchange(&dir, &mut a, &mut b);
+        tick();
+        a.add_item_to_folder(mail, home).unwrap();
+        tick();
+        a.add_item_to_folder(mail, work).unwrap();
+        let before = a.item_folders(mail).unwrap();
+        assert_eq!(before, [home.clone(), work.clone()]);
+        exchange(&dir, &mut a, &mut b);
+        assert_eq!(a.item_folders(mail).unwrap(), before);
+        assert_eq!(b.item_folders(b_mail).unwrap(), before);
+    }
+
+    /// Write a link row of `link_id` with `uuid` on `vault`, live or revoked.
+    fn put_link(vault: &Vault, uuid: &str, link_id: &str, revoked: bool) {
+        let (key, deleted) = if revoked {
+            (Vec::new(), Some(2))
+        } else {
+            (vec![9u8; 32], None)
+        };
+        vault
+            .conn_ref()
+            .unwrap()
+            .execute(
+                "INSERT INTO public_link
+                     (uuid, link_id, root_kind, root_uuid, name, key, origin, account_id,
+                      expires_at, one_time, access, addresses, created_at, updated_at,
+                      updated_by, deleted_at)
+                 VALUES (?1, ?2, 'item', 'root', 'n', ?3, 'https://connect.example.test',
+                         'acc_synthetic01', 3600, 0, 'anyone', '', 1, 5, 'dev', ?4)",
+                rusqlite::params![uuid, link_id, key, deleted],
+            )
+            .unwrap();
+    }
+
+    /// The link rows of `vault`: (uuid, link_id, revoked).
+    fn links(vault: &Vault) -> Vec<(String, String, bool)> {
+        vault
+            .conn_ref()
+            .unwrap()
+            .prepare("SELECT uuid, link_id, deleted_at IS NOT NULL FROM public_link ORDER BY uuid")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    const SHARED_LINK_ID: &str = "d4e59a0011f71c40fb1dfdb1a8446660";
+
+    #[test]
+    fn one_link_id_under_two_uuids_merges_and_keeps_one_row() {
+        // Live and live: the smallest UUID wins. A revoke on the larger UUID wins over a
+        // live row on the smaller one.
+        for (revoke_l2, winner) in [(false, "l1"), (true, "l2")] {
+            let (dir, mut a, mut b, _, b_mail, _) = two_macs(&[]);
+            put_link(&a, "l1", SHARED_LINK_ID, false);
+            put_link(&b, "l2", SHARED_LINK_ID, revoke_l2);
+            // An unrelated change on Mac B that Mac A must still get.
+            edit(&mut b, b_mail, "Mail on B", "SYNTH-mail");
+            let report = exchange(&dir, &mut a, &mut b);
+            assert_eq!(report.link_collisions, [SHARED_LINK_ID]);
+            assert!(report.refused_links.is_empty());
+            assert_eq!(
+                a.search("").unwrap()[0].title,
+                "Mail on B",
+                "the rest arrived"
+            );
+            for vault in [&a, &b] {
+                assert_eq!(
+                    links(vault),
+                    [(winner.to_owned(), SHARED_LINK_ID.to_owned(), revoke_l2)],
+                    "revoke_l2 {revoke_l2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn three_devices_with_one_link_id_end_with_the_revoked_row() {
+        let (dir, mut a, mut b, _, _, _) = two_macs(&[]);
+        let seed = dir.path().join("seed-c.db");
+        a.write_sync_copy(&seed, "Mac A").unwrap();
+        let (mut c, _) = Vault::adopt_sync_copy(&seed, &dir.path().join("c.db"), PASS).unwrap();
+        c.unlock(PASS).unwrap();
+        put_link(&a, "l1", SHARED_LINK_ID, false);
+        put_link(&b, "l2", SHARED_LINK_ID, false);
+        put_link(&c, "l3", SHARED_LINK_ID, true);
+        // A and B first (l1 wins there), then each with C, in two orders.
+        exchange(&dir, &mut a, &mut b);
+        assert_eq!(links(&b)[0].0, "l1");
+        exchange(&dir, &mut b, &mut c);
+        exchange(&dir, &mut c, &mut a);
+        exchange(&dir, &mut a, &mut b);
+        let expected = [("l3".to_owned(), SHARED_LINK_ID.to_owned(), true)];
+        for vault in [&a, &b, &c] {
+            assert_eq!(links(vault), expected);
+        }
+    }
+
+    #[test]
+    fn a_link_row_that_fails_a_check_here_is_refused_and_stops_nothing() {
+        let (dir, mut a, mut b, _, b_mail, _) = two_macs(&[]);
+        edit(&mut b, b_mail, "Mail on B", "SYNTH-mail");
+        let copy = dir.path().join("loose.db");
+        b.write_sync_copy(&copy, "Mac B").unwrap();
+        // A copy whose table has no checks (a writer that is not this build), with a row
+        // of an origin that this build never stores.
+        let conn = Connection::open_with_flags(&copy, super::super::OPEN_EXISTING).unwrap();
+        super::super::apply_key(&conn, PASS).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE public_link RENAME TO public_link_strict;
+             CREATE TABLE public_link (uuid TEXT PRIMARY KEY, link_id TEXT, root_kind TEXT,
+                 root_uuid TEXT, name TEXT, key BLOB, origin TEXT, account_id TEXT,
+                 expires_at INTEGER, one_time INTEGER, access TEXT, addresses TEXT,
+                 created_at INTEGER, updated_at INTEGER, updated_by TEXT, deleted_at INTEGER);
+             DROP TABLE public_link_strict;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO public_link VALUES ('bad', ?1, 'item', 'root', 'n', ?2,
+                 'http://evil.example', 'acc_synthetic01', 3600, 0, 'anyone', '', 1, 5, 'dev',
+                 NULL)",
+            rusqlite::params![SHARED_LINK_ID, vec![9u8; 32]],
+        )
+        .unwrap();
+        let digest = content_digest(&conn, "main").unwrap();
+        conn.execute(
+            "UPDATE sync_meta SET content_digest = ?1 WHERE id = 1",
+            [digest.as_slice()],
+        )
+        .unwrap();
+        super::super::close_conn(conn).unwrap();
+        let report = a.merge_from(&copy, &SyncScope::vault()).unwrap();
+        assert_eq!(report.refused_links, ["bad"]);
+        assert!(links(&a).is_empty());
+        assert_eq!(
+            a.search("").unwrap()[0].title,
+            "Mail on B",
+            "the rest arrived"
+        );
+    }
+
+    // Random changes on three devices, and a device of schema 34 that only pushes, then a
+    // full exchange in two orders: every device ends with the same content (the fuzz of
+    // the review of PR #166, kept as a regression test).
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+        }
+    }
+
+    type RowDump = Vec<(String, String, i64, i64, String, Option<i64>)>;
+
+    fn id_by_uuid(v: &Vault, uuid: &str) -> Option<u64> {
+        v.conn_ref()
+            .unwrap()
+            .query_row("SELECT id FROM item WHERE uuid = ?1", [uuid], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()
+            .unwrap()
+            .map(|id| u64::try_from(id).unwrap())
+    }
+
+    fn rows_dump(v: &Vault) -> RowDump {
+        v.conn_ref()
+            .unwrap()
+            .prepare(
+                "SELECT i.uuid, f.folder_uuid, f.added_at, f.updated_at, f.updated_by,
+                     f.removed_at
+                 FROM item_folder f JOIN item i ON i.id = f.item_id ORDER BY 1, 2",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn merge_copy(dir: &Path, into: &mut Vault, from: &mut Vault, from_old: bool, n: &mut u32) {
+        *n += 1;
+        let copy = dir.join(format!("c{n}.db"));
+        from.write_sync_copy(&copy, "peer").unwrap();
+        if from_old {
+            make_schema34_copy(&copy);
+        }
+        into.merge_from(&copy, &SyncScope::vault())
+            .unwrap_or_else(|e| panic!("merge failed: {e:?}"));
+        let _ = std::fs::remove_file(&copy);
+    }
+
+    fn pair_mut(vs: &mut [Vault], i: usize, j: usize) -> (&mut Vault, &mut Vault) {
+        assert_ne!(i, j);
+        if i < j {
+            let (l, r) = vs.split_at_mut(j);
+            (&mut l[i], &mut r[0])
+        } else {
+            let (l, r) = vs.split_at_mut(i);
+            (&mut r[0], &mut l[j])
+        }
+    }
+
+    /// The world of the fuzz: random changes and syncs, then a full exchange (and, with
+    /// `reverse_final`, the same from a snapshot in another order). Returns the digest and
+    /// the folder rows of each device.
+    fn fuzz_world(
+        seed: u64,
+        steps: usize,
+        edits: bool,
+        with_old: bool,
+        reverse_final: bool,
+    ) -> (Vec<[u8; 32]>, Vec<RowDump>) {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut a = Vault::create(&dir.path().join("d0.db"), PASS).unwrap();
+        a.unlock(PASS).unwrap();
+        let mut item_uuids = Vec::new();
+        for n in 0..3 {
+            let id = a.add(draft(&format!("I{n}"), "SYNTH-x")).unwrap().id;
+            let uuid: String = a
+                .conn_ref()
+                .unwrap()
+                .query_row(
+                    "SELECT uuid FROM item WHERE id = ?1",
+                    [to_sql_id(id).unwrap()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            item_uuids.push(uuid);
+        }
+        let work = a.create_folder(None, "Work").unwrap().uuid;
+        let home = a.create_folder(None, "Home").unwrap().uuid;
+        let bills = a.create_folder(None, "Bills").unwrap().uuid;
+        let sub = a.create_folder(Some(&work), "Sub").unwrap().uuid;
+        let folders = [work.clone(), home, bills, sub];
+        let first = id_by_uuid(&a, &item_uuids[0]).unwrap();
+        a.set_item_folder(first, Some(&work)).unwrap();
+        let seed_path = dir.path().join("seed.db");
+        a.write_sync_copy(&seed_path, "D0").unwrap();
+        let mut vs = vec![a];
+        let total = if with_old { 4 } else { 3 };
+        for d in 1..total {
+            let (mut v, _) =
+                Vault::adopt_sync_copy(&seed_path, &dir.path().join(format!("d{d}.db")), PASS)
+                    .unwrap();
+            v.unlock(PASS).unwrap();
+            vs.push(v);
+        }
+        let old = with_old.then_some(3usize);
+        let mut n = 0u32;
+        for _ in 0..steps {
+            let d = rng.below(total);
+            let is_old = old == Some(d);
+            let item_uuid = item_uuids[rng.below(item_uuids.len())].clone();
+            let f = folders[rng.below(folders.len())].clone();
+            let g = folders[rng.below(folders.len())].clone();
+            let r = rng.below(100);
+            if rng.below(3) == 0 {
+                tick();
+            }
+            let Some(id) = id_by_uuid(&vs[d], &item_uuid) else {
+                continue;
+            };
+            if is_old {
+                // A device of schema 34: one folder per credential; it pushes, never pulls.
+                if r < 50 {
+                    let folder = (rng.below(4) != 0).then_some(f.as_str());
+                    let _ = vs[d].set_item_folder(id, folder);
+                } else if r < 70 && edits {
+                    let rev = vs[d].details(id).unwrap().summary.revision;
+                    let title = format!("old-{}", rng.below(1000));
+                    let _ = vs[d].update(id, rev, draft(&title, "SYNTH-x"));
+                } else {
+                    let e = rng.below(3);
+                    let (into, from) = pair_mut(&mut vs, e, d);
+                    merge_copy(dir.path(), into, from, true, &mut n);
+                }
+                continue;
+            }
+            match r {
+                0..=17 => {
+                    let _ = vs[d].add_item_to_folder(id, &f);
+                }
+                18..=31 => {
+                    let _ = vs[d].remove_item_from_folder(id, &f);
+                }
+                32..=39 => {
+                    let folder = (rng.below(3) != 0).then_some(f.as_str());
+                    let _ = vs[d].set_item_folder(id, folder);
+                }
+                40..=49 => {
+                    let to = (rng.below(3) != 0).then_some(g.as_str());
+                    let _ = vs[d].move_item(id, Some(f.as_str()), to);
+                }
+                50..=54 if edits => {
+                    let rev = vs[d].details(id).unwrap().summary.revision;
+                    let title = format!("t-{}", rng.below(1000));
+                    let _ = vs[d].update(id, rev, draft(&title, "SYNTH-x"));
+                }
+                55..=56 => {
+                    let _ = vs[d].delete_folder(&f);
+                }
+                57..=58 => {
+                    let rev = vs[d].details(id).unwrap().summary.revision;
+                    let _ = vs[d].delete(id, rev);
+                }
+                59..=62 => {
+                    if let Ok(moves) = vs[d].move_items_to_folder(&[id], Some(g.as_str()))
+                        && rng.below(2) == 0
+                    {
+                        let _ = vs[d].undo_item_folder_moves(&moves);
+                    }
+                }
+                _ => {
+                    let mut e = rng.below(total);
+                    if e == d {
+                        e = (e + 1) % total;
+                    }
+                    let e_old = old == Some(e);
+                    let (into, from) = pair_mut(&mut vs, d, e);
+                    merge_copy(dir.path(), into, from, e_old, &mut n);
+                }
+            }
+        }
+        // The old device updates: its file goes back to 34 and migrates.
+        if let Some(o) = old {
+            let mut v = vs.remove(o);
+            v.lock().unwrap();
+            let path = dir.path().join(format!("d{o}.db"));
+            drop(v);
+            let conn = Connection::open_with_flags(&path, super::super::OPEN_EXISTING).unwrap();
+            super::super::apply_key(&conn, PASS).unwrap();
+            conn.execute_batch(&schema35::downgrade_sql()).unwrap();
+            super::super::close_conn(conn).unwrap();
+            let mut v = Vault::open(&path).unwrap();
+            v.unlock(PASS).unwrap();
+            vs.insert(o, v);
+        }
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        for i in 0..total {
+            for j in 0..total {
+                if i != j {
+                    pairs.push((i, j));
+                }
+            }
+        }
+        let mut snap: Vec<Vault> = Vec::new();
+        if reverse_final {
+            for (i, v) in vs.iter_mut().enumerate() {
+                v.lock().unwrap();
+                let to = dir.path().join(format!("s{i}.db"));
+                std::fs::copy(dir.path().join(format!("d{i}.db")), &to).unwrap();
+                v.unlock(PASS).unwrap();
+                let mut c = Vault::open(&to).unwrap();
+                c.unlock(PASS).unwrap();
+                snap.push(c);
+            }
+        }
+        for _ in 0..3 {
+            for &(i, j) in &pairs {
+                let (into, from) = pair_mut(&mut vs, i, j);
+                merge_copy(dir.path(), into, from, false, &mut n);
+            }
+        }
+        let mut digests: Vec<[u8; 32]> = vs
+            .iter()
+            .map(|v| v.sync_content(&SyncScope::vault()).unwrap())
+            .collect();
+        let mut dumps: Vec<RowDump> = vs.iter().map(rows_dump).collect();
+        if reverse_final {
+            let mut order: Vec<(usize, usize)> = Vec::new();
+            for i in (1..total).rev() {
+                order.push((i - 1, i));
+            }
+            for i in 1..total {
+                order.push((i, i - 1));
+            }
+            let mut rev = pairs.clone();
+            rev.reverse();
+            order.extend(rev.iter().copied().chain(rev.iter().copied()));
+            for &(i, j) in &order {
+                let (into, from) = pair_mut(&mut snap, i, j);
+                merge_copy(dir.path(), into, from, false, &mut n);
+            }
+            digests.extend(
+                snap.iter()
+                    .map(|v| v.sync_content(&SyncScope::vault()).unwrap()),
+            );
+            dumps.extend(snap.iter().map(rows_dump));
+        }
+        (digests, dumps)
+    }
+
+    #[test]
+    fn random_folder_changes_converge_in_any_order() {
+        for seed in 200..=203u64 {
+            let (d, dumps) = fuzz_world(seed, 50, false, false, true);
+            assert!(d.iter().all(|x| *x == d[0]), "seed {seed}: {dumps:#?}");
+        }
+    }
+
+    #[test]
+    fn random_folder_changes_with_a_device_of_schema_34_converge_in_any_order() {
+        for seed in 300..=302u64 {
+            let (d, dumps) = fuzz_world(seed, 50, false, true, true);
+            assert!(d.iter().all(|x| *x == d[0]), "seed {seed}: {dumps:#?}");
+        }
+    }
+
+    #[test]
+    fn random_folder_changes_converge() {
+        for seed in 1..=2u64 {
+            let (d, dumps) = fuzz_world(seed, 60, false, false, false);
+            assert!(d.iter().all(|x| *x == d[0]), "seed {seed}: {dumps:#?}");
+        }
+    }
+
+    #[test]
+    fn random_folder_changes_and_edits_with_a_device_of_schema_34_converge() {
+        for seed in 100..=104u64 {
+            let (d, dumps) = fuzz_world(seed, 60, true, true, false);
+            assert!(d.iter().all(|x| *x == d[0]), "seed {seed}: {dumps:#?}");
         }
     }
 

@@ -189,21 +189,29 @@ fn valid_link_id(text: &str) -> bool {
 /// The origin rule of the table and of connect-share-v1 section 2: `https://`, or
 /// `http://localhost` and `http://127.0.0.1` with an optional port; no path.
 pub(crate) fn valid_link_origin(origin: &str) -> bool {
-    let rest = if let Some(rest) = origin.strip_prefix("https://") {
-        rest
+    let (rest, loopback) = if let Some(rest) = origin.strip_prefix("https://") {
+        (rest, false)
     } else if let Some(rest) = origin.strip_prefix("http://") {
-        let host = rest.split(':').next().unwrap_or_default();
-        if host != "localhost" && host != "127.0.0.1" {
-            return false;
-        }
-        rest
+        (rest, true)
     } else {
         return false;
     };
-    !rest.is_empty()
-        && !rest.contains('/')
+    // The CHECK of the table: the host before the first `:`, then a port of 1 to 5
+    // digits; no path, no user part, no query, no fragment, no IPv6 brackets.
+    let (host, port) = match rest.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (rest, None),
+    };
+    if loopback && host != "localhost" && host != "127.0.0.1" {
+        return false;
+    }
+    !host.is_empty()
         && rest.len() <= 260
         && rest.bytes().all(|byte| byte.is_ascii_graphic())
+        && !rest.contains(['/', '@', '\\', '?', '#', '[', ']'])
+        && port.is_none_or(|port| {
+            (1..=5).contains(&port.len()) && port.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 const COLUMNS: &str = "uuid, link_id, root_kind, root_uuid, name, key, origin, account_id, \

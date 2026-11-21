@@ -9,6 +9,8 @@ pub(super) enum Command {
     NewCredential,
     NewFolder,
     MoveItems,
+    AddToFolder,
+    RemoveFromFolder,
     RenameFolder,
     MoveFolder,
     DeleteFolder,
@@ -43,6 +45,9 @@ pub(super) struct Context {
     pub folder_exists: bool,
     pub selection_exists: bool,
     pub undo: Vec<crate::vault::ItemFolderMove>,
+    pub undo_kind: ui::folders::FolderUndo,
+    /// Every selected credential is in the folder of the list itself.
+    pub in_folder: bool,
 }
 
 impl Context {
@@ -61,7 +66,17 @@ impl Context {
             Command::NewFolder => {
                 organize && personal && (self.place == Place::CREDENTIALS || self.folder_exists)
             }
-            Command::MoveItems => organize && personal && !self.text && self.selection_exists,
+            Command::MoveItems | Command::AddToFolder => {
+                organize && personal && !self.text && self.selection_exists
+            }
+            Command::RemoveFromFolder => {
+                organize
+                    && personal
+                    && !self.text
+                    && self.selection_exists
+                    && self.folder_exists
+                    && self.in_folder
+            }
             Command::RenameFolder | Command::MoveFolder | Command::DeleteFolder => {
                 organize && personal && self.folder_exists
             }
@@ -200,9 +215,23 @@ mod platform {
             add(
                 &item,
                 Command::MoveItems,
-                "Move to Folder…",
+                ui::folders::MOVE_TO_FOLDER,
                 Some(Code::KeyM),
                 true,
+            );
+            add(
+                &item,
+                Command::AddToFolder,
+                ui::folders::ADD_TO_FOLDER,
+                None,
+                false,
+            );
+            add(
+                &item,
+                Command::RemoveFromFolder,
+                ui::folders::REMOVE_FROM_FOLDER,
+                None,
+                false,
             );
             add(&folder, Command::RenameFolder, "Rename…", None, false);
             add(&folder, Command::MoveFolder, "Move Folder…", None, false);
@@ -250,7 +279,7 @@ mod platform {
                     item.set_text(if state.text || state.undo.is_empty() {
                         "Undo"
                     } else {
-                        "Undo Move"
+                        state.undo_kind.button()
                     });
                 }
             }

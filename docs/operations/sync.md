@@ -13,7 +13,7 @@ Syncs: the credentials and their settings.
 - each credential: its name, kind, notes, tags, fields and secret values, and whether it is archived,
 - its declaration, its environment variable (with the hosts of placeholder mode), and its connector,
 - its folders: a credential is in any number of folders, or in none (schema 35); each membership and each folder syncs on its own,
-- the public links of the vault (schema 35), so every device of the owner lists them; a revoked link stays revoked,
+- the public links of the vault (schema 35), so every device of the owner lists them; a revoked link stays revoked; two rows of one link id keep one (a revoked one first); a row that this Mac refuses stops nothing else,
 - its history: added, edited, archived, declaration, variable, and connector events.
 
 Stays on each Mac and never merges:
@@ -101,7 +101,7 @@ An old copy of the synced file (for example from a backup of the folder) has onl
 
 **A conflict** is a credential that both sides changed since they last saw each other's change, with different content. The later change (by time, then by device) wins. The other version stays as an archived credential "<title> (conflict copy, <device>)", without its variable and connector. Nothing is lost. A note says "Sync kept both versions in …". Open Credentials > Archived to compare, copy what you need, and delete the copy. Each Mac that sees the conflict makes the same copy, so it is there once.
 
-**Folders.** Each folder membership of a credential merges on its own, so a change of folders is never a conflict: the later of an add and a removal wins. Mac A puts a credential in "Work" and Mac B in "Home": it is in both. Mac A takes it out of "Work" and Mac B out of "Home": it is in neither. Mac A moves it from "Work" to "Home" and Mac B from "Work" to "Bills": it is in "Home" and "Bills". A folder that one Mac deleted takes its credentials out of it on every Mac. A copy of schema 34 knows one folder per credential; when that folder is one of the folders here, the credential keeps all of them.
+**Folders.** Each folder membership of a credential merges on its own, so a change of folders is never a conflict, also when another Mac edits the credential at the same time: the later of an add and a removal wins. Mac A puts a credential in "Work" and Mac B in "Home": it is in both. Mac A takes it out of "Work" and Mac B out of "Home": it is in neither. Mac A moves it from "Work" to "Home" and Mac B from "Work" to "Bills": it is in "Home" and "Bills". A folder that one Mac deleted takes its credentials out of it on every Mac. A copy of schema 34 knows one folder per credential; when that folder is one of the folders here, the credential keeps all of them.
 
 **A variable name** that another credential on this Mac has already: the incoming credential comes without its variable, and a note says so. Rename one of the variables.
 

@@ -75,7 +75,7 @@ mod first_steps;
 mod focus;
 /// Folders of the personal vault: the tree and the sheets (ADR 0026 §5).
 #[cfg(feature = "vault")]
-mod folders;
+pub(crate) mod folders;
 #[cfg(feature = "vault")]
 pub(crate) mod import;
 #[cfg(feature = "vault")]
@@ -387,6 +387,9 @@ pub(crate) struct UiState {
     pub(crate) search_all: bool,
     #[cfg(feature = "vault")]
     pub(crate) move_undo: Vec<crate::vault::ItemFolderMove>,
+    /// What [`UiState::move_undo`] gives back: a move, an add, or a remove.
+    #[cfg(feature = "vault")]
+    pub(crate) move_undo_kind: folders::FolderUndo,
     #[cfg(feature = "vault")]
     pub(crate) notification_destination: Option<crate::desktop::notify::NotificationDestination>,
     #[cfg(feature = "vault")]
@@ -573,6 +576,11 @@ pub(crate) enum Sheet {
     MoveItemsToFolder {
         item_ids: Vec<u64>,
     },
+    /// Add credentials to one more folder (ADR 0047 §2).
+    #[cfg(feature = "vault")]
+    AddToFolder {
+        item_ids: Vec<u64>,
+    },
     #[cfg(feature = "vault")]
     MoveFolder {
         uuid: String,
@@ -674,6 +682,14 @@ pub(super) fn native_menu_context(
             .is_some_and(|result| {
                 result.is_ok_and(|ids| selected.iter().all(|id| ids.binary_search(id).is_ok()))
             });
+    // "Remove from This Folder": every selected credential is in the folder of the list.
+    let in_folder =
+        matches!(&app.place, super::Place::Folder(Some(_))) && !selected.is_empty() && {
+            let tree = folders::FolderTree::load(app);
+            selected
+                .iter()
+                .all(|id| tree.directly_in(&app.place, *id).is_some())
+        };
     super::native_menu::Context {
         epoch: app.owner_ui.session.epoch(),
         path: app
@@ -711,6 +727,8 @@ pub(super) fn native_menu_context(
         folder_exists,
         selection_exists,
         undo: app.ui.move_undo.clone(),
+        undo_kind: app.ui.move_undo_kind,
+        in_folder,
     }
 }
 
@@ -791,6 +809,18 @@ pub(super) fn native_menu_command(
         }
         Command::MoveItems => {
             folders::open_move_many(app);
+            None
+        }
+        Command::AddToFolder => {
+            let ids = folders::chosen_items(app);
+            folders::open_add(app, ids);
+            None
+        }
+        Command::RemoveFromFolder => {
+            if let super::Place::Folder(Some(uuid)) = app.place.clone() {
+                let ids = folders::chosen_items(app);
+                folders::remove_items(app, &ids, &uuid);
+            }
             None
         }
         Command::RenameFolder | Command::MoveFolder | Command::DeleteFolder => {

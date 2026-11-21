@@ -64,7 +64,7 @@ struct FolderView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(items) { item in
-                        ItemListRow(item: item)
+                        ItemListRow(item: item, folder: uuid)
                     }
                 }
             } header: {

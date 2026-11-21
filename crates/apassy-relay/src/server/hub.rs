@@ -490,6 +490,9 @@ pub struct Hub {
     /// store, so an add that clears a waiting removal and the apply of that removal never
     /// cross (`add_store_device`, `apply_removal`).
     store_changes: Mutex<()>,
+    /// The public links of Connect (`links.db`, docs/SPEC.md section 38): with the account
+    /// routes only.
+    pub(crate) links: Option<Arc<crate::server::links::Links>>,
 }
 
 impl Hub {
@@ -530,7 +533,15 @@ impl Hub {
             }
             _ => None,
         };
+        // Public links live in a file of their own, outside every backup
+        // (connect-share-v1 section 1), and only where the account routes are.
+        let links = if config.connect.accounts {
+            Some(Arc::new(crate::server::links::Links::open(&config)?))
+        } else {
+            None
+        };
         let hub = Arc::new(Self {
+            links,
             accounts: crate::server::account::Accounts::new(signer)?,
             billing,
             billing_maintained_at: std::sync::atomic::AtomicU64::new(0),
@@ -564,6 +575,14 @@ impl Hub {
             hub.set_plans(Arc::new(crate::server::billing_store::BillingPlans(
                 billing.clone(),
             )));
+        }
+        // A relay that you run yourself (R0): every account is entitled without Stripe.
+        // The configuration refuses this beside Stripe and in `connect` mode.
+        if hub.config.connect.accounts
+            && hub.config.connect.plans == crate::config::AccountPlans::Open
+            && hub.billing.is_none()
+        {
+            hub.set_plans(Arc::new(crate::server::account::OpenPlans));
         }
         let rows = hub.directory.teams()?;
         finish_migration(&hub.config, &rows);
@@ -761,6 +780,11 @@ impl Hub {
     /// The Connect tunnel broker, on a started relay with the account routes.
     pub fn tunnel(&self) -> Option<&crate::server::tunnel::Broker> {
         self.tunnel.get()
+    }
+
+    /// The public links (`links.db`), on a relay with the account routes.
+    pub fn links(&self) -> Option<&Arc<crate::server::links::Links>> {
+        self.links.as_ref()
     }
 
     /// Installs the plans of billing (C2): until then every account has none.

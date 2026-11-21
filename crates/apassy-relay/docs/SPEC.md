@@ -2641,3 +2641,104 @@ There is no in-place way back from `connect` mode: the plain files have no key, 
 - The stopped backup of the cutover and its master key open every deleted team's metadata (never an item value). Their retention is the owner's choice (docs/operations/connect.md); until both are destroyed, the deleted teams can come back.
 - Deleting a file frees its blocks; the filesystem does not overwrite them. The deleted files were SQLCipher ciphertext (team files, copies, archives, `relay.db.keyed`) or snapshot ciphertext, and the cutover writes no team key or deleted row to the disk in plain (37.5, step 3), so the freed blocks open only with the master key. An owner who wants no such ciphertext left moves the plain files to a new volume and destroys the old one (docs/operations/connect.md, section 9.6).
 - The switches are read at start: a relay holds no long poll of a free team across a restart, but a request that started before the restart ends as it began.
+
+## 38. Public links
+
+Public links of Apassy Connect (ADR 0047 release A, plan units R0, R1, and the release-A part of R2). The wire is the contract [connect-share-v1](../../../docs/contracts/connect-share-v1.md); this section names how the relay serves it. The code is `server/links.rs` (the file, the routes, the codes, the viewer, the prune), `server/mail.rs` (the mail thread and the submission client), and `Plans::sharing` in `server/account.rs`.
+
+### 38.1 Where the routes are
+
+The routes of the contract exist where the account routes are (`APASSY_RELAY_CONNECT_ACCOUNTS=1` or `connect` mode), on the node listener only, after the edge secret. `POST|GET /v1/account/links` and `DELETE /v1/account/links/{link_id}` are account routes (`AccountEndpoint::Links`, section 33.2). `POST /v1/links/{link_id}/open` and `…/code` are edge routes: an `Authorization` header is 400, the body is read up to 4 KiB (`links::MAX_PUBLIC_BODY`, 413 above), and every answer carries `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Every answer of the five routes of public links (create, list, revoke, open, code), errors included, carries `x-apassy-links: 1` (`links::MARKER`): a client takes a 404 for a revoke as done only with it, so the 404 of an image without these routes (no marker) leaves the revoke pending. The viewer files `/s`, `/share.js`, and `/share.css` (section 38.6) are served there too. Without the account routes every one of these paths is 404, and in `connect` mode none of them is 410. A link id that is not 32 lowercase hex is the one answer of a link that does not open.
+
+### 38.2 `links.db`
+
+`links.db` (`config::LINKS_FILE`) is a file of its own in the data directory, made at the first start with the account routes. In `connect` mode it is a plain file, as `relay.db` is; otherwise it is encrypted with the master key. A file of version 1 gets the two counts of the link row (`code_failures`, `code_requests`) when it opens, in one transaction (`links::migrate`), and is then of `LINKS_VERSION` 2. A file of the other form, or of another version, stops the start with a message and is left as it is: it holds the ids of every link ever made. `connect-cutover` converts the keyed file to a plain one (38.13); `apassy-relay purge-links` empties it (38.14). Its tables:
+
+| Table | Holds |
+| --- | --- |
+| `link` | The link id, the account id, the times, the one-time flag, the access mode, the count of addresses, the sealed form (`NULL` after the open of a one-time link), the SHA-256 of the creation body (the retry rule), `opens`, `last_opened_at`, `code_failures` (codes that did not open), `code_requests` (code requests that the mail thread handled) |
+| `link_address` | Each address hash of a link for e-mail addresses, its wrong tries over the life of the link, and its codes of the current UTC day |
+| `link_code` | One code of each link and address: an HMAC-SHA256 of the code under the address key of the link (which Connect does not keep), its expiry, its tries |
+| `link_id_used` | Every link id ever stored, and nothing else (no account, no time, never deleted): an id is used once |
+| `mail_count` | The code mails of each account and of the relay (account id `""`) on the current UTC day |
+| `mail_outbox` | The address and the text of each code mail until the SMTP server takes it, at most an hour |
+
+Nothing in it names a client address. No row holds the link key, the seal key, or the address key.
+
+**No backup holds it.** `admin backup` copies `relay.db` and the team files; the stopped backup (`apassy-relay backup`) and the backup check of the cutover list `relay.db`, the old files, `teams/`, and the audit archive by name, so `links.db` is in none of them, and no restore brings a link back. A restore keeps the `links.db` of the data directory as it is. Snapshots of the whole data directory by the host (a volume, restic) must leave out `links.db*` too (docs/OPERATIONS.md 30.1).
+
+### 38.3 The account routes
+
+- `POST /v1/account/links` first looks for a link of the same id and the same body (its SHA-256) from the same account: a retry gets its stored view at once, before any check, also when its expiry would no longer pass. Otherwise it takes the strict body of contract section 4.1: the id (32 lowercase hex), the sealed form (b64u, 28 bytes more than a padded plaintext of 1 to 32 KiB that is a multiple of 1 KiB), the expiry (540 to 2592060 seconds after the relay's clock), the one-time flag, the access, and the address hashes (none for `anyone`, 1 to 20 distinct 43-character b64u values for `emails`); else 400. Then: a relay whose `public_url` is not `https:` (or `http://localhost` or `http://127.0.0.1`, for tests) makes no link (403 `forbidden`); `emails` without a mail sender is 503 `mail_unavailable`. In one transaction of `links.db`: a known id with the same body from the same account answers its stored view; any other known id, and an id in `link_id_used`, is 409 `conflict`; the live links of the account (not expired, not revoked, not an opened one-time link) at the limit of its plan are 403 `link_limit`, whose message names the limit and never a price; then the row, its address hashes, and the id in `link_id_used`. The answer is the view of section 4.2.
+- `GET /v1/account/links`: the links of the account that did not expire, the newest first, at most `MAX_LISTED` (1000), with `live`, `limit` (`null` with open plans), and `mail`.
+- `DELETE /v1/account/links/{link_id}` (no body or `{}`): deletes the row with its address hashes and codes (`ON DELETE CASCADE`) in one transaction. A link of another account and an unknown one are 404. The id stays in `link_id_used`.
+
+### 38.4 The limits
+
+`Plans::sharing(directory, account, now)` gives `Sharing::Standard` (no plan, Personal, Family), `Sharing::Team` (an entitled `team` plan), or `Sharing::Open` (open plans, 38.9). The default reads `Plans::plan`; `OpenPlans` answers `Open`. The relay's settings give the numbers: `APASSY_CONNECT_LINKS` (25) and `APASSY_CONNECT_LINKS_TEAM` (100) live links; open plans have no plan limit. The count is in the transaction that adds a link. A plan that ends leaves the links until their expiry; a new link counts against the new limit.
+
+### 38.5 The public routes
+
+- **The one refusal.** An unknown, expired, revoked, tombstoned, or opened link, and a link of an account that `relay.db` does not hold any more, is the same `404 not_found` body on both routes, after the form of the body only.
+- `POST /v1/links/{link_id}/open` takes `confirm` and `email`, `address_key`, `code` (all four present; the last three all `null` or all set, else 400). The table of contract section 4.4 decides in one transaction: the sealed form, or `null` when the reader must act first. An answer with the sealed form counts in `opens` and `last_opened_at`; at the first such answer of a one-time link the sealed form goes, with the address hashes and the codes, and the row stays until its expiry. Of two opens of a one-time link at the same moment, one gets the sealed form. A code is 8 digits (else 400); it opens when Connect holds a live code (not expired, under 5 tries, the HMAC under the given address key) for the address hash of the normal form of `email` under `address_key`. Every other code is 403 `code_invalid`, with the same statements on every path; with a live code, its try is also written. On every path: one read of a live code for the address hash, one HMAC (against a stand-in hash without a live code), and the same four writes in one committed transaction: `link.code_failures` + 1, a try of the live code if there is one, a wrong try of the pair by the count of that update (so only while a code lives), and the end of the code at its fifth try or the pair's tenth wrong try. A guess with no live code counts nothing for the pair, so a holder of the link cannot lock a reader out without a mail.
+- `POST /v1/links/{link_id}/code` answers before any look at the addresses, after these checks in this order: the body (400: no normal form, an address key that is not 32 bytes); the link (404, as above, also for a link of `anyone`); a mail sender and the daily mail caps of the account and of the relay (503 `mail_unavailable`, with `Retry-After` until the UTC day ends above a cap, for every request of that account's links whatever the address); the code requests of the link (429 `rate_limited` with `Retry-After`); then `{"expires_in":900}`. Nothing of this depends on the address. The request goes to a queue in memory (at most 10 000; above it 503 `busy`), and the mail thread looks the address hash up on the link: when it is there, has fewer than 10 wrong tries, fewer than 5 codes this UTC day, and both caps have room, the thread makes a new code (which ends the one before), keeps its hash for 15 minutes, counts the mail for the account and the relay, and puts it in the outbox, in one transaction; else nothing is made. Both paths run the same reads and the same statements (`link.code_requests` + 1, then each write with "made" as a parameter of its `WHERE`), so the transaction holds the lock of `links.db` as long on both. The normal form and the address key live only in that queue entry and are wiped with it; no row and no log line holds an address key.
+
+### 38.6 The viewer page
+
+`/s`, `/share.js`, and `/share.css` are the files of `deploy/worker/public/` (`include_str!`), so a relay without the edge Worker serves the same page as the hosted one, with the headers of contract section 5 (the CSP with Trusted Types, `no-store`, `no-referrer`, `noindex, nofollow`, `nosniff`, `DENY`, `same-origin`). `GET` and `HEAD` only (405 with the same headers). The relay never redirects `/s`: a query string is the same page, and `/s/` is 404. The relay image takes the three files into its build context (`Dockerfile.dockerignore`).
+
+A relay with the account routes refuses every request with `Service-Worker: script` with 400 `invalid_request`, on every path, before any other check: no service worker is registered on the origin of the viewer. The proxy (`/p/`) removes `Service-Worker-Allowed` from every upstream answer and adds `Content-Security-Policy: sandbox` beside the upstream's own policy.
+
+### 38.7 The code mail
+
+The relay sends one mail: the code of a link for e-mail addresses (contract section 10), plain text in US-ASCII, with the subject `Your Apassy code`, the code, and its 15 minutes; no link, no image, no name of the person who made the link. The transaction of the mail thread runs the same statements for every request, but its writes touch rows only when it makes a code: its time, and the lock and commit of `links.db`, are close on both paths, not equal (the accepted signal of contract section 4.5). The submission client is built when `links.db` opens (`Links::open`), so a relay whose sender cannot be built does not start. The `relay-mail` thread (started by the node listener when a sender is set) turns the waiting code requests into mails (38.5), also between two mails, then hands each due mail of the outbox to the SMTP server: a mail the server took leaves the outbox at once; a 5xx reply is permanent and drops the mail at once; any other failure waits 30 seconds, doubling up to 10 minutes; a mail older than an hour is deleted (by the thread and by the maintenance pass). One SMTP session has one deadline of 60 seconds (`mail::SESSION_SECS`) for all its reads, writes, and the TLS handshake. When the thread ends, or cannot start, the mail is off (`mail: false`, links for e-mail addresses and code requests answer 503 `mail_unavailable`) and the waiting code requests go with their address keys.
+
+The submission client (`mail::Mailer`) is written on the relay's rustls stack (ring, the platform verifier), with no new crate: TLS from the first byte on port 465, else STARTTLS, which the server must offer (no plain session); bytes that arrive before the TLS handshake end the session; the server's certificate must name `APASSY_CONNECT_SMTP_HOST`. EHLO with the sender's domain; AUTH PLAIN, else LOGIN, only over TLS; one `MAIL FROM`, one `RCPT TO`, `DATA` with the dots doubled, `QUIT`. Every address it sends is in the normal form of contract section 6, so no command carries another.
+
+**Logs.** No log line names an address, a code, the text of a mail, a link id, or an address key. A failed submission logs its step and the server's reply code only (`a code mail was not taken by the SMTP server at step rcpt to (451) (try 1)`): a reply text may quote the address.
+
+| Variable | Effect |
+| --- | --- |
+| `APASSY_CONNECT_SMTP_HOST` | The submission server. Unset: no sender (`mail: false`; `emails` links and the code route are 503 `mail_unavailable`) |
+| `APASSY_CONNECT_SMTP_PORT` | 465 (TLS) or another port (STARTTLS); default 587 |
+| `APASSY_CONNECT_SMTP_USER`, `APASSY_CONNECT_SMTP_PASSWORD_FILE` | The submission account; both or neither |
+| `APASSY_CONNECT_SMTP_FROM` | The sender, one address in its normal form; required with the host (no default; the hosted relay sets `connect@apassy.wyderka.cc`) |
+
+A setting of the sender without the host is a configuration error.
+
+### 38.8 The caps of the code requests
+
+| Count | Setting | Default | Above it |
+| --- | --- | --- | --- |
+| Code requests of each link, one hour, every request (memory) | `APASSY_CONNECT_MAIL_PER_LINK` | 20 | 429 |
+| Code mails of the links of one account, one UTC day (`mail_count`), counted first | `APASSY_CONNECT_MAIL_PER_ACCOUNT`, `_TEAM`, `_OPEN` | 50, 200, 500 | 503 `mail_unavailable` |
+| Code mails of the relay, one UTC day (`mail_count`) | `APASSY_CONNECT_MAIL_PER_DAY` | 2000 | 503 `mail_unavailable` |
+| Codes of each link and address, one UTC day (`link_address`) | – | 5 | no code; the same answer |
+| Wrong tries of each link and address while a code lives, the life of the link (`link_address`) | – | 10 | no code; the same answer |
+| Each code | – | 5 tries, 15 minutes | 403 `code_invalid` |
+
+The checks at the request depend on nothing but the link: a refusal says nothing about an address. A restart resets the count in memory. The edge Worker adds its own per-client limits (38.10).
+
+### 38.9 Open plans (R0)
+
+`APASSY_RELAY_ACCOUNT_PLANS=open` (`config::AccountPlans::Open`) is for a relay that you run yourself: `Hub::open` installs `account::OpenPlans`, so every account is entitled without Stripe (Personal, active, nothing that ends): it makes vault stores and pushes, gets the entitlement token, and its links have no plan limit. The configuration refuses it beside either Stripe file, in `connect` mode, and without the account routes. Unset, the plans are billing's, or none without Stripe.
+
+### 38.10 The edge Worker
+
+`POST /v1/links/*/open` counts in `LINK_LIMITER` (namespace 1009, 30 a minute) and `POST /v1/links/*/code` in `LINK_CODE_LIMITER` (namespace 1010, 5 a minute), each keyed by the IPv4 address or the IPv6 /64, then 429 with `Retry-After: 60`; a missing or failing binding lets the request pass (the relay counts too). The bodies of `/v1/links/` are capped at 4 KiB (`MAX_LINK_LENGTH`), before the limiter and the relay; the creation keeps the 64 KiB cap of every JSON route. The Worker refuses `Service-Worker: script` on every path with 400, before its static files. It serves the viewer itself (section 38.6) with the same headers.
+
+### 38.11 Maintenance
+
+At most once a minute (`Links::maintain`, from the relay's maintenance pass): expired links with their address hashes and codes, ended codes, mails older than an hour, mail counts of past days, and the links of every account that `relay.db` does not hold (a deletion whose second step did not run). `DELETE /v1/account` deletes the account's links after its directory transaction; an open of a link checks that its account still exists. `link_id_used` is never pruned.
+
+### 38.12 Tests
+
+`tests/server_links.rs`: a link opens until its expiry and the pass deletes it; a creation is strict; a one-time link opens once, also for two opens at the same moment; a revoke is at once; one refusal for every reason; the plan limits (25, Team, a plan that ends, an opened one-time link that does not count); a deleted account takes its links, also an orphan row; neither backup holds `links.db`; a revoked, expired, or deleted id cannot be registered again; a late retry gets its stored view; every address vector of the contract gives the relay's normal form and hash; the purge empties the links and keeps their ids; the viewer with its headers and no redirect; `Service-Worker: script` is refused; a link needs an `https:` origin. `server_connect_cutover.rs`: `the_cutover_keeps_the_links_and_their_used_ids` (a revoked id is 409 after the cutover, and the plan binds `links.db`). `tests/server_mail.rs`, with a fake SMTP server on a free loopback port (`tests/common/fake_smtp.rs`, its own test CA, STARTTLS or TLS, AUTH): a link for e-mail addresses opens only with the mailed code; TLS from the first byte; the answer is the same for an address that is not on the link; the code route answers before the lookup; five wrong codes end a code; a wrong code does the same work for every address; 9 wrong tries allow a code and 10 do not, and a guess without a live code counts nothing; the code requests of a link, the daily caps of an account and of the relay (also across a restart), and the 5 codes of a link and address with the reset of the UTC day; the client sends no AUTH, MAIL FROM, or RCPT TO without STARTTLS, with a certificate for another name, with an untrusted root, or to a server that offers AUTH before TLS; a 5xx drops the mail; a refused mail waits and goes after an hour; without SMTP an `emails` link is refused; the mail settings at start; and, with the relay binary, no log line holds an address, a code, or a link id. `server_account.rs`: `open_plans_entitle_every_account`, `open_plans_are_refused_beside_stripe`. `proxy_flow.rs`: `proxy_responses_are_sandboxed`. The Worker: `public link rate limit` and `service worker` in `deploy/worker/test/index.test.ts`.
+
+### 38.13 `links.db` in the cutover
+
+`connect-cutover` keeps `links.db` with every row, as it keeps a vault store, and the master key never leaves it on the disk in plain. The plan (`links_entry`) takes the keyed file only when it opens with the master key, is of `LINKS_VERSION`, passes `integrity_check`, and has no write journal; the record's `links` names its size and SHA-256, and the plan hash binds them (a change after the dry run is a new plan). Before the commit point the run checks that the file is the one of the plan and exports it under the master key to `links.db.plain`, checked against its source (version, schema, the rows of each table); after it, the plain copy replaces the keyed file (`move_links`: written again from the keyed file when a run stopped). The record's `links_after` names the plain file. A dry run of a committed cutover lists `links.db` in `to_convert` while it is keyed. `links.db` is in neither `files_before` (no backup holds it) nor `left`. So after the cutover a revoked id stays used.
+
+### 38.14 `apassy-relay purge-links`
+
+With the relay stopped (it takes `relay.lock`): every link goes with its address hashes, codes, and counts, and the mails of the outbox go; `link_id_used` stays, so no purged or revoked id opens or is made again. It opens `links.db` as the relay does (plain in `connect` mode, else keyed) and refuses a file of another form or version unchanged. It prints `{"links","mails","ids_kept"}`. For a relay that comes back to links after an image without them, whose revokes a device took as done (docs/OPERATIONS.md 30.5).

@@ -1071,6 +1071,12 @@ fn links_are_made_only_for_https_origins() {
         "https://example.com/path",
         "ftp://example.com",
         "https://Example.com",
+        "https://user@example.com",
+        "https://example.com:",
+        "https://example.com:123456",
+        "https://example.com:80a",
+        "http://localhost:abc",
+        "https://example.com?x",
     ] {
         assert_eq!(link::link_origin(bad), Err(LinkError::Origin), "{bad}");
     }

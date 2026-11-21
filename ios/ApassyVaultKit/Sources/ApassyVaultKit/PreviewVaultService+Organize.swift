@@ -54,6 +54,12 @@ extension PreviewVaultService {
         }
     }
 
+    /// Put a credential in `folders`, the first folder first, as the core keeps `folder` and `folders`.
+    private func placeItem(_ id: UInt64, in folders: [String]) {
+        items[id]?.row.folders = folders
+        items[id]?.row.folder = folders.first
+    }
+
     private func depth(_ uuid: String?) -> Int { organizeState.folders.path(to: uuid).count }
 
     private func subtree(_ uuid: String) -> Set<String> {
@@ -122,7 +128,7 @@ extension PreviewVaultService {
                 .sorted { ($0.position, $0.name) < ($1.position, $1.name) }
                 .flatMap { folder -> [Folder] in
                     var folder = folder
-                    folder.count = items.values.filter { $0.row.folder == folder.uuid && !$0.row.archived }.count
+                    folder.count = items.values.filter { $0.row.folders.contains(folder.uuid) && !$0.row.archived }.count
                     return [folder] + level(folder.uuid)
                 }
         }
@@ -187,8 +193,13 @@ extension PreviewVaultService {
         try requireFolder(uuid)
         let parent = organizeState.folders.first { $0.uuid == uuid }?.parent
         var moved = 0
-        for (id, item) in items where item.row.folder == uuid {
-            items[id]?.row.folder = parent
+        // A credential in other folders too stays in them; the parent takes the place of the folder.
+        for (id, item) in items where item.row.folders.contains(uuid) {
+            var folders = item.row.folders
+            let index = folders.firstIndex(of: uuid) ?? 0
+            folders.remove(at: index)
+            if let parent, !folders.contains(parent) { folders.insert(parent, at: index) }
+            placeItem(id, in: folders)
             moved += 1
         }
         var position = nextPosition(in: parent)
@@ -204,7 +215,19 @@ extension PreviewVaultService {
     public func setItemFolder(id: UInt64, folder: String?) async throws {
         _ = try stored(id)
         if let folder { try requireFolder(folder) }
-        items[id]?.row.folder = folder
+        placeItem(id, in: folder.map { [$0] } ?? [])
+    }
+
+    public func addItemToFolder(id: UInt64, folder: String) async throws {
+        let item = try stored(id)
+        try requireFolder(folder)
+        guard !item.row.folders.contains(folder) else { return }
+        placeItem(id, in: item.row.folders + [folder])
+    }
+
+    public func removeItemFromFolder(id: UInt64, folder: String) async throws {
+        let item = try stored(id)
+        placeItem(id, in: item.row.folders.filter { $0 != folder })
     }
 
     // MARK: Adding by paste

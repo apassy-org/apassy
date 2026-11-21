@@ -33,6 +33,7 @@ const USAGE: &str = "Usage:
   apassy-relay downgrade-directory-1005 [--delete-vault-stores]
   apassy-relay snapshot-check
   apassy-relay backup
+  apassy-relay purge-links
   apassy-relay connect-cutover [--dry-run | --confirm-delete-teams <plan>] [--backup <folder>]
   apassy-relay admin team-code [--hours <n>]
   apassy-relay admin node-code [--minutes <n>]
@@ -86,6 +87,9 @@ The downgrades and `rollback-check` refuse APASSY_RELAY_MODE=connect: its files 
 `backup` runs with the relay stopped: a byte-for-byte copy of the data directory in a new
 folder of APASSY_RELAY_BACKUP_DIR, with MANIFEST.json (\"stopped\": true); `admin backup`
 is the one of a running relay.
+`purge-links` runs with the relay stopped: every public link in links.db goes, with its
+codes, counts, and the mails of the outbox; the ids of all links ever made stay, so a
+revoked link never opens again (docs/OPERATIONS.md 30.5).
 `connect-cutover` runs with the relay stopped and the master key, once, at the end of the
 hosted relay (docs/operations/connect.md): it checks the newest stopped backup (or
 --backup <folder>), keeps relay.db and the vault stores of the accounts as plain files,
@@ -121,6 +125,7 @@ enum Command {
     },
     SnapshotCheck,
     Backup,
+    PurgeLinks,
     ConnectCutover {
         confirm: Option<String>,
         backup: Option<PathBuf>,
@@ -365,6 +370,7 @@ fn parse(args: &[String]) -> Result<Command, String> {
         }
         "snapshot-check" if args.len() == 1 => Ok(Command::SnapshotCheck),
         "backup" if args.len() == 1 => Ok(Command::Backup),
+        "purge-links" if args.len() == 1 => Ok(Command::PurgeLinks),
         "connect-cutover" => parse_cutover(&args[1..]),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "init" => {
@@ -666,6 +672,16 @@ fn main() -> ExitCode {
                 Err(error) => fail(&error.message),
             }
         }
+        Command::PurgeLinks => match apassy_relay::server::links::purge_stopped(&config) {
+            Ok(counts) => {
+                println!("{counts}");
+                eprintln!(
+                    "apassy-relay: links.db holds no link now; the ids of every link ever made stay, so none opens again."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(&error.message),
+        },
         Command::ConnectCutover { confirm, backup } => {
             let options = apassy_relay::server::cutover::Options {
                 confirm,

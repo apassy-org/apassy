@@ -189,6 +189,58 @@ import Testing
         #expect(try await service.item(id: item).folder == nil)
     }
 
+    @Test func testItemInTwoFolders() async throws {
+        // The core's row: every folder, the first one first.
+        let json = """
+            {"id": 12, "revision": 3, "title": "Stripe live", "kind": "api_key", "subtitle": "",
+             "websites": [], "tags": [], "archived": false, "has_totp": false,
+             "conflict_of": null, "added_at": null, "changed_at": null, "used_at": null,
+             "folder": "f-1", "folders": ["f-1", "f-2"]}
+            """
+        let row = try JSONDecoder().decode(ItemRow.self, from: Data(json.utf8))
+        #expect(row.folder == "f-1")
+        #expect(row.folders == ["f-1", "f-2"])
+        #expect(try JSONDecoder().decode(ItemRow.self, from: JSONEncoder().encode(row)) == row)
+        // An older core without `folders`: the one folder, or none.
+        let older = json.replacingOccurrences(of: ", \"folders\": [\"f-1\", \"f-2\"]", with: "")
+        #expect(try JSONDecoder().decode(ItemRow.self, from: Data(older.utf8)).folders == ["f-1"])
+        let top = older.replacingOccurrences(of: "\"folder\": \"f-1\"", with: "\"folder\": null")
+        #expect(try JSONDecoder().decode(ItemRow.self, from: Data(top.utf8)).folders == [])
+
+        // The preview keeps the order and counts the credential in each folder.
+        let service = PreviewVaultService()
+        let one = try await service.createFolder(parent: nil, name: "One")
+        let two = try await service.createFolder(parent: nil, name: "Two")
+        let item = try await service.items(archived: .no)[0].id
+        try await service.setItemFolder(id: item, folder: one.uuid)
+        try await service.addItemToFolder(id: item, folder: two.uuid)
+        try await service.addItemToFolder(id: item, folder: two.uuid)
+        var detail = try await service.item(id: item)
+        #expect(detail.row.folders == [one.uuid, two.uuid])
+        #expect(detail.folder == one.uuid)
+        #expect(detail.folderPath == ["One"])
+        var counts = Dictionary(uniqueKeysWithValues: try await service.folders().map { ($0.uuid, $0.count) })
+        #expect(counts[one.uuid] == 1)
+        #expect(counts[two.uuid] == 1)
+        await #expect(throws: VaultError.self) { try await service.addItemToFolder(id: item, folder: "gone") }
+
+        try await service.removeItemFromFolder(id: item, folder: one.uuid)
+        detail = try await service.item(id: item)
+        #expect(detail.row.folders == [two.uuid])
+        #expect(detail.folder == two.uuid)
+        counts = Dictionary(uniqueKeysWithValues: try await service.folders().map { ($0.uuid, $0.count) })
+        #expect(counts[one.uuid] == 0)
+        #expect(counts[two.uuid] == 1)
+
+        // Deleting a folder keeps the credential in its other folders; set puts it in one alone.
+        try await service.addItemToFolder(id: item, folder: one.uuid)
+        #expect(try await service.deleteFolder(uuid: two.uuid) == 1)
+        #expect(try await service.item(id: item).row.folders == [one.uuid])
+        try await service.removeItemFromFolder(id: item, folder: one.uuid)
+        #expect(try await service.item(id: item).row.folders == [])
+        #expect(try await service.item(id: item).folder == nil)
+    }
+
     @Test func thePreviewOptionsMakeTheOwnerTheSource() async throws {
         let service = PreviewVaultService()
         let openAI = try await service.items(archived: .no).first { $0.title == "OpenAI" }!
