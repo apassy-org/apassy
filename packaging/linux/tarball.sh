@@ -13,7 +13,9 @@ fail() {
     exit 1
 }
 
-[ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'usage: tarball.sh STAGE_DIR OUTPUT.tar.gz [--libdeflate]'
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    fail 'usage: tarball.sh STAGE_DIR OUTPUT.tar.gz [--libdeflate]'
+fi
 stage=$1
 output=$2
 compressor=${3:-gzip}
