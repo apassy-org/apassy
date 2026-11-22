@@ -50,8 +50,6 @@ const MAC_ALLOWED: [&str; 0] = [];
 
 /// The painted texts and the AccessKit names of one screen after a few frames.
 struct Screen {
-    // Only the Linux guard names the screen, in its failure message.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     name: String,
     text: String,
 }
@@ -348,7 +346,8 @@ fn screens() -> Vec<Screen> {
     welcome.ui.connect.sheet = None;
 
     let locked_dir = TempDir::new().expect("temp dir");
-    let mut locked = locked_app(&locked_dir, "locked.db");
+    // The path is visible on the locked screen. A filename may contain the name of a key.
+    let mut locked = locked_app(&locked_dir, "vault-F9.db");
     screens.push(render("locked", &mut locked, |_| {}));
 
     let (mut app, item) = unlocked_app_with_item(&dir);
@@ -703,6 +702,26 @@ fn linux_screens_use_the_linux_words() {
     }
 }
 
+/// Shortcut legends show a key on its own or as part of a chord. Keep opaque names,
+/// such as a vault filename or a device ID, intact when looking for a key.
+fn mentions_f9_key(label: &str) -> bool {
+    label.split_whitespace().any(|word| {
+        word.trim_matches(|ch: char| !ch.is_alphanumeric())
+            .split('+')
+            .any(|key| key == "F9")
+    })
+}
+
+#[test]
+fn f9_in_a_shortcut_is_distinct_from_f9_in_a_name() {
+    for label in ["F9", "Hide sidebar  F9", "Press (F9).", "Ctrl+F9", "⌃⌘F9"] {
+        assert!(mentions_f9_key(label), "{label}");
+    }
+    for label in ["vault-F9.db", "/tmp/F9/locked.db", "device_AF9A", "F90"] {
+        assert!(!mentions_f9_key(label), "{label}");
+    }
+}
+
 /// The sibling of the guard on macOS: the same screens keep their Mac words, written
 /// here literally, so a change of a macro in `src/wording.rs` cannot change them
 /// unnoticed. It runs in the macOS `tests` job of a ready pull request.
@@ -735,10 +754,34 @@ fn mac_views_keep_their_mac_words() {
     ] {
         assert!(all.contains(expected), "no screen shows {expected:?}");
     }
-    for linux_only in ["Quit Apassy", "F9", "Ctrl+", "Alt+Left", "this computer"] {
-        assert!(
-            !all.contains(linux_only),
-            "a Mac screen shows {linux_only:?}"
-        );
+    let screen = |name: &str| {
+        screens
+            .iter()
+            .find(|screen| screen.name == name)
+            .unwrap_or_else(|| panic!("missing rendered screen {name}"))
+    };
+    assert!(screen("locked").text.contains("vault-F9.db"));
+    assert!(
+        screen("Settings > Updates")
+            .text
+            .lines()
+            .any(|label| label == "⌃⌘S"),
+        "Settings must show the Mac sidebar shortcut in its own row"
+    );
+    for screen in &screens {
+        for label in screen.text.lines() {
+            for linux_only in ["Quit Apassy", "Ctrl+", "Alt+Left", "this computer"] {
+                assert!(
+                    !label.contains(linux_only),
+                    "{} shows {linux_only:?} in {label:?}",
+                    screen.name
+                );
+            }
+            assert!(
+                !mentions_f9_key(label),
+                "{} shows the F9 key in {label:?}",
+                screen.name
+            );
+        }
     }
 }
