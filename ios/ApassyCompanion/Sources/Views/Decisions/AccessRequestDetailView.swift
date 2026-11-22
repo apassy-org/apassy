@@ -58,14 +58,16 @@ struct AccessRequestDetailView: View {
       Section("The agent says") { Text(verbatim: escaped(c.reason)) }
       Section {
         LabeledContent(
-          "Expires",
+          "Request deadline",
           value: Date(timeIntervalSince1970: TimeInterval(c.expires_at)).formatted(
             date: .omitted, time: .standard))
-        Text("Allows one scoped use attempt. The bouncer still checks the command and may ask you.")
-        Text(
-          "One attempt can make multiple network calls. No durable grant, remembered answer, production allowance or evaluation permission is saved."
-        )
-        .font(.footnote).foregroundStyle(.secondary)
+        if r.receipt == nil || r.receipt?.outcome == "allowed_once" {
+          Text("Allow once permits one scoped use attempt. The bouncer still checks the command and may ask you.")
+          Text(
+            "One attempt can make multiple network calls. Allow once saves no durable grant, remembered answer, production allowance or evaluation permission."
+          )
+          .font(.footnote).foregroundStyle(.secondary)
+        }
         if let reason = model.unavailable { Text(reason) }
         if let reason = c.local_review_reason {
           Text("Review access on \(escaped(c.asker.name)): \(escaped(reason))")
@@ -77,7 +79,7 @@ struct AccessRequestDetailView: View {
           Text("Access expired")
         }
         if let receipt = r.receipt {
-          if let device = receipt.device_name {
+          if let device = AccessRequestPresentation.answerDevice(receipt) {
             Text("Answered on \(escaped(device))").font(.headline)
           }
           switch receipt.outcome {
@@ -85,13 +87,16 @@ struct AccessRequestDetailView: View {
             Text(
               "Consent recorded for one attempt before \(Date(timeIntervalSince1970: TimeInterval(receipt.expires_at)).formatted(date: .omitted, time: .shortened))"
             )
+            Text("The attempt may already have been used. Check on \(escaped(c.asker.name)) for remaining availability.")
           case "denied": Text("Denied")
-          case "granted_on_mac": Text("Access granted on the Mac")
+          case "granted_on_mac":
+            Text("Durable access granted on the Mac")
+            Text("Check on \(escaped(c.asker.name)) for current availability. The request deadline does not expire this grant.")
           case "expired": Text("Access expired")
-          default: Text("Access request invalidated. Review on the Mac.")
+          case "invalidated": Text("Access request invalidated. Review on the Mac.")
+          default: Text("Outcome not reported. Check on \(escaped(c.asker.name)).")
           }
-          Text("Check on \(escaped(c.asker.name)) for remaining availability.")
-          if date.timeIntervalSince1970 >= Double(c.expires_at) { Text("Access expired") }
+          if AccessRequestPresentation.showsExpiredAccess(receipt, at: date) { Text("Access expired") }
         } else if let message = model.statusText(r, at: date) {
           Text(message).accessibilityIdentifier("access.answer.status")
         } else if history || r.state != "open" || date.timeIntervalSince1970 >= Double(c.expires_at)

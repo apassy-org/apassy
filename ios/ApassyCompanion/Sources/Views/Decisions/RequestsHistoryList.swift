@@ -7,6 +7,17 @@ struct RequestsHistoryList: View {
     let query: String
     let filter: RequestHistoryPresentation.Filter
 
+    private var accessEntries: [RelayAccessRequest] {
+        model.access.history.filter { row in
+            let matchesFilter = filter == .all
+                || (filter == .allowed && AccessRequestPresentation.isAllowed(row.receipt))
+                || (filter == .denied && row.receipt?.outcome == "denied")
+            let text = [row.card.item.name, row.card.agent.name, row.card.asker.name]
+                .joined(separator: " ")
+            return matchesFilter && (query.isEmpty || text.localizedStandardContains(query))
+        }
+    }
+
     private var entries: [RequestHistoryEntry] {
         model.history.filter { entry in
             let matchesFilter = filter == .all || (filter == .allowed && entry.outcome == "approved")
@@ -27,14 +38,18 @@ struct RequestsHistoryList: View {
 
     var body: some View {
         RequestsList {
-            if !model.access.history.isEmpty {
+            if !accessEntries.isEmpty {
                 Section("Access consent history") {
-                    ForEach(model.access.history.filter { row in (filter == .all || (filter == .allowed && row.receipt?.outcome == "allowed_once") || (filter == .denied && row.receipt?.outcome == "denied")) && (query.isEmpty || [row.card.item.name,row.card.agent.name,row.card.asker.name].joined(separator:" ").localizedStandardContains(query)) }) { row in
+                    ForEach(accessEntries) { row in
                         NavigationLink(value: DecisionRoute.access(row.id, history: true)) {
                             VStack(alignment: .leading) {
-                                Text(row.card.item.name)
-                                Text(row.receipt.map { "Answered on \($0.device_name ?? row.card.asker.name)" } ?? "Not confirmed")
-                                    .font(.footnote).foregroundStyle(.secondary)
+                                Text(verbatim: AccessText.escaped(row.card.item.name))
+                                Text(AccessRequestPresentation.outcome(row.receipt))
+                                    .font(.subheadline)
+                                if let device = AccessRequestPresentation.answerDevice(row.receipt) {
+                                    Text("Answered on \(AccessText.escaped(device))")
+                                        .font(.footnote).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -44,7 +59,7 @@ struct RequestsHistoryList: View {
                 ProgressView("Loading history…")
                     .frame(maxWidth: .infinity)
                     .listRowBackground(Color.clear)
-            } else if entries.isEmpty && model.access.history.isEmpty && model.historyError == nil
+            } else if entries.isEmpty && accessEntries.isEmpty && model.historyError == nil
                 && model.historyVaults.allSatisfy({ $0.availability == .available }) {
                 ContentUnavailableView {
                     Label(query.isEmpty && filter == .all ? "No history yet" : "No matching requests", systemImage: "clock")

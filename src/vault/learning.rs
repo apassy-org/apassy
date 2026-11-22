@@ -432,6 +432,14 @@ impl DecisionEntry {
     pub fn owner_denied(&self) -> bool {
         self.decided_by == DecidedBy::Owner && self.decision == LoggedDecision::Deny
     }
+
+    pub fn outcome_kind(&self) -> crate::decision_log::DecisionOutcome {
+        crate::decision_log::DecisionOutcome::of_decision(
+            self.decision == LoggedDecision::Allow,
+            self.decided_by.stored(),
+            &self.why().code,
+        )
+    }
 }
 
 /// What a decision was for (schema 27, `decision_log.request`).

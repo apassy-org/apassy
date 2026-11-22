@@ -1172,7 +1172,6 @@ fn run_inner(
                     ActivityDecision::Deny,
                     &reason,
                 );
-                record_refused(vault, &agent, request, code);
                 if decision_log::enabled() {
                     decision_log::append(&decision_log::Line {
                         at: learning::now(),
@@ -1206,26 +1205,29 @@ fn run_inner(
                     });
                 }
                 let user_request = request.user_request.unwrap_or_default();
-                let _ = vault.record_decision_with(
-                    &RuleDenial {
-                        at: learning::now(),
-                        agent_id: agent.id,
-                        agent_name: &agent.name,
-                        items: &items,
-                        user_request,
-                        user_request_source: learning::agent_source(user_request),
-                        command: request.command,
-                        purpose: request.purpose,
-                        reason: &reason,
-                    }
-                    .entry()
-                    .with_why(&DecisionWhy {
-                        reason: format!("{:?}", ReasonKind::AccessCheck),
-                        code: code.to_owned(),
-                        ..DecisionWhy::default()
-                    }),
-                    &decision_meta(browser_fill.is_some(), None),
-                );
+                let decision_id = vault
+                    .record_decision_with(
+                        &RuleDenial {
+                            at: learning::now(),
+                            agent_id: agent.id,
+                            agent_name: &agent.name,
+                            items: &items,
+                            user_request,
+                            user_request_source: learning::agent_source(user_request),
+                            command: request.command,
+                            purpose: request.purpose,
+                            reason: &reason,
+                        }
+                        .entry()
+                        .with_why(&DecisionWhy {
+                            reason: format!("{:?}", ReasonKind::AccessCheck),
+                            code: code.to_owned(),
+                            ..DecisionWhy::default()
+                        }),
+                        &decision_meta(browser_fill.is_some(), None),
+                    )
+                    .ok();
+                record_refused(vault, &agent, request, code, decision_id);
                 return WireResponse::failure(code, reason);
             }
         }
@@ -1913,9 +1915,16 @@ fn run_inner(
         }
         // Every owner answer goes to the decision log. A denial blocks the pattern. The
         // vault keeps the answer time for an owner answer only (not a timeout).
+        let mut answer_why = why_words.clone();
+        match outcome {
+            ApprovalOutcome::Denied => answer_why.code = "approval_denied".to_owned(),
+            ApprovalOutcome::TimedOut => answer_why.code = "approval_timeout".to_owned(),
+            ApprovalOutcome::Invalidated => answer_why.code = "approval_invalidated".to_owned(),
+            _ => {}
+        }
         let mut entry = logged
             .entry(Outcome::Owner(outcome), &risk_note)
-            .with_why(&why_words);
+            .with_why(&answer_why);
         entry.at = learning::now();
         let meta = decision_meta(browser_fill.is_some(), Some(millis(asked_at)));
         decision_id = record_decision_locked(ctx, &checked, &entry, &meta, pattern.as_ref());
@@ -2054,7 +2063,7 @@ fn run_inner(
                     ActivityDecision::Deny,
                     &reason,
                 );
-                record_refused(vault, &agent, request, code);
+                record_refused(vault, &agent, request, code, decision_id);
                 return WireResponse::failure(code, reason);
             }
         };
@@ -2892,7 +2901,13 @@ fn record_uses(
 
 /// Store a use of each known item of a request that a check refused. A request with a
 /// wrong form names no use.
-fn record_refused(vault: &mut Vault, agent: &AgentSummary, request: &RunRequest<'_>, code: &str) {
+fn record_refused(
+    vault: &mut Vault,
+    agent: &AgentSummary,
+    request: &RunRequest<'_>,
+    code: &str,
+    decision_id: Option<u64>,
+) {
     if code == "invalid_request" || request.validate().is_err() {
         return;
     }
@@ -2909,7 +2924,7 @@ fn record_refused(vault: &mut Vault, agent: &AgentSummary, request: &RunRequest<
         UseOutcome::Refused,
         UseDecidedBy::Rule,
         "",
-        None,
+        decision_id,
     );
 }
 

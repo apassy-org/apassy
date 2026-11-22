@@ -69,6 +69,7 @@ mod learning_replay;
 #[cfg(feature = "vault")]
 mod library_organization;
 mod local_finetune;
+mod mail_tasks;
 mod native_auth_cancel;
 mod native_helper;
 mod notifications;

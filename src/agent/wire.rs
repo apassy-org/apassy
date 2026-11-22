@@ -37,6 +37,26 @@ pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Largest user prompt that a host hook sends, in bytes (goal item B6).
 pub const MAX_HOOK_PROMPT_BYTES: usize = 32 * 1024;
 
+/// Reserved for a random local MCP process binding on typed mail operations.
+/// This identifies a process, never a verified host hook or user prompt.
+const MAIL_PROCESS_SESSION_PREFIX: &str = "apassy-mail-process-";
+
+/// Encode a 128-bit random nonce as a mail-only local process binding.
+pub fn mail_process_session(nonce: &str) -> Option<String> {
+    valid_mail_process_nonce(nonce).then(|| format!("{MAIL_PROCESS_SESSION_PREFIX}{nonce}"))
+}
+
+/// Recognize the reserved binding so the broker never treats it as hook evidence.
+pub fn is_mail_process_session(session: &str) -> bool {
+    session
+        .strip_prefix(MAIL_PROCESS_SESSION_PREFIX)
+        .is_some_and(valid_mail_process_nonce)
+}
+
+fn valid_mail_process_nonce(nonce: &str) -> bool {
+    nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Error codes of the access model of ADR 0025 (`docs/contracts/broker-v0.md`).
 pub mod codes {
     /// The agent may not use the item: a "Not for this agent" exception, an item that
@@ -175,6 +195,32 @@ impl ZeroizeOnDrop for WireRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    /// Prepare a fixed SMTP task for owner review; no mail is sent here. SMTP
+    /// settings and credentials come only from the selected vault item.
+    PrepareMailTask {
+        item_id: u64,
+        #[serde(deserialize_with = "mail_task_recipients")]
+        recipients: Vec<String>,
+        subject: String,
+        body: String,
+        #[serde(deserialize_with = "mail_task_ttl")]
+        ttl_minutes: u16,
+        purpose: String,
+        cwd: String,
+    },
+    /// Send the approved template once to one exact recipient of the task.
+    /// Agent-supplied connection settings and message overrides are forbidden.
+    SendTaskMail {
+        task_id: String,
+        recipient: String,
+        cwd: String,
+        user_request: String,
+    },
+    /// Read metadata for this agent's task in its authenticated project/session.
+    MailTaskStatus {
+        task_id: String,
+        cwd: String,
+    },
     FillInBrowser {
         item_id: u64,
         url: String,
@@ -357,6 +403,26 @@ pub enum Action {
     },
 }
 
+fn mail_task_recipients<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error> {
+    let recipients = Vec::<String>::deserialize(deserializer)?;
+    if !(1..=100).contains(&recipients.len()) {
+        return Err(serde::de::Error::custom("Use 1 through 100 recipients."));
+    }
+    Ok(recipients)
+}
+
+fn mail_task_ttl<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let ttl = u16::deserialize(deserializer)?;
+    if !(1..=30).contains(&ttl) {
+        return Err(serde::de::Error::custom(
+            "Use a lifetime from 1 through 30 minutes.",
+        ));
+    }
+    Ok(ttl)
+}
+
 impl Action {
     pub fn wire_version(&self) -> u32 {
         match self {
@@ -368,6 +434,9 @@ impl Action {
 
     pub fn name(&self) -> &'static str {
         match self {
+            Self::PrepareMailTask { .. } => "prepare_mail_task",
+            Self::SendTaskMail { .. } => "send_task_mail",
+            Self::MailTaskStatus { .. } => "mail_task_status",
             Self::FillInBrowser { .. } => "fill_in_browser",
             Self::Tracked { .. } => "tracked",
             Self::OperationStatus { .. } => "operation_status",
@@ -393,6 +462,7 @@ impl Action {
         matches!(
             self,
             Self::FillInBrowser { .. }
+                | Self::SendTaskMail { .. }
                 | Self::Run { .. }
                 | Self::CaptureCredential { .. }
                 | Self::AskOwnerForCredential { .. }
@@ -404,6 +474,7 @@ impl Action {
         !matches!(
             self,
             Self::ListAccess
+                | Self::MailTaskStatus { .. }
                 | Self::AccessRequestStatus { .. }
                 | Self::CancelAccessRequest { .. }
                 | Self::SubmitUserRequest { .. }
@@ -459,6 +530,99 @@ impl WireResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_process_binding_requires_exact_128_bit_nonce_and_is_distinct_from_hook_ids() {
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let binding = mail_process_session(nonce).unwrap();
+        assert!(is_mail_process_session(&binding));
+        assert!(!is_mail_process_session(nonce));
+        assert!(!is_mail_process_session("claude-session-1"));
+        for invalid in [
+            "",
+            "0123456789abcdef",
+            "0123456789abcdef0123456789abcde!",
+            "0123456789abcdef0123456789abcdef0",
+        ] {
+            assert!(mail_process_session(invalid).is_none());
+            assert!(!is_mail_process_session(&format!(
+                "{MAIL_PROCESS_SESSION_PREFIX}{invalid}"
+            )));
+        }
+    }
+
+    #[test]
+    fn mail_task_actions_are_typed_and_refuse_configuration_or_message_overrides() {
+        let prepare = serde_json::json!({
+            "kind": "prepare_mail_task", "item_id": 7,
+            "recipients": ["one@example.test", "two@example.test"],
+            "subject": "Synthetic subject", "body": "Synthetic body",
+            "ttl_minutes": 15, "purpose": "Synthetic task", "cwd": "/synthetic/project"
+        });
+        let send = serde_json::json!({
+            "kind": "send_task_mail", "task_id": "synthetic-task",
+            "recipient": "one@example.test", "cwd": "/synthetic/project",
+            "user_request": "Send the approved message"
+        });
+        for (value, name, waits) in [
+            (&prepare, "prepare_mail_task", false),
+            (&send, "send_task_mail", true),
+        ] {
+            let action: Action = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(action.name(), name);
+            assert_eq!(action.waits(), waits);
+            assert!(action.trackable());
+            assert_eq!(serde_json::to_value(action).unwrap(), *value);
+            for field in [
+                "host",
+                "port",
+                "user",
+                "username",
+                "password",
+                "from",
+                "cc",
+                "bcc",
+                "attachments",
+                "config",
+                "credentials",
+            ] {
+                let mut bad = value.clone();
+                bad[field] = serde_json::json!("synthetic-forbidden-override");
+                assert!(
+                    serde_json::from_value::<Action>(bad).is_err(),
+                    "{name}: {field}"
+                );
+            }
+        }
+        for field in [
+            "item_id",
+            "recipients",
+            "subject",
+            "body",
+            "ttl_minutes",
+            "purpose",
+        ] {
+            let mut bad = send.clone();
+            bad[field] = prepare[field].clone();
+            assert!(serde_json::from_value::<Action>(bad).is_err(), "{field}");
+        }
+        for ttl in [0, 31, 65536] {
+            let mut bad = prepare.clone();
+            bad["ttl_minutes"] = serde_json::json!(ttl);
+            assert!(serde_json::from_value::<Action>(bad).is_err());
+        }
+        for count in [0, 101] {
+            let mut bad = prepare.clone();
+            bad["recipients"] = serde_json::json!(vec!["one@example.test"; count]);
+            assert!(serde_json::from_value::<Action>(bad).is_err());
+        }
+        for ttl in [1, 30] {
+            let mut valid = prepare.clone();
+            valid["ttl_minutes"] = serde_json::json!(ttl);
+            valid["recipients"] = serde_json::json!(vec!["one@example.test"; 100]);
+            assert!(serde_json::from_value::<Action>(valid).is_ok());
+        }
+    }
 
     #[test]
     fn request_rejects_unknown_fields_and_redacts_token() {

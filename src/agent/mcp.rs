@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -20,6 +20,9 @@ pub const TOOL_LIST_ACCESS: &str = "apassy_list_access";
 pub const TOOL_USE_CREDENTIAL: &str = "apassy_use_credential";
 pub const TOOL_RUN_WITH_SECRETS: &str = "apassy_run_with_secrets";
 pub const TOOL_FILL_IN_BROWSER: &str = "apassy_fill_in_browser";
+pub const TOOL_PREPARE_MAIL_TASK: &str = "apassy_prepare_mail_task";
+pub const TOOL_SEND_TASK_MAIL: &str = "apassy_send_task_mail";
+pub const TOOL_MAIL_TASK_STATUS: &str = "apassy_mail_task_status";
 pub const TOOL_ACCESS_STATUS: &str = "apassy_access_request_status";
 pub const TOOL_ACCESS_CANCEL: &str = "apassy_cancel_access_request";
 pub const TOOL_REQUEST_ACCESS: &str = "apassy_request_access";
@@ -38,6 +41,27 @@ const SUPPORTED_PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"
 /// Claude Code sets this variable for its stdio MCP servers to the session ID. The
 /// `UserPromptSubmit` hook gets the same ID as `session_id` (goal item B6).
 pub const CLAUDE_SESSION_ENV: &str = "CLAUDE_CODE_SESSION_ID";
+
+// Hosts such as Codex can omit a stable session ID. A mail-only process binding
+// still isolates their tasks from another MCP process. It is not hook evidence.
+static MAIL_PROCESS_SESSION: OnceLock<Option<String>> = OnceLock::new();
+
+fn mail_host_session<'a>(
+    configured: Option<&'a str>,
+    process_session: &'a OnceLock<Option<String>>,
+) -> io::Result<&'a str> {
+    if let Some(session) = configured {
+        return Ok(session);
+    }
+    process_session
+        .get_or_init(|| {
+            new_operation_id()
+                .ok()
+                .and_then(|nonce| super::wire::mail_process_session(&nonce))
+        })
+        .as_deref()
+        .ok_or_else(|| io::Error::other("Could not allocate a mail process binding."))
+}
 
 /// Adapter settings. `token` is `None` when the environment has no agent token.
 pub struct AdapterConfig {
@@ -159,9 +183,14 @@ fn serve(
                 let id = message["id"].clone();
                 let key = id.to_string();
                 let params = message["params"].clone();
-                let read_only = [TOOL_LIST_ACCESS, TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL]
-                    .iter()
-                    .any(|name| params["name"] == *name);
+                let read_only = [
+                    TOOL_LIST_ACCESS,
+                    TOOL_ACCESS_STATUS,
+                    TOOL_ACCESS_CANCEL,
+                    TOOL_MAIL_TASK_STATUS,
+                ]
+                .iter()
+                .any(|name| params["name"] == *name);
                 let cancel = Arc::new(CallCancellation::default());
                 {
                     let mut calls = active.lock().unwrap();
@@ -315,6 +344,55 @@ fn extract_schema() -> Value {
 
 pub fn tool_list() -> Value {
     let mut tools = json!([
+        {
+            "name": TOOL_MAIL_TASK_STATUS,
+            "title": "Check a mail task's consent status",
+            "description": "Read only this agent's mail task in the same project and host session. Returns scope state, expiration, and counts without recipients or message content. Never creates, approves, or sends anything. Pending means the owner has not approved the scope. A task status does not prove SMTP delivery; recover an uncertain send with apassy_list_access(operation_id). Available only through the local broker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "minLength": 1 },
+                    "cwd": { "type": "string", "minLength": 1, "description": "The absolute project folder bound to the task." }
+                },
+                "required": ["task_id", "cwd"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_PREPARE_MAIL_TASK,
+            "title": "Prepare a mail task for owner review",
+            "description": "Prepare a pending SMTP task for the owner to review in Apassy. Select a stored SMTP item, the complete recipient list, an exact subject and body, and the consent lifetime. Preparation sends no mail and is not approval. The owner approves the fixed template and recipient scope before apassy_send_task_mail can use it. SMTP connection settings, sender identity, and credentials come only from the vault item; never supply or request secret values. This tool is available only through the local broker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "integer", "minimum": 1 },
+                    "recipients": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "type": "string", "minLength": 1 }, "description": "The complete list of exact recipient addresses for owner review." },
+                    "subject": { "type": "string", "minLength": 1, "description": "The exact subject for every message in this task." },
+                    "body": { "type": "string", "minLength": 1, "description": "The exact plain-text body for every message in this task." },
+                    "ttl_minutes": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Requested consent lifetime in minutes, from 1 through 30." },
+                    "purpose": { "type": "string", "minLength": 1, "description": "Why the owner should approve this task." },
+                    "cwd": { "type": "string", "minLength": 1, "description": "Absolute project folder bound to this task." }
+                },
+                "required": ["item_id", "recipients", "subject", "body", "ttl_minutes", "purpose", "cwd"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": TOOL_SEND_TASK_MAIL,
+            "title": "Send one approved task message",
+            "description": "Send the owner-approved SMTP task template once to one exact recipient in its approved scope. Use the task_id returned by apassy_prepare_mail_task and the same project folder. When the host has no verified prompt and the owner explicitly approved the task's purpose as the fallback, copy that exact purpose into user_request; never invent a replacement request. The broker checks current task consent and recipient availability. No host, username, password, sender, subject, body, cc, bcc, attachments, or message overrides are accepted. The broker uses the stored vault SMTP configuration and approved template. This tool is available only through the local broker. A lost response can mean the message was sent: retrieve operation status before any retry. On a host without a stable session ID, a restarted MCP adapter cannot reuse the task; recover existing operation receipts and request fresh owner review.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "minLength": 1 },
+                    "recipient": { "type": "string", "minLength": 1, "description": "One exact recipient address from the approved task." },
+                    "cwd": { "type": "string", "minLength": 1, "description": "The absolute project folder bound to the task." },
+                    "user_request": { "type": "string", "minLength": 1, "description": "The user's words that led to this send; an agent-supplied claim, not owner approval." }
+                },
+                "required": ["task_id", "recipient", "cwd", "user_request"],
+                "additionalProperties": false
+            }
+        },
         {"name":TOOL_FILL_IN_BROWSER,"title":"Fill a website login","description":"To log in on a website during computer use or browser automation, use this tool. Apassy fills the focused browser tab through its extension and returns status and filled field names only. Never copy secrets to the clipboard or type them. Save the website on the credential first. Remote debugging browsers currently require profile trust and are refused. The bouncer may ask the owner; waiting and timeout handling is the same as runs.","inputSchema":{"type":"object","properties":{"item_id":{"type":"integer","minimum":1},"url":{"type":"string"},"fields":{"type":"array","minItems":1,"maxItems":3,"uniqueItems":true,"items":{"enum":["username","password","code"]}},"user_request":{"type":"string","minLength":1},"purpose":{"type":"string","minLength":1},"cwd":{"type":"string"}},"required":["item_id","url","user_request","purpose"],"additionalProperties":false}},
         {"name": TOOL_ACCESS_STATUS,"title":"Check scoped access consent","description":"Read this agent's exact request status without creating anything. A receipt never proves execution succeeded.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
         {"name": TOOL_ACCESS_CANCEL,"title":"Cancel scoped access consent","description":"Cancel an abandoned request or its unused/pending allowance. Does not recall released values. Never creates a request.","inputSchema":{"type":"object","properties":{"request_id":{"type":"integer","minimum":1}},"required":["request_id"],"additionalProperties":false}},
@@ -503,7 +581,10 @@ pub fn tool_list() -> Value {
             tool["description"] = json!(format!(
                 "{description} With operation_id, retrieve that operation's status instead of the catalog."
             ));
-        } else if tool["name"] != TOOL_ACCESS_STATUS && tool["name"] != TOOL_ACCESS_CANCEL {
+        } else if tool["name"] != TOOL_ACCESS_STATUS
+            && tool["name"] != TOOL_ACCESS_CANCEL
+            && tool["name"] != TOOL_MAIL_TASK_STATUS
+        {
             tool["inputSchema"]["properties"]["idempotency_key"] = json!({"type":"string", "minLength":1, "maxLength":128, "description":"Choose a unique key before a mutation. Reuse it only with identical arguments to retrieve the first operation without executing again. Keys expire 15 minutes after completion; never blindly replay after expiry or a broker restart."});
             let description = tool["description"].as_str().unwrap().to_owned();
             tool["description"] = json!(format!(
@@ -547,7 +628,13 @@ fn call_tool_control(
         Some(Value::String(key))
             if !key.is_empty()
                 && key.len() <= 128
-                && ![TOOL_LIST_ACCESS, TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL].contains(&name) =>
+                && ![
+                    TOOL_LIST_ACCESS,
+                    TOOL_ACCESS_STATUS,
+                    TOOL_ACCESS_CANCEL,
+                    TOOL_MAIL_TASK_STATUS,
+                ]
+                .contains(&name) =>
         {
             Some(key)
         }
@@ -571,6 +658,9 @@ fn call_tool_control(
         TOOL_USE_CREDENTIAL => call_action(&arguments),
         TOOL_RUN_WITH_SECRETS => run_action(&arguments),
         TOOL_FILL_IN_BROWSER => fill_browser_action(&arguments),
+        TOOL_PREPARE_MAIL_TASK => prepare_mail_task_action(&arguments),
+        TOOL_SEND_TASK_MAIL => send_task_mail_action(&arguments),
+        TOOL_MAIL_TASK_STATUS => mail_task_status_action(&arguments),
         TOOL_REQUEST_ACCESS => request_action(&arguments),
         TOOL_ACCESS_STATUS | TOOL_ACCESS_CANCEL => (|| {
             let o = arguments_object(&arguments, &["request_id"])?;
@@ -603,7 +693,29 @@ fn call_tool_control(
             "The adapter has no agent token. Set APASSY_AGENT_TOKEN in the MCP server configuration.",
         );
     };
-    let asynchronous_access = matches!(action, Action::RequestAccess { scope: Some(_), .. });
+    let host_session = if matches!(
+        action,
+        Action::PrepareMailTask { .. }
+            | Action::SendTaskMail { .. }
+            | Action::MailTaskStatus { .. }
+    ) {
+        match mail_host_session(config.host_session.as_deref(), &MAIL_PROCESS_SESSION) {
+            Ok(session) => Some(session),
+            Err(_) => {
+                return tool_error(
+                    "broker_error",
+                    "The adapter could not allocate a mail process binding. Nothing was submitted.",
+                );
+            }
+        }
+    } else {
+        config.host_session.as_deref()
+    };
+    let asynchronous_consent = matches!(
+        action,
+        Action::RequestAccess { scope: Some(_), .. } | Action::PrepareMailTask { .. }
+    );
+    let preparing_mail = matches!(action, Action::PrepareMailTask { .. });
     let operation_id = if action.trackable() {
         match new_operation_id() {
             Ok(id) => Some(id),
@@ -626,7 +738,7 @@ fn call_tool_control(
         None => action,
     };
     let options = client::SendOptions {
-        host_session: config.host_session.as_deref(),
+        host_session,
         timeout: operation_id.as_ref().map(|_| WAITING_CALL_TIMEOUT),
     };
     let mut last_progress = Instant::now();
@@ -650,11 +762,15 @@ fn call_tool_control(
             return tool_result(response);
         }
         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-            if asynchronous_access && !cancelled.explicit.load(Ordering::SeqCst) {
+            if asynchronous_consent && !cancelled.explicit.load(Ordering::SeqCst) {
                 return attach_operation(
                     tool_error(
                         "unknown_outcome",
-                        "The asynchronous access request may have been created. Retrieve operation status, then query or explicitly cancel its request ID.",
+                        if preparing_mail {
+                            "The pending mail task may have been created. Retrieve operation status and review the task in Apassy before retrying."
+                        } else {
+                            "The asynchronous access request may have been created. Retrieve operation status, then query or explicitly cancel its request ID."
+                        },
                     ),
                     operation_id.as_deref(),
                 );
@@ -698,7 +814,7 @@ fn call_tool_control(
             // finished adapter worker. Cancellation is best effort; keep the
             // unknown-outcome diagnostic and receipt ID even if it succeeds.
             if let Some(id) = &operation_id
-                && !asynchronous_access
+                && !asynchronous_consent
                 && !matches!(
                     error.kind(),
                     io::ErrorKind::InvalidInput
@@ -784,6 +900,62 @@ fn call_action(arguments: &Value) -> Result<Action, String> {
         item_id,
         operation,
         params,
+    })
+}
+
+fn prepare_mail_task_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(
+        arguments,
+        &[
+            "item_id",
+            "recipients",
+            "subject",
+            "body",
+            "ttl_minutes",
+            "purpose",
+            "cwd",
+        ],
+    )?;
+    let recipients = optional_strings(object, "recipients")?
+        .filter(|recipients| {
+            (1..=100).contains(&recipients.len())
+                && recipients.iter().all(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| {
+            "recipients must contain 1 through 100 nonempty recipient addresses.".to_owned()
+        })?;
+    let ttl_minutes = object
+        .get("ttl_minutes")
+        .and_then(Value::as_u64)
+        .and_then(|ttl| u16::try_from(ttl).ok())
+        .filter(|ttl| (1..=30).contains(ttl))
+        .ok_or_else(|| "ttl_minutes must be an integer from 1 through 30.".to_owned())?;
+    Ok(Action::PrepareMailTask {
+        item_id: item_id(object)?,
+        recipients,
+        subject: required_text(object, "subject")?,
+        body: required_text(object, "body")?,
+        ttl_minutes,
+        purpose: required_text(object, "purpose")?,
+        cwd: required_text(object, "cwd")?,
+    })
+}
+
+fn send_task_mail_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(arguments, &["task_id", "recipient", "cwd", "user_request"])?;
+    Ok(Action::SendTaskMail {
+        task_id: required_text(object, "task_id")?,
+        recipient: required_text(object, "recipient")?,
+        cwd: required_text(object, "cwd")?,
+        user_request: required_text(object, "user_request")?,
+    })
+}
+
+fn mail_task_status_action(arguments: &Value) -> Result<Action, String> {
+    let object = arguments_object(arguments, &["task_id", "cwd"])?;
+    Ok(Action::MailTaskStatus {
+        task_id: required_text(object, "task_id")?,
+        cwd: required_text(object, "cwd")?,
     })
 }
 
@@ -1262,6 +1434,22 @@ fn tool_result(response: WireResponse) -> Value {
 /// recognized codes and fixed messages cross the MCP diagnostic boundary.
 pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
+        "mail_task_unavailable" => (
+            code,
+            "The mail task is unavailable, changed, denied, expired, or outside its approved scope. Check apassy_mail_task_status and ask the owner to review a fresh scope before sending.",
+        ),
+        "mail_task_in_flight" => (
+            code,
+            "This recipient's mail operation is already in flight. Wait and recover the original operation receipt with apassy_list_access(operation_id); do not submit another send.",
+        ),
+        "mail_submission_unknown" => (
+            code,
+            "SMTP submission may have occurred. Check the operation receipt and verify the outcome with the owner. Do not send this message again.",
+        ),
+        "mail_not_submitted" => (
+            code,
+            "The broker confirmed that this message was not submitted. Inspect the operation receipt and cause with the owner before requesting a new scope.",
+        ),
         "access_once_unavailable" => (
             code,
             "This scoped use is unavailable or consumed. Query apassy_access_request_status; never repeat an admitted use.",
@@ -1426,6 +1614,251 @@ mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mail_process_binding_is_stable_only_inside_one_adapter_instance() {
+        let first = OnceLock::new();
+        let second = OnceLock::new();
+        let binding = mail_host_session(None, &first).unwrap();
+        assert!(super::super::wire::is_mail_process_session(binding));
+        assert_eq!(binding, mail_host_session(None, &first).unwrap());
+        assert_ne!(binding, mail_host_session(None, &second).unwrap());
+        let verified_host = OnceLock::new();
+        assert_eq!(
+            mail_host_session(Some("synthetic-host-session"), &verified_host).unwrap(),
+            "synthetic-host-session"
+        );
+        assert!(
+            verified_host.get().is_none(),
+            "configured host session must not allocate a fallback"
+        );
+    }
+
+    #[test]
+    fn mail_refusals_preserve_safe_codes_without_echoing_provider_or_message_data() {
+        for code in [
+            "mail_task_unavailable",
+            "mail_task_in_flight",
+            "mail_submission_unknown",
+            "mail_not_submitted",
+        ] {
+            let result = tool_result(WireResponse::failure(
+                code,
+                "synthetic-private-recipient@example.test synthetic-private-body synthetic-password",
+            ));
+            assert_eq!(result["structuredContent"]["code"], code);
+            assert_eq!(result["structuredContent"]["retryable"], false);
+            assert!(!result.to_string().contains("synthetic-private"));
+            assert!(!result.to_string().contains("synthetic-password"));
+        }
+    }
+
+    #[test]
+    fn mail_status_is_strictly_read_only_and_has_no_mutation_key() {
+        let arguments = json!({"task_id":"synthetic-task","cwd":"/synthetic/project"});
+        let action = mail_task_status_action(&arguments).unwrap();
+        assert_eq!(action.name(), "mail_task_status");
+        assert!(!action.trackable());
+        assert!(!action.waits());
+        assert_eq!(
+            serde_json::to_value(action).unwrap(),
+            json!({
+                "kind":"mail_task_status","task_id":"synthetic-task","cwd":"/synthetic/project"
+            })
+        );
+        let tools = tool_list();
+        let tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == TOOL_MAIL_TASK_STATUS)
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            tool["inputSchema"]["properties"]
+                .get("idempotency_key")
+                .is_none()
+        );
+        for field in [
+            "subject",
+            "body",
+            "recipient",
+            "host",
+            "password",
+            "operation_id",
+            "idempotency_key",
+            "host_session",
+        ] {
+            let mut bad = arguments.clone();
+            bad[field] = json!("synthetic-extra");
+            let result = call_tool(
+                &config(),
+                &json!({"name":TOOL_MAIL_TASK_STATUS,"arguments":bad}),
+            );
+            assert_eq!(
+                result["structuredContent"]["code"], "invalid_arguments",
+                "{field}"
+            );
+            assert!(!result.to_string().contains("synthetic-extra"));
+        }
+        for field in ["task_id", "cwd"] {
+            let mut missing = arguments.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(mail_task_status_action(&missing).is_err());
+        }
+    }
+
+    fn mail_task_arguments() -> (Value, Value) {
+        (
+            json!({"item_id":7,"recipients":["one@example.test","two@example.test"],
+                "subject":"Synthetic subject","body":"Synthetic body","ttl_minutes":15,
+                "purpose":"Synthetic task","cwd":"/synthetic/project"}),
+            json!({"task_id":"synthetic-task","recipient":"one@example.test",
+                "cwd":"/synthetic/project","user_request":"Send the approved message"}),
+        )
+    }
+
+    #[test]
+    fn mail_tools_have_explicit_schemas_and_reject_untyped_overrides() {
+        let (prepare, send) = mail_task_arguments();
+        for (name, arguments, parser) in [
+            (
+                TOOL_PREPARE_MAIL_TASK,
+                prepare,
+                prepare_mail_task_action as fn(&Value) -> Result<Action, String>,
+            ),
+            (
+                TOOL_SEND_TASK_MAIL,
+                send,
+                send_task_mail_action as fn(&Value) -> Result<Action, String>,
+            ),
+        ] {
+            assert!(parser(&arguments).is_ok());
+            let tools = tool_list();
+            let tool = tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            let schema = &tool["inputSchema"];
+            assert_eq!(schema["additionalProperties"], false);
+            assert!(schema["properties"].get("idempotency_key").is_some());
+            for field in arguments.as_object().unwrap().keys() {
+                assert!(
+                    schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(field))
+                );
+                for value in [Value::Null, json!("   ")] {
+                    let mut bad = arguments.clone();
+                    bad[field] = value;
+                    assert!(parser(&bad).is_err(), "{name}: {field}");
+                }
+                let mut missing = arguments.clone();
+                missing.as_object_mut().unwrap().remove(field);
+                assert!(parser(&missing).is_err(), "{name}: missing {field}");
+            }
+            for field in [
+                "host",
+                "port",
+                "user",
+                "username",
+                "password",
+                "from",
+                "cc",
+                "bcc",
+                "attachments",
+                "config",
+                "credentials",
+                "host_session",
+            ] {
+                let mut bad = arguments.clone();
+                bad[field] = json!("synthetic-private-override");
+                let result = call_tool(&config(), &json!({"name":name,"arguments":bad}));
+                assert_eq!(result["structuredContent"]["code"], "invalid_arguments");
+                assert!(!result.to_string().contains("synthetic-private-override"));
+                assert!(schema["properties"].get(field).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn mail_tool_parsers_preserve_templates_and_send_only_exact_task_fields() {
+        let (mut prepare, send) = mail_task_arguments();
+        prepare["subject"] = json!("  Exact subject  ");
+        prepare["body"] = json!("  Exact body\nwith a final newline\n");
+        let Action::PrepareMailTask {
+            subject,
+            body,
+            recipients,
+            ..
+        } = prepare_mail_task_action(&prepare).unwrap()
+        else {
+            panic!("wrong action")
+        };
+        assert_eq!(subject, "  Exact subject  ");
+        assert_eq!(body, "  Exact body\nwith a final newline\n");
+        assert_eq!(recipients, ["one@example.test", "two@example.test"]);
+        for value in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(31),
+            json!(65536),
+            json!("15"),
+        ] {
+            let mut bad = prepare.clone();
+            bad["ttl_minutes"] = value;
+            assert!(prepare_mail_task_action(&bad).is_err());
+        }
+        for value in [
+            json!([]),
+            json!([""]),
+            json!(["   "]),
+            json!([1]),
+            json!("one@example.test"),
+        ] {
+            let mut bad = prepare.clone();
+            bad["recipients"] = value;
+            assert!(prepare_mail_task_action(&bad).is_err());
+        }
+        let mut excessive = prepare.clone();
+        excessive["recipients"] = json!(vec!["one@example.test"; 101]);
+        assert!(prepare_mail_task_action(&excessive).is_err());
+        for ttl in [1, 30] {
+            let mut valid = prepare.clone();
+            valid["ttl_minutes"] = json!(ttl);
+            valid["recipients"] = json!(vec!["one@example.test"; 100]);
+            assert!(prepare_mail_task_action(&valid).is_ok());
+        }
+        for field in [
+            "item_id",
+            "recipients",
+            "subject",
+            "body",
+            "ttl_minutes",
+            "purpose",
+        ] {
+            let mut bad = send.clone();
+            bad[field] = prepare[field].clone();
+            assert!(send_task_mail_action(&bad).is_err(), "{field}");
+        }
+        let Action::SendTaskMail {
+            task_id,
+            recipient,
+            cwd,
+            user_request,
+        } = send_task_mail_action(&send).unwrap()
+        else {
+            panic!("wrong action")
+        };
+        assert_eq!(task_id, "synthetic-task");
+        assert_eq!(recipient, "one@example.test");
+        assert_eq!(cwd, "/synthetic/project");
+        assert_eq!(user_request, "Send the approved message");
+    }
+
     #[test]
     fn validation_and_broker_errors_never_echo_request_content() {
         let canary = "synthetic-secret /private/path command --token";

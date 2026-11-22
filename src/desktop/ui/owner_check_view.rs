@@ -136,6 +136,10 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
         _ => Vec::new(),
     };
     let choice = AccountChoice::of(&dialog.request);
+    let mail_task = match &dialog.request {
+        OwnerRequest::ActivateMailTask { task } => Some(task.clone()),
+        _ => None,
+    };
     // A request that is not ready has no account yet: nothing can start.
     let ready = dialog.request.is_ready();
     let running = dialog.running.as_ref().map(|(method, _, _)| *method);
@@ -161,6 +165,12 @@ pub(super) fn draw(app: &mut DesktopApp, ctx: &egui::Context) {
             ui.add_space(4.0);
         }
         kit::paragraph(ui, action, Font::Body, kit::palette().label);
+        if let Some(task) = &mail_task {
+            egui::ScrollArea::vertical()
+                .id_salt("owner-mail-task-details")
+                .max_height(280.0)
+                .show(ui, |ui| super::mail_tasks::details(ui, task));
+        }
         if !variables.is_empty() {
             ui.add_space(4.0);
             variable_list(ui, &variables);

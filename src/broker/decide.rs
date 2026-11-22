@@ -125,6 +125,9 @@ pub fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse {
             "Operation envelopes require the socket server.",
         ),
         Action::ListAccess => list_access(vault, &request.token),
+        Action::PrepareMailTask { .. }
+        | Action::SendTaskMail { .. }
+        | Action::MailTaskStatus { .. } => super::mail_dispatch::handle(ctx, request),
         Action::AccessRequestStatus { request_id } | Action::CancelAccessRequest { request_id } => {
             let mut guard = lock(vault);
             let Some(v) = guard.as_mut().filter(|v| !v.is_locked()) else {
@@ -871,10 +874,16 @@ fn call(
                 on.clone_into(&mut debug_line.answered_on);
             }
             Err(response) => {
-                debug_line.outcome = response
+                debug_line.code = response
                     .error
                     .as_ref()
                     .map_or_else(|| "refused".to_owned(), |error| error.code.clone());
+                debug_line.outcome =
+                    match crate::decision_log::DecisionOutcome::from_text(&debug_line.code) {
+                        crate::decision_log::DecisionOutcome::Unknown => "refused",
+                        outcome => outcome.as_str(),
+                    }
+                    .to_owned();
                 debug_line.millis = super::run::millis(started);
                 super::run::log_decision(ctx, &[item_id], debug_line);
                 return response;
@@ -915,6 +924,7 @@ fn call(
                 UseOutcome::Refused,
                 UseDecidedBy::Rule,
                 "",
+                "authorization_changed",
             );
             return WireResponse::failure("authorization_changed", reason);
         }
@@ -927,6 +937,7 @@ fn call(
                     UseOutcome::Allowed,
                     decided_by,
                     answered_on,
+                    "",
                 );
                 prepared
             }
@@ -1073,6 +1084,7 @@ fn ask_owner(
                     UseOutcome::Refused,
                     UseDecidedBy::Rule,
                     "",
+                    codes::QUESTION_WAITING,
                 );
             }
             return Err(WireResponse::failure(
@@ -1120,8 +1132,8 @@ fn ask_owner(
                 &[item_id],
             );
         }
-        if let Some((_, reason, outcome, by)) = &refusal {
-            record_call_use(vault, checked, item_id, *outcome, *by, on);
+        if let Some((code, reason, outcome, by)) = &refusal {
+            record_call_use(vault, checked, item_id, *outcome, *by, on, code);
             let _ = vault.record_activity(&NewActivity {
                 agent_id: Some(checked.agent.id),
                 agent_name: checked.agent.name.clone(),
@@ -1139,6 +1151,7 @@ fn ask_owner(
 }
 
 /// Store one connector use in the use log (ADR 0025 §5). A connector use has no project.
+#[allow(clippy::too_many_arguments)]
 fn record_call_use(
     vault: &mut Vault,
     checked: &CallChecked,
@@ -1146,21 +1159,167 @@ fn record_call_use(
     outcome: UseOutcome,
     decided_by: UseDecidedBy,
     answered_on: &str,
+    code: &str,
 ) {
-    let _ = vault.record_item_use(&NewItemUse {
-        item_id,
-        agent_id: Some(checked.agent.id),
-        agent_name: checked.agent.name.clone(),
-        project_key: String::new(),
-        project_label: String::new(),
-        action: ActionKind::Read,
-        command_summary: format!("use {} {}", checked.profile, checked.op_name),
-        hosts: vec![checked.destination.clone()],
-        outcome,
-        decided_by,
-        answered_on: answered_on.to_owned(),
-        decision_log_id: None,
+    record_connector_use(
+        vault,
+        NewItemUse {
+            item_id,
+            agent_id: Some(checked.agent.id),
+            agent_name: checked.agent.name.clone(),
+            project_key: String::new(),
+            project_label: String::new(),
+            action: ActionKind::Read,
+            command_summary: format!("use {} {}", checked.profile, checked.op_name),
+            hosts: vec![checked.destination.clone()],
+            outcome,
+            decided_by,
+            answered_on: answered_on.to_owned(),
+            decision_log_id: None,
+        },
+        code,
+    );
+}
+
+/// Connector decisions use the same linked decision/use records as process runs.
+/// Parameters stay out of the command summary: a connector may receive a secret.
+fn record_connector_use(vault: &mut Vault, mut used: NewItemUse, code: &str) {
+    use crate::vault::{DecidedBy, DecisionMeta, DecisionWhy, LoggedDecision, RequestKind};
+    let items = [used.item_id];
+    let command = [used.command_summary.clone()];
+    let mut entry = super::learning::RuleDenial {
+        at: super::learning::now(),
+        agent_id: used.agent_id.unwrap_or_default(),
+        agent_name: &used.agent_name,
+        items: &items,
+        user_request: "",
+        user_request_source: crate::vault::RequestSource::None,
+        command: &command,
+        purpose: "",
+        reason: "",
+    }
+    .entry();
+    entry.asked = used.decided_by == UseDecidedBy::Owner
+        || matches!(code, "approval_invalidated" | codes::QUESTION_WAITING);
+    entry.decision = if used.outcome == UseOutcome::Allowed {
+        LoggedDecision::Allow
+    } else {
+        LoggedDecision::Deny
+    };
+    entry.decided_by = match (used.outcome, used.decided_by) {
+        (UseOutcome::TimedOut, _) => DecidedBy::NoAnswer,
+        (_, _) if code == "approval_invalidated" => DecidedBy::NoAnswer,
+        (_, UseDecidedBy::Owner) => DecidedBy::Owner,
+        // Fixed connector rules do not call the model. Keep them out of learned
+        // model decisions and automation metrics even though the use API calls
+        // their route Bouncer.
+        (_, UseDecidedBy::Bouncer) => DecidedBy::Rule,
+        (_, UseDecidedBy::Pattern) => DecidedBy::Pattern,
+        (_, UseDecidedBy::Answer) => DecidedBy::Answer,
+        (_, UseDecidedBy::Rule) => DecidedBy::Rule,
+    };
+    entry = entry.with_why(&DecisionWhy {
+        reason: format!(
+            "{:?}",
+            if used.decided_by == UseDecidedBy::Rule {
+                ReasonKind::AccessCheck
+            } else {
+                ReasonKind::Connector
+            }
+        ),
+        code: code.to_owned(),
+        ..DecisionWhy::default()
     });
+    used.decision_log_id = vault
+        .record_decision_with(
+            &entry,
+            &DecisionMeta {
+                request: RequestKind::Connector,
+                wait_ms: None,
+            },
+        )
+        .ok();
+    if vault.details(used.item_id).is_ok() {
+        let _ = vault.record_item_use(&used);
+    }
+}
+
+/// Audit the owner's review of a scope, separately from actual credential use.
+/// Call after the registry accepted the review, under the same vault lock.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) fn record_mail_task_review(
+    vault: &mut Vault,
+    task: &super::mail_tasks::MailTaskSnapshot,
+    allowed: bool,
+) -> crate::vault::VaultResult<()> {
+    use crate::vault::{DecidedBy, DecisionMeta, DecisionWhy, LoggedDecision, RequestKind};
+    if vault.is_locked() || vault.epoch() != task.binding.vault_epoch {
+        return Err(crate::vault::VaultError::new(VaultErrorKind::Locked));
+    }
+    let agent_name = vault
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == task.binding.agent_id)
+        .map_or_else(
+            || format!("Agent #{}", task.binding.agent_id),
+            |agent| agent.name,
+        );
+    let label = format!("mail task review {}", task.id);
+    let command = [label.clone()];
+    let items = [task.draft.item_id];
+    let mut entry = super::learning::RuleDenial {
+        at: super::learning::now(),
+        agent_id: task.binding.agent_id,
+        agent_name: &agent_name,
+        items: &items,
+        user_request: "",
+        user_request_source: crate::vault::RequestSource::None,
+        command: &command,
+        purpose: "Review the proposed mail task scope.",
+        reason: if allowed {
+            "The owner activated the mail task scope. Each send still needs a separate decision."
+        } else {
+            "The owner denied the proposed mail task. No send was authorized."
+        },
+    }
+    .entry()
+    .with_why(&DecisionWhy {
+        reason: "MailTask".to_owned(),
+        code: if allowed { "" } else { "approval_denied" }.to_owned(),
+        ..DecisionWhy::default()
+    });
+    entry.asked = true;
+    entry.decision = if allowed {
+        LoggedDecision::Allow
+    } else {
+        LoggedDecision::Deny
+    };
+    entry.decided_by = DecidedBy::Owner;
+    entry.project_dir.clone_from(&task.binding.project_key);
+    vault.record_decision_with(
+        &entry,
+        &DecisionMeta {
+            request: RequestKind::Connector,
+            wait_ms: None,
+        },
+    )?;
+    vault.record_interaction(InteractionKind::Question, &label, &items)?;
+    crate::decision_log::append(&crate::decision_log::Line {
+        at: super::learning::now(),
+        request: "mail_task_review".into(),
+        agent: agent_name,
+        items: vec![crate::decision_log::Item {
+            id: task.draft.item_id,
+            name: String::new(),
+        }],
+        route: "Owner".into(),
+        outcome: if allowed { "allowed" } else { "denied" }.into(),
+        reason: "MailTask".into(),
+        code: if allowed { "" } else { "approval_denied" }.into(),
+        answered_on: concat!("this ", crate::computer!()).into(),
+        ..crate::decision_log::Line::default()
+    });
+    Ok(())
 }
 
 /// The checks of a connector use, before the decision. No secret is read.
@@ -1180,6 +1339,39 @@ fn check_call(
             operation: operation.to_owned(),
             decision: ActivityDecision::Deny,
             reason: reason.to_owned(),
+        });
+        record_connector_use(
+            vault,
+            NewItemUse {
+                item_id,
+                agent_id: Some(agent.id),
+                agent_name: agent.name.clone(),
+                project_key: String::new(),
+                project_label: String::new(),
+                action: ActionKind::Read,
+                command_summary: format!("use {operation}"),
+                hosts: Vec::new(),
+                outcome: UseOutcome::Refused,
+                decided_by: UseDecidedBy::Rule,
+                answered_on: String::new(),
+                decision_log_id: None,
+            },
+            code,
+        );
+        crate::decision_log::append(&crate::decision_log::Line {
+            at: super::learning::now(),
+            request: "connector".to_owned(),
+            agent: agent.name.clone(),
+            items: vec![crate::decision_log::Item {
+                id: item_id,
+                name: String::new(),
+            }],
+            route: "Refused".to_owned(),
+            reason: format!("{:?}", ReasonKind::AccessCheck),
+            headline: ReasonKind::AccessCheck.headline().to_owned(),
+            outcome: "refused".to_owned(),
+            code: code.to_owned(),
+            ..crate::decision_log::Line::default()
         });
         WireResponse::failure(code, reason)
     };
@@ -1312,6 +1504,15 @@ fn read_call_secret(
             decision: ActivityDecision::Deny,
             reason: reason.to_owned(),
         });
+        record_call_use(
+            vault,
+            checked,
+            item_id,
+            UseOutcome::Refused,
+            UseDecidedBy::Rule,
+            "",
+            code,
+        );
         WireResponse::failure(code, reason)
     };
     let destination = vault
@@ -1437,4 +1638,210 @@ fn bounded(text: &str) -> String {
         end -= 1;
     }
     clean[..end].to_owned()
+}
+
+#[cfg(test)]
+mod decision_record_tests {
+    use super::*;
+    use crate::decision_log::DecisionOutcome;
+    use crate::vault::{Field, ItemDraft, SecretValue};
+
+    #[test]
+    fn connector_check_refusal_has_a_linked_decision_without_secret_parameters() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("vault.db"), "synthetic-connector-pass").unwrap();
+        vault.unlock("synthetic-connector-pass").unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic connector key".into(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("FAKE-connector-secret-012345".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        let (_, token) = vault.register_agent("Synthetic connector agent").unwrap();
+        let params = BTreeMap::from([("token".into(), "FAKE-connector-secret-012345".into())]);
+        let response =
+            check_call(&mut vault, token.expose(), item.id, "read", &params).unwrap_err();
+        assert_eq!(response.error.unwrap().code, "not_granted");
+        let decisions = vault.decision_log().unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].entry.outcome_kind(), DecisionOutcome::Refused);
+        let rows = vault.bouncer_log(None, 10, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request, "connector");
+        assert_eq!(rows[0].outcome_kind(), DecisionOutcome::Refused);
+        let uses = vault.uses_of_decision(decisions[0].id).unwrap();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].command_summary, "use read");
+        assert!(!format!("{decisions:?} {uses:?}").contains("FAKE-connector-secret-012345"));
+    }
+
+    #[test]
+    fn connector_results_distinguish_denied_timeout_and_invalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault =
+            Vault::create(&dir.path().join("vault.db"), "synthetic-results-pass").unwrap();
+        vault.unlock("synthetic-results-pass").unwrap();
+        let item = vault
+            .add(ItemDraft {
+                title: "Synthetic result key".into(),
+                kind: crate::contracts::CredentialKind::ApiKey,
+                notes: String::new(),
+                tags: vec![],
+                fields: vec![Field {
+                    name: "token".into(),
+                    value: SecretValue::new("FAKE-result-secret-012345".into()),
+                    secret: true,
+                }],
+            })
+            .unwrap();
+        let (agent, _) = vault.register_agent("Synthetic result agent").unwrap();
+        for (outcome, by, code, expected) in [
+            (
+                UseOutcome::Denied,
+                UseDecidedBy::Owner,
+                "approval_denied",
+                DecisionOutcome::Denied,
+            ),
+            (
+                UseOutcome::TimedOut,
+                UseDecidedBy::Owner,
+                "approval_timeout",
+                DecisionOutcome::TimedOut,
+            ),
+            (
+                UseOutcome::Refused,
+                UseDecidedBy::Rule,
+                "approval_invalidated",
+                DecisionOutcome::Invalidated,
+            ),
+        ] {
+            record_connector_use(
+                &mut vault,
+                NewItemUse {
+                    item_id: item.id,
+                    agent_id: Some(agent.id),
+                    agent_name: agent.name.clone(),
+                    project_key: String::new(),
+                    project_label: String::new(),
+                    action: ActionKind::Read,
+                    command_summary: "use synthetic read".into(),
+                    hosts: vec![],
+                    outcome,
+                    decided_by: by,
+                    answered_on: if by == UseDecidedBy::Owner && outcome == UseOutcome::Denied {
+                        "iPhone".into()
+                    } else {
+                        String::new()
+                    },
+                    decision_log_id: None,
+                },
+                code,
+            );
+            let row = vault.bouncer_log(None, 1, None).unwrap().pop().unwrap();
+            assert_eq!(row.outcome_kind(), expected);
+            assert!(row.asked);
+            let uses = vault.uses_of_decision(row.decision_log_id).unwrap();
+            assert_eq!(uses.len(), 1);
+            assert_eq!(uses[0].outcome, outcome);
+        }
+        assert_eq!(vault.decision_log().unwrap().len(), 3);
+        for (by, expected, asked) in [
+            (UseDecidedBy::Bouncer, crate::vault::DecidedBy::Rule, false),
+            (UseDecidedBy::Owner, crate::vault::DecidedBy::Owner, true),
+        ] {
+            record_connector_use(
+                &mut vault,
+                NewItemUse {
+                    item_id: item.id,
+                    agent_id: Some(agent.id),
+                    agent_name: agent.name.clone(),
+                    project_key: String::new(),
+                    project_label: String::new(),
+                    action: ActionKind::Read,
+                    command_summary: "use synthetic read".into(),
+                    hosts: vec![],
+                    outcome: UseOutcome::Allowed,
+                    decided_by: by,
+                    answered_on: String::new(),
+                    decision_log_id: None,
+                },
+                "",
+            );
+            let entry = vault.decision_log().unwrap().pop().unwrap().entry;
+            assert_eq!(entry.decided_by, expected);
+            assert_ne!(entry.decided_by, crate::vault::DecidedBy::Model);
+            assert_eq!(entry.asked, asked);
+            assert_eq!(entry.why().reason, "Connector");
+        }
+
+        let task = super::super::mail_tasks::MailTaskSnapshot {
+            id: "synthetic-denied-task".into(),
+            digest: "synthetic-task-digest".into(),
+            draft: super::super::mail_tasks::MailTaskDraft {
+                item_id: item.id,
+                recipients: vec!["synthetic@example.test".into()],
+                subject: "PRIVATE-SYNTHETIC-SUBJECT".into(),
+                body: "PRIVATE-SYNTHETIC-BODY".into(),
+                ttl_minutes: 5,
+                purpose: "PRIVATE-SYNTHETIC-PURPOSE with recipient@example.test".into(),
+            },
+            binding: super::super::mail_tasks::MailTaskBinding {
+                agent_id: agent.id,
+                project_key: "/synthetic/project/.git".into(),
+                vault_epoch: vault.epoch(),
+                item_revision: item.revision,
+                context_id: "synthetic-context".into(),
+                policy_digest: "synthetic-policy".into(),
+            },
+            account: super::super::mail_tasks::MailTaskAccount {
+                host: "smtp.example.test".into(),
+                port: 465,
+                user: "synthetic@example.test".into(),
+                sender: "synthetic@example.test".into(),
+            },
+            state: super::super::mail_tasks::MailTaskState::Denied,
+            recipient_states: vec![],
+            remaining_seconds: 60,
+        };
+        let uses_before = vault.item_uses(item.id, 100).unwrap().len();
+        for (allowed, expected) in [
+            (false, DecisionOutcome::Denied),
+            (true, DecisionOutcome::Allowed),
+        ] {
+            record_mail_task_review(&mut vault, &task, allowed).unwrap();
+            let row = vault
+                .bouncer_log(None, 1, Some("project"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(row.request, "connector");
+            assert_eq!(row.why.reason, "MailTask");
+            assert_eq!(row.decided_by, "owner");
+            assert_eq!(row.outcome_kind(), expected);
+            assert!(row.asked);
+            assert_eq!(row.project, "project");
+            assert_eq!(row.agent_id, agent.id);
+            assert_eq!(row.item_id, Some(item.id));
+            assert!(
+                vault
+                    .uses_of_decision(row.decision_log_id)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(vault.item_uses(item.id, 100).unwrap().len(), uses_before);
+        let log = format!("{:?}", vault.decision_log().unwrap());
+        assert!(!log.contains("PRIVATE-SYNTHETIC-SUBJECT"));
+        assert!(!log.contains("PRIVATE-SYNTHETIC-BODY"));
+        assert!(!log.contains("PRIVATE-SYNTHETIC-PURPOSE"));
+        assert!(!log.contains("recipient@example.test"));
+    }
 }

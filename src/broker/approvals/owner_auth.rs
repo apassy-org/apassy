@@ -89,6 +89,12 @@ const REMOTE_FUTURE_SLACK: u64 = COMPANION_FUTURE_SLACK;
 /// An owner action that needs a fresh owner check. The target is part of the action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerAction {
+    /// One immutable SMTP task, confirmed afresh on this computer. This only lets
+    /// the bouncer evaluate its individual sends; it is not a send approval.
+    ActivateMailTask {
+        scope_id: String,
+        scope_digest: String,
+    },
     BrowserDebugging {
         identity: crate::browser::trust::InstanceIdentity,
         scope: Option<crate::browser::bypass::BypassScope>,
@@ -874,6 +880,7 @@ impl OwnerAction {
     /// Trusted heading: never interpolate website, agent, item, or request text.
     pub fn touch_id_title(&self) -> &'static str {
         match self {
+            Self::ActivateMailTask { .. } => "Let Bouncer decide for this mail task",
             Self::FillLogin { .. } | Self::FillSystemLogin { .. } => "Fill a password",
             Self::SaveLogin { .. } => "Save a password",
             Self::UpdateLogin { .. } => "Update a password",
@@ -949,6 +956,7 @@ impl OwnerAction {
     /// It has no secret value and no command.
     pub fn reason(&self) -> String {
         match self {
+            Self::ActivateMailTask { .. } => "let the bouncer decide for this exact mail task".into(),
             Self::BrowserDebugging { .. } => "allow this exact browser debugging instance".into(),
             Self::RemoveOlderIphone { device, .. } if device.kind == TrustedDeviceKind::Watch => {
                 "remove the older paired Apple Watch".into()
@@ -1389,6 +1397,7 @@ impl OwnerAction {
         matches!(
             self,
             Self::AddRemoteAgent { .. }
+                | Self::ActivateMailTask { .. }
                 | Self::ChangeBouncerHosting { .. }
                 | Self::ChangeBouncerTraining { .. }
                 | Self::ChangeShortLivedSettings { .. }
@@ -2161,6 +2170,14 @@ impl OwnerGate {
         }
         let (path, epoch) = self.session()?;
         let method = check.method();
+        if matches!(action, OwnerAction::ActivateMailTask { .. })
+            && !matches!(
+                method,
+                CheckMethod::TouchId | CheckMethod::Passphrase | CheckMethod::Polkit
+            )
+        {
+            return Err(OwnerAuthError::RemoteUnsupported);
+        }
         // An action of the feed counts as an owner interaction when it is applied
         // (relay-feed-v1 section 9.5 step 10), not at its check.
         let counted = !matches!(check, OwnerCheck::RemoteAction { .. });
@@ -2691,6 +2708,42 @@ pub fn verify_remote_action(
 #[cfg(test)]
 mod evaluation_tests {
     use super::*;
+
+    #[test]
+    fn mail_task_consent_is_exact_local_and_never_reused() {
+        let action = OwnerAction::ActivateMailTask {
+            scope_id: "synthetic-task".into(),
+            scope_digest: "a".repeat(64),
+        };
+        assert!(action.needs_fresh_local_check());
+        #[cfg(feature = "desktop")]
+        assert!(!LocalWindowSource::LocalOwner.permits(&action));
+        assert!(matches!(
+            remote_choice(&action, None),
+            Err(OwnerAuthError::RemoteUnsupported)
+        ));
+        let proof = OwnerProof::issue(action.clone(), CheckMethod::Passphrase, [1; 32]);
+        assert_eq!(proof.check(&action, &[1; 32]), Ok(()));
+        assert_eq!(
+            proof.check(&action, &[2; 32]),
+            Err(ProofRefusal::OtherSession)
+        );
+        for other in [
+            OwnerAction::ActivateMailTask {
+                scope_id: "another-task".into(),
+                scope_digest: "a".repeat(64),
+            },
+            OwnerAction::ActivateMailTask {
+                scope_id: "synthetic-task".into(),
+                scope_digest: "b".repeat(64),
+            },
+        ] {
+            assert_eq!(
+                proof.check(&other, &[1; 32]),
+                Err(ProofRefusal::WrongAction)
+            );
+        }
+    }
 
     #[cfg(feature = "desktop")]
     #[test]

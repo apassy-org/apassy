@@ -524,7 +524,15 @@ fn expansion(ui: &mut Ui, event: &LogEvent, requests: &[ProxyRow], offset: i64) 
                         ui.set_width(ui.available_width());
                         ui.add(
                             egui::Label::new(
-                                kit::text(&event.command, Font::Mono).color(kit::palette().label),
+                                kit::text(
+                                    &event.command,
+                                    if event.kind == bouncer::LogKind::Request {
+                                        Font::Body
+                                    } else {
+                                        Font::Mono
+                                    },
+                                )
+                                .color(kit::palette().label),
                             )
                             .wrap(),
                         );

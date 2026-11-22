@@ -203,4 +203,71 @@ struct AccessRequestsModelTests {
     #expect(signer.count == 0)
   }
 
+  private func receipt(for row: RelayAccessRequest, outcome: String) -> AccessReceipt {
+    AccessReceipt(
+      vault_id: row.card.vault_id, team_id: row.card.team_id, qid: row.card.qid,
+      request_id: row.card.request_id, asker: row.card.asker.device, digest: row.digest,
+      outcome: outcome, answered_by: "another-device", device_name: "Other iPhone",
+      device_kind: "iphone", kind: outcome == "denied" ? "deny" : nil,
+      at: 100, expires_at: 200)
+  }
+
+  @Test func denialOnAnotherDeviceRemainsDeniedAfterTheRequestDeadline() async {
+    let (service, signer, model, row) = await fixture()
+    let denied = receipt(for: row, outcome: "denied")
+    await service.setAccessRequests([
+      RelayAccessRequest(
+        vault_id: row.vault_id, card: row.card, digest: row.digest, state: "settled",
+        receipt: denied, answer_key: row.answer_key)
+    ])
+    await model.refresh()
+    #expect(model.history.first?.receipt?.device_name == "Other iPhone")
+    #expect(AccessRequestPresentation.outcome(model.history.first?.receipt) == "Denied")
+    let afterDeadline = Date(timeIntervalSince1970: Double(row.card.expires_at) + 1)
+    #expect(!AccessRequestPresentation.showsExpiredAccess(denied, at: afterDeadline))
+    let posts = await service.accessPosts()
+    #expect(signer.count == 0 && posts.isEmpty)
+  }
+
+  @Test func deniedAndExpiredReceiptsHaveDifferentHistoryResults() {
+    let row = PreviewVaultService.sampleAccessRequest()
+    #expect(AccessRequestPresentation.outcome(receipt(for: row, outcome: "denied")) == "Denied")
+    #expect(AccessRequestPresentation.outcome(receipt(for: row, outcome: "expired")) == "Access expired")
+    #expect(AccessRequestPresentation.outcome(nil) == "Not confirmed")
+  }
+
+  @Test func onlyOneAttemptConsentShowsAccessExpiry() {
+    let row = PreviewVaultService.sampleAccessRequest()
+    let before = Date(timeIntervalSince1970: 199)
+    let after = Date(timeIntervalSince1970: 200)
+    let once = receipt(for: row, outcome: "allowed_once")
+    #expect(!AccessRequestPresentation.showsExpiredAccess(once, at: before))
+    #expect(AccessRequestPresentation.showsExpiredAccess(once, at: after))
+    for outcome in ["granted_on_mac", "denied", "expired", "invalidated", "future_outcome"] {
+      #expect(!AccessRequestPresentation.showsExpiredAccess(receipt(for: row, outcome: outcome), at: after))
+    }
+  }
+
+  @Test func durableMacGrantsBelongInAllowedHistoryAndOutlastTheRequestDeadline() {
+    let row = PreviewVaultService.sampleAccessRequest()
+    let grant = receipt(for: row, outcome: "granted_on_mac")
+    #expect(AccessRequestPresentation.isAllowed(grant))
+    #expect(AccessRequestPresentation.isAllowed(receipt(for: row, outcome: "allowed_once")))
+    #expect(AccessRequestPresentation.outcome(grant) == "Durable access granted on the Mac")
+    let afterDeadline = Date(timeIntervalSince1970: Double(row.card.expires_at) + 1)
+    #expect(!AccessRequestPresentation.showsExpiredAccess(grant, at: afterDeadline))
+  }
+
+  @Test func missingAndUnknownOutcomesStayNeutralWithoutAnswerAttribution() {
+    let row = PreviewVaultService.sampleAccessRequest()
+    let unknown = receipt(for: row, outcome: "future_outcome")
+    #expect(AccessRequestPresentation.outcome(unknown) == "Outcome not reported")
+    #expect(AccessRequestPresentation.outcome(nil) == "Not confirmed")
+    #expect(!AccessRequestPresentation.isAllowed(unknown))
+    #expect(!AccessRequestPresentation.isAllowed(nil))
+    #expect(AccessRequestPresentation.answerDevice(unknown) == nil)
+    #expect(AccessRequestPresentation.answerDevice(nil) == nil)
+    #expect(AccessRequestPresentation.answerDevice(receipt(for: row, outcome: "denied")) == "Other iPhone")
+  }
+
 }

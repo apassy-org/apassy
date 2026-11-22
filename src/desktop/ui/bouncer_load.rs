@@ -162,15 +162,58 @@ pub(super) fn load(
             env_name: this_name.clone(),
             agent: Some(bouncer::clip(&row.agent_name)),
             remote_agent: local.cloud.contains(&row.agent_id),
-            kind: LogKind::Run,
+            kind: if row.why.reason == "MailTask" {
+                LogKind::MailTask
+            } else {
+                LogKind::Run
+            },
             credential: Some(bouncer::clip(&row.item_name)),
             production: row.production,
             project: row.project.clone(),
-            outcome: LogOutcome::of_decision(row.allowed, &row.decided_by, &row.answered_on),
+            outcome: LogOutcome::of_outcome(row.outcome_kind(), &row.decided_by, &row.answered_on),
             relay_run: row.relay_run,
             command: String::new(),
         });
     }
+    // A click on Deny for an access card changes access_request itself. It has never
+    // required an activity/decision row, so project its existing durable state by ID.
+    let _ = app.owner_ui.session.with_vault(|vault| {
+        let mut before = None;
+        let mut more_requests = false;
+        for _ in 0..pages {
+            let rows = vault
+                .denied_access_requests(before, LOG_PAGE)
+                .unwrap_or_default();
+            let more = rows.len() >= LOG_PAGE;
+            more_requests = more;
+            before = rows.last().map(|row| (row.at, row.id));
+            for row in rows {
+                data.events.push(LogEvent {
+                    source: LogSource::AccessRequest(row.id),
+                    at: row.at,
+                    env: DeviceScope::ThisMac,
+                    env_name: this_name.clone(),
+                    agent: Some(bouncer::clip(&row.agent_name)),
+                    remote_agent: local.cloud.contains(&row.agent_id),
+                    kind: LogKind::Request,
+                    credential: Some(bouncer::clip(&row.item_name)),
+                    production: false,
+                    project: bouncer::clip(&row.project),
+                    outcome: if row.owner_answered {
+                        LogOutcome::of_decision(false, "owner", &row.answered_on)
+                    } else {
+                        LogOutcome::Denied
+                    },
+                    relay_run: None,
+                    command: "Request for credential access".to_owned(),
+                });
+            }
+            if !more {
+                break;
+            }
+        }
+        data.more_events |= more_requests;
+    });
     for run in pending {
         let question = &run.question;
         data.events.push(LogEvent {
@@ -222,12 +265,17 @@ pub(super) fn load(
         .unwrap_or_default()
     {
         let kind = LogKind::of_operation(&row.operation);
-        // A line of a run shows only when a notification asks for it: its run is a
-        // decision row already.
-        if kind.is_none() && selected_activity != Some(row.id) {
+        // Most run activity repeats a decision. These specific request failures never
+        // create one, so retain them without matching unrelated rows by time or name.
+        let request_only = activity_only_refusal(&row);
+        if kind.is_none() && !request_only && selected_activity != Some(row.id) {
             continue;
         }
-        let kind = kind.unwrap_or(LogKind::Run);
+        let kind = kind.unwrap_or(if request_only {
+            LogKind::Request
+        } else {
+            LogKind::Run
+        });
         let agent = (!row.agent.trim().is_empty()
             && !matches!(kind, LogKind::RemoteAccessOn | LogKind::RemoteAccessOff))
         .then(|| bouncer::clip(&row.agent));
@@ -239,19 +287,26 @@ pub(super) fn load(
             agent,
             remote_agent: matches!(kind, LogKind::Connect | LogKind::Disconnect),
             kind,
-            credential: (kind == LogKind::Run).then(|| bouncer::clip(&row.item)),
+            credential: matches!(kind, LogKind::Run | LogKind::Request)
+                .then(|| bouncer::clip(&row.item)),
             production: false,
             project: String::new(),
             outcome: match (kind, row.decision) {
                 (LogKind::Run, crate::vault::ActivityDecision::Allow) => {
                     LogOutcome::AllowedByBouncer
                 }
-                (LogKind::Run, _) => LogOutcome::DeniedByBouncer,
+                (LogKind::Run, crate::vault::ActivityDecision::Deny) => LogOutcome::NotAllowed,
+                (LogKind::Run, _) => LogOutcome::Failed,
+                (LogKind::Request, _) => LogOutcome::DeniedByBouncer,
                 (LogKind::Connect, _) => LogOutcome::AllowedByYou,
                 _ => LogOutcome::ByYou,
             },
             relay_run: None,
-            command: String::new(),
+            command: if request_only {
+                format!("{}\n{}", row.operation, row.reason)
+            } else {
+                String::new()
+            },
         });
     }
 
@@ -296,6 +351,25 @@ pub(super) fn load(
     data
 }
 
+/// Only failures whose writers do not also write a decision. Activity has no decision
+/// foreign key: broad denial matching would duplicate real owner answers and could
+/// attribute a timeout to a refusal. Keep the broker's authentication messages exact.
+fn activity_only_refusal(row: &crate::desktop::owner_store::AgentActivityRow) -> bool {
+    if row.decision != crate::vault::ActivityDecision::Deny {
+        return false;
+    }
+    matches!(
+        row.operation.as_str(),
+        "request access" | "request scoped access"
+    ) || matches!(
+        row.reason.as_str(),
+        "The token is not valid or the agent is revoked."
+            | "The cloud agent is revoked or not in this vault."
+            | "The token of the remote agent expired. Connect the agent again: give it the MCP address of Bouncer > Agents."
+    ) || (row.reason.starts_with("The agent token expired on ")
+        && row.reason.ends_with(". Rotate the token in Agents."))
+}
+
 /// The agents and the runs of one other Mac from its feed.
 fn remote_lines(
     data: &mut BouncerData,
@@ -331,11 +405,6 @@ fn remote_lines(
         }
         data.agents.push(line);
         for item_use in &agent.recent {
-            let decided = if item_use.outcome == "timed_out" {
-                "timed_out"
-            } else {
-                item_use.decided_by.as_str()
-            };
             data.events.push(LogEvent {
                 source: LogSource::Feed(bouncer::stamp((
                     &mac.device,
@@ -344,6 +413,8 @@ fn remote_lines(
                     &item_use.item_title,
                     &item_use.command,
                     &item_use.outcome,
+                    &item_use.decided_by,
+                    &item_use.answered_on,
                 ))),
                 at: item_use.at,
                 env: scope.clone(),
@@ -358,9 +429,9 @@ fn remote_lines(
                 }),
                 production: false,
                 project: bouncer::clip(&item_use.project),
-                outcome: LogOutcome::of_decision(
-                    item_use.outcome == "allowed",
-                    decided,
+                outcome: LogOutcome::of_outcome(
+                    crate::decision_log::DecisionOutcome::from_text(&item_use.outcome),
+                    &item_use.decided_by,
                     &item_use.answered_on,
                 ),
                 relay_run: None,

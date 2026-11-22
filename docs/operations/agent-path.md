@@ -200,7 +200,7 @@ The other providers (Anthropic, OpenAI, Resend, SendGrid, Slack, Twilio, Sentry,
 - **No access to give:** since 0.5.0 there are no grants, decision modes, or folders to set for an agent. The bouncer reads the project of the working directory: a git repository with all its worktrees, or a folder without git. The root, the home folder, and its parents are never a project, so a run there asks you.
 - **What the agent sees (ADR 0025):** `apassy_list_access` always has a `catalog` without values, for every agent. Each entry has `folder`: the folder names from the root. An exception hides a credential from the catalog and from runs: "Not for this agent", or "Only these items" (the agent sees only its list). Each credential with a secret field has access `can_use`: the agent runs a command with it at once, and the bouncer decides.
 - **Exceptions:** the answers "Never for AGENT" and "Always Ask for AGENT" add an exception. The upgrade from 0.4.1 gave "Only these items" to each agent that did not see all credentials; `apassy agent see-all AGENT on` removes it (owner check). The page of the agent lists its exceptions under "Exceptions". "Remove" of "Never" or "Always ask" gives authority back, so it needs the owner check.
-- **Access requests:** an agent does not need one: each credential of its catalog is `can_use`. `apassy_request_access` only records a note for you and returns at once. The app does not show these notes; `apassy request list` does. To ask you for a credential that is not in Apassy, the agent uses `apassy_ask_owner_for_credential` (section 8e), which shows in Decisions > Requests.
+- **Access requests.** Each credential in the agent's catalog is `can_use`. An unscoped `apassy_request_access` records a note and returns at once. Use `apassy request list` to read the notes. Denied requests appear in **Logs** and **Decisions** with the recorded decision time. To ask for a new credential, the agent uses `apassy_ask_owner_for_credential` (section 8e).
 
 ## 8d. Questions and answers (ADR 0025)
 
@@ -238,6 +238,41 @@ pinned execution graph.
 Removing a remembered answer makes Apassy stricter, so it needs no owner check. Stored evaluation scopes are retained for compatibility and have no routing effect. Removing an exception of an agent ("Not for this agent" or "Always ask for this agent") gives authority back, so it needs an owner check (`OwnerAction::RemoveAgentException`). A restore from a backup removes every remembered answer, production allowances included.
 
 Apassy writes one row for each decided use of each credential: allowed, denied, refused, or timed out, and who decided (bouncer, pattern, answer, owner, or rule). The row has no secret value. Apassy also counts each owner check and each new question.
+
+### Let Bouncer decide sends for one mail task
+
+For a real SMTP mailing, use a Login or Custom credential with visible details named
+`SMTP host`, `SMTP port`, `SMTP username` and `SMTP sender`. A Login can use its
+ordinary username. Store the password in its password field or in a hidden detail named
+`SMTP password`. The account must have exactly one secret field. Port 465 uses TLS
+from the start. Other ports require STARTTLS before authentication.
+
+1. The local agent calls `apassy_prepare_mail_task` with the credential ID, working
+   directory, purpose, exact plain-text subject and body, 1–100 distinct recipients,
+   and a lifetime of 1–30 minutes. Apassy returns a pending task ID.
+2. In **Decisions → Mail tasks**, review the SMTP account, sender, full message,
+   recipients and expiry. Choose **Let Bouncer decide for this task** and complete
+   the local owner check. Use **Revoke task now** to end the permission early.
+3. The agent reads `apassy_mail_task_status` and, once active, calls
+   `apassy_send_task_mail` for one approved recipient at a time. Bouncer evaluates
+   each send. An uncertain result, an unavailable local model or an Always Ask
+   setting brings that send to the owner. Each attempt uses the reviewed sender
+   and literal message. Adding a recipient or editing the message requires a new
+   task. The mail tools support plain text and a single envelope recipient per send.
+4. After a lost response, use the operation ID with `apassy_list_access` and check
+   the task status. A confirmed send means the SMTP submission server accepted the
+   message. If acceptance is unknown, check the sending account before requesting
+   another mailing. Reusing the same task cannot submit twice to a recipient.
+
+The permission belongs to one agent, project, task and unlocked vault session.
+For a host without a session ID, Apassy binds it to the running local MCP adapter.
+The send call repeats the purpose approved by the owner. Restarting that adapter
+requires a new review. **Logs** and **Decisions** show the owner's task review
+separately from each send decision. The operation receipt contains no message or
+recipient list. To measure automation over the last seven days, run
+`apassy decisions log --json`. In `data.summary.mail`, divide `by_bouncer` by
+`send_decisions` when at least one send decision was recorded. `task_reviews`
+counts the times the owner reviewed a proposed mailing.
 
 ## 8e. Agents add credentials (ADR 0025 §6)
 

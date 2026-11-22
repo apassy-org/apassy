@@ -81,6 +81,8 @@ pub(crate) fn asked_you(outcome: &LogOutcome) -> bool {
             | LogOutcome::DeniedByYou
             | LogOutcome::DeniedOn(_)
             | LogOutcome::NoAnswer
+            | LogOutcome::TimedOut
+            | LogOutcome::Invalidated
     )
 }
 
@@ -125,8 +127,13 @@ pub(crate) struct HistoryView {
 
 /// The runs of the history: this Mac's decision rows and the other Macs' feed rows.
 fn is_history(event: &LogEvent) -> bool {
-    event.kind == LogKind::Run
-        && matches!(event.source, LogSource::Decision(_) | LogSource::Feed(_))
+    (matches!(event.kind, LogKind::Run | LogKind::MailTask)
+        && matches!(event.source, LogSource::Decision(_) | LogSource::Feed(_)))
+        || (event.kind == LogKind::Request
+            && matches!(
+                event.source,
+                LogSource::Activity(_) | LogSource::AccessRequest(_)
+            ))
 }
 
 fn in_scope(event: &LogEvent, scope: &ActivityScope) -> bool {
@@ -561,14 +568,26 @@ pub(crate) fn history_detail(
         decision_facts(ui, event, now);
     }
     if !event.command.is_empty() {
-        kit::section(ui, Some("Command"), None, |s| {
-            s.row(|ui| {
-                ui.add(
-                    Label::new(kit::text(&event.command, Font::Mono).color(kit::palette().label))
+        let request = event.kind == LogKind::Request;
+        kit::section(
+            ui,
+            Some(if request { "Request" } else { "Command" }),
+            None,
+            |s| {
+                s.row(|ui| {
+                    ui.add(
+                        Label::new(
+                            kit::text(
+                                &event.command,
+                                if request { Font::Body } else { Font::Mono },
+                            )
+                            .color(kit::palette().label),
+                        )
                         .wrap(),
-                );
-            });
-        });
+                    );
+                });
+            },
+        );
     }
     bottom(ui);
     if matches!(event.source, LogSource::Feed(_)) {

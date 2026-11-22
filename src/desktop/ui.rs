@@ -85,6 +85,8 @@ mod keyboard_tests;
 pub(crate) mod kit;
 /// Bouncer > Logs (implementation-plan-bouncer-section §7).
 mod logs;
+#[cfg(feature = "vault")]
+pub(crate) mod mail_tasks;
 /// New credential entry points and local paste detection.
 #[cfg(feature = "vault")]
 mod new_credential;

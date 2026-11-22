@@ -3,6 +3,37 @@ import ApassyVaultKit
 import Foundation
 import Observation
 
+/// A receipt's decision stays authoritative after the original request deadline.
+enum AccessRequestPresentation {
+  static func outcome(_ receipt: AccessReceipt?) -> String {
+    switch receipt?.outcome {
+    case "allowed_once": "Allowed once"
+    case "denied": "Denied"
+    case "granted_on_mac": "Durable access granted on the Mac"
+    case "expired": "Access expired"
+    case "invalidated": "Access request invalidated"
+    case .some: "Outcome not reported"
+    case nil: "Not confirmed"
+    }
+  }
+
+  static func isAllowed(_ receipt: AccessReceipt?) -> Bool {
+    receipt?.outcome == "allowed_once" || receipt?.outcome == "granted_on_mac"
+  }
+
+  static func answerDevice(_ receipt: AccessReceipt?) -> String? {
+    guard let receipt,
+      ["allowed_once", "denied", "granted_on_mac"].contains(receipt.outcome)
+    else { return nil }
+    return receipt.device_name
+  }
+
+  static func showsExpiredAccess(_ receipt: AccessReceipt, at date: Date) -> Bool {
+    receipt.outcome == "allowed_once"
+      && date.timeIntervalSince1970 >= Double(receipt.expires_at)
+  }
+}
+
 @MainActor @Observable
 final class AccessRequestsModel {
   private(set) var history: [RelayAccessRequest] = []
