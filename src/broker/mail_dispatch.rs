@@ -294,42 +294,70 @@ pub(super) fn handle(ctx: &BrokerContext, request: &WireRequest) -> WireResponse
         Action::MailTaskStatus { task_id, cwd } => status(ctx, request, task_id, cwd),
         _ => WireResponse::failure("invalid_request", "This is not a mail task request."),
     };
-    if !response.ok {
-        let mut guard = decide::lock(&ctx.vault);
-        if let Some(vault) = guard.as_mut().filter(|v| !v.is_locked()) {
-            if let Ok(agent) = vault.authenticate_agent(&request.token) {
-                let uncertain = response
-                    .error
-                    .as_ref()
-                    .is_some_and(|error| error.code == "mail_submission_unknown");
-                let transport = uncertain
-                    || response
-                        .error
-                        .as_ref()
-                        .is_some_and(|error| error.code == "mail_not_submitted");
-                let _ = vault.record_activity(&NewActivity {
-                    agent_id: Some(agent.id),
-                    agent_name: agent.name,
-                    item_id: None,
-                    operation: "mail task".into(),
-                    decision: if transport {
-                        ActivityDecision::Error
-                    } else {
-                        ActivityDecision::Deny
-                    },
-                    reason: if uncertain {
-                        "SMTP disposition is unknown; retry is blocked."
-                    } else if transport {
-                        "SMTP message was not submitted; the recipient slot is consumed."
-                    } else {
-                        "Mail task request refused; message contents are not logged."
-                    }
-                    .into(),
-                });
-            }
-        }
+    if let Some(error) = &response.error {
+        record_request_failure(ctx, &request.token, &error.code);
     }
     response
+}
+
+/// Approval outcomes have their own decision. Record independent scope and transport
+/// failures without turning a timeout or an in-flight retry into another refusal.
+fn record_request_failure(ctx: &BrokerContext, token: &str, code: &str) {
+    let (decision, operation, reason) = match code {
+        "mail_task_unavailable" => (
+            ActivityDecision::Deny,
+            "mail task access",
+            "An approved mail task matching this request is unavailable.",
+        ),
+        "invalid_mail_task" => (
+            ActivityDecision::Deny,
+            "mail task access",
+            "The proposed mail task has invalid scope or message fields.",
+        ),
+        "mail_not_submitted" => (
+            ActivityDecision::Error,
+            "mail task",
+            "The message was not submitted. A new attempt requires another reviewed task.",
+        ),
+        "mail_submission_unknown" => (
+            ActivityDecision::Error,
+            "mail task",
+            "The SMTP server may have accepted the message. This task cannot send it again.",
+        ),
+        "mail_content_unavailable" | "mail_audit_unavailable" => (
+            ActivityDecision::Error,
+            "mail task",
+            "Apassy could not complete the authorization checks for this send.",
+        ),
+        _ => return,
+    };
+    let mut guard = decide::lock(&ctx.vault);
+    let Some(vault) = guard.as_mut().filter(|v| !v.is_locked()) else {
+        return;
+    };
+    let Ok(agent) = vault.authenticate_agent(token) else {
+        return;
+    };
+    let _ = vault.record_activity(&NewActivity {
+        agent_id: Some(agent.id),
+        agent_name: agent.name,
+        item_id: None,
+        operation: operation.into(),
+        decision,
+        reason: reason.into(),
+    });
+    if decision == ActivityDecision::Deny && crate::decision_log::enabled() {
+        crate::decision_log::append(&crate::decision_log::Line {
+            at: super::learning::now(),
+            request: "mail_task_access".into(),
+            agent: agent.id.to_string(),
+            route: "Refused".into(),
+            reason: "AccessCheck".into(),
+            outcome: "refused".into(),
+            code: code.into(),
+            ..Default::default()
+        });
+    }
 }
 
 fn status(ctx: &BrokerContext, request: &WireRequest, task_id: &str, cwd: &str) -> WireResponse {
@@ -391,10 +419,13 @@ fn prepare(
         .propose(draft, checked.binding, checked.account)
     {
         Ok(scope) => scope,
+        Err(super::mail_tasks::MailTaskError::Capacity) => {
+            return WireResponse::failure("busy", "The mail task table is full.");
+        }
         Err(_) => {
             return WireResponse::failure(
                 "invalid_mail_task",
-                "The mail task is invalid or its bounded queue is full.",
+                "The mail task could not be prepared.",
             );
         }
     };

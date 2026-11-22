@@ -1303,7 +1303,9 @@ pub(crate) fn record_mail_task_review(
             wait_ms: None,
         },
     )?;
-    vault.record_interaction(InteractionKind::Question, &label, &items)?;
+    // The durable review above is authoritative. A failed aggregate update must
+    // not revoke an activation after its successful review has been recorded.
+    let _ = vault.record_interaction(InteractionKind::Question, &label, &items);
     crate::decision_log::append(&crate::decision_log::Line {
         at: super::learning::now(),
         request: "mail_task_review".into(),

@@ -300,7 +300,7 @@ fn transact(
     {
         let token = Zeroizing::new(format!("\0{username}\0{password}"));
         let encoded = Zeroizing::new(BASE64_STANDARD.encode(token.as_bytes()));
-        let command = Zeroizing::new(format!("AUTH PLAIN {}", &*encoded));
+        let command = Zeroizing::new(format!("AUTH PLAIN {}", encoded.as_str()));
         session.command(&command)?;
         session.expect("auth", &[235])?;
     } else if mechanisms

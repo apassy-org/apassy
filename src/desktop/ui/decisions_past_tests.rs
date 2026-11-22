@@ -94,6 +94,34 @@ impl Decision<'_> {
 }
 
 fn record(fx: &mut Fixture, decision: Decision<'_>) -> u64 {
+    let outcome = match (decision.decision, decision.decided_by) {
+        (LoggedDecision::Allow, _) => UseOutcome::Allowed,
+        (_, DecidedBy::Owner) => UseOutcome::Denied,
+        (_, DecidedBy::NoAnswer) if decision.why.code == "approval_invalidated" => {
+            UseOutcome::Refused
+        }
+        (_, DecidedBy::NoAnswer) => UseOutcome::TimedOut,
+        _ => UseOutcome::Refused,
+    };
+    let by = if outcome == UseOutcome::Refused {
+        UseDecidedBy::Rule
+    } else {
+        match decision.decided_by {
+            DecidedBy::Owner | DecidedBy::NoAnswer => UseDecidedBy::Owner,
+            DecidedBy::Answer => UseDecidedBy::Answer,
+            DecidedBy::Pattern => UseDecidedBy::Pattern,
+            DecidedBy::Rule => UseDecidedBy::Rule,
+            DecidedBy::Model => UseDecidedBy::Bouncer,
+        }
+    };
+    record_with_use(fx, decision, Some((outcome, by)))
+}
+
+fn record_with_use(
+    fx: &mut Fixture,
+    decision: Decision<'_>,
+    use_result: Option<(UseOutcome, UseDecidedBy)>,
+) -> u64 {
     let agent = fx.agent;
     fx.app
         .owner_ui
@@ -127,23 +155,25 @@ fn record(fx: &mut Fixture, decision: Decision<'_>) -> u64 {
             }
             .with_why(&decision.why);
             let id = vault.record_decision(&entry).expect("decision");
-            for item in &decision.items {
-                vault
-                    .record_item_use(&NewItemUse {
-                        item_id: *item,
-                        agent_id: Some(agent),
-                        agent_name: "Claude Code".to_owned(),
-                        project_key: KEY.to_owned(),
-                        project_label: "apassy".to_owned(),
-                        action: ActionKind::Change,
-                        command_summary: "run sentry-cli releases".to_owned(),
-                        hosts: vec!["sentry.io".to_owned()],
-                        outcome: UseOutcome::TimedOut,
-                        decided_by: UseDecidedBy::Owner,
-                        answered_on: String::new(),
-                        decision_log_id: Some(id),
-                    })
-                    .expect("use");
+            if let Some((outcome, decided_by)) = use_result {
+                for item in &decision.items {
+                    vault
+                        .record_item_use(&NewItemUse {
+                            item_id: *item,
+                            agent_id: Some(agent),
+                            agent_name: "Claude Code".to_owned(),
+                            project_key: KEY.to_owned(),
+                            project_label: "apassy".to_owned(),
+                            action: ActionKind::Change,
+                            command_summary: "run sentry-cli releases".to_owned(),
+                            hosts: vec!["sentry.io".to_owned()],
+                            outcome,
+                            decided_by,
+                            answered_on: String::new(),
+                            decision_log_id: Some(id),
+                        })
+                        .expect("use");
+                }
             }
             id
         })
@@ -1053,7 +1083,7 @@ fn logs_and_history_keep_rejections_distinct_from_unanswered_questions() {
         (
             DecidedBy::NoAnswer,
             "approval_invalidated",
-            "Request cancelled",
+            "Request invalidated",
         ),
         (DecidedBy::NoAnswer, "", "No answer"),
     ] {
@@ -1061,8 +1091,71 @@ fn logs_and_history_keep_rejections_distinct_from_unanswered_questions() {
         decision.decided_by = by;
         decision.asked = by != DecidedBy::Rule;
         decision.why.code = code.to_owned();
-        ids.push((record(&mut fx, decision), words));
+        let id = if code.is_empty() {
+            // A legacy no-answer record without a linked concrete use cannot tell
+            // us whether it timed out or was invalidated.
+            record_with_use(&mut fx, decision, None)
+        } else {
+            record(&mut fx, decision)
+        };
+        ids.push((id, words));
     }
+    // A final access check may refuse an earlier allowed decision. Preserve the
+    // production binding to that actual use; changing precedence would hide it.
+    let mut allowed = Decision::unanswered(item);
+    allowed.decision = LoggedDecision::Allow;
+    allowed.decided_by = DecidedBy::Model;
+    allowed.asked = false;
+    allowed.why = DecisionWhy {
+        reason: "ModelAllowed".to_owned(),
+        ..DecisionWhy::default()
+    };
+    let final_refusal = record_with_use(
+        &mut fx,
+        allowed,
+        Some((UseOutcome::Refused, UseDecidedBy::Rule)),
+    );
+    ids.push((final_refusal, "Refused by policy"));
+    fx.app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            use crate::decision_log::DecisionOutcome;
+            let rows = vault.bouncer_log(None, 200, None).unwrap();
+            let expected = [
+                DecisionOutcome::Denied,
+                DecisionOutcome::Refused,
+                DecisionOutcome::TimedOut,
+                DecisionOutcome::Invalidated,
+                DecisionOutcome::Unanswered,
+                DecisionOutcome::Refused,
+            ];
+            for ((id, _), expected) in ids.iter().zip(expected) {
+                let row = rows.iter().find(|row| row.decision_log_id == *id).unwrap();
+                assert_eq!(
+                    row.outcome_kind(),
+                    expected,
+                    "stored decision/use binding for {id}"
+                );
+            }
+            let final_row = rows
+                .iter()
+                .find(|row| row.decision_log_id == final_refusal)
+                .unwrap();
+            assert!(
+                final_row.allowed,
+                "the earlier bouncer decision remains allowed"
+            );
+            assert_eq!(final_row.use_outcome, Some(DecisionOutcome::Refused));
+            assert!(
+                rows.iter()
+                    .find(|row| row.decision_log_id == ids[4].0)
+                    .unwrap()
+                    .use_outcome
+                    .is_none()
+            );
+        })
+        .unwrap();
     let data = bouncer_load::load(&fx.app, &[], None, 1);
     for (id, words) in &ids {
         let event = data
@@ -1081,8 +1174,8 @@ fn logs_and_history_keep_rejections_distinct_from_unanswered_questions() {
             ..State::default()
         },
     );
-    assert_eq!(denied.len(), 2);
-    assert!(denied.iter().all(|event| matches!(&event.source, LogSource::Decision(id) if *id == ids[0].0 || *id == ids[1].0)));
+    assert_eq!(denied.len(), 3);
+    assert!(denied.iter().all(|event| matches!(&event.source, LogSource::Decision(id) if *id == ids[0].0 || *id == ids[1].0 || *id == final_refusal)));
     let logs = logs::LogsView::of(
         &data,
         &scope,
@@ -1098,7 +1191,7 @@ fn logs_and_history_keep_rejections_distinct_from_unanswered_questions() {
             .iter()
             .map(|(_, rows)| rows.len())
             .sum::<usize>(),
-        2
+        3
     );
     assert_eq!(
         history_events(
@@ -1132,6 +1225,7 @@ fn logs_and_history_show_activity_only_refusals_without_duplicate_run_rows() {
             ("run sentry-cli releases", "The owner denied this run."),
             ("run sentry-cli releases", "The token is not valid or the agent is revoked."),
             ("request access", "The owner did not let this agent see this credential, or it is archived or gone."),
+            ("mail task access", "An approved mail task matching this request is unavailable."),
         ] {
             vault.record_activity(&NewActivity {
                 agent_id: Some(fx.agent), agent_name: "Claude Code".to_owned(), item_id: Some(item),
@@ -1144,15 +1238,15 @@ fn logs_and_history_show_activity_only_refusals_without_duplicate_run_rows() {
     let history = history_events(&data, &scope, &State::default());
     assert_eq!(
         history.len(),
-        3,
-        "one decision, two independent request refusals"
+        4,
+        "one decision, three independent request refusals"
     );
     assert_eq!(
         history
             .iter()
             .filter(|event| event.kind == LogKind::Request)
             .count(),
-        2
+        3
     );
     assert!(
         history
@@ -1189,7 +1283,7 @@ fn logs_and_history_show_activity_only_refusals_without_duplicate_run_rows() {
             .iter()
             .map(|(_, rows)| rows.len())
             .sum::<usize>(),
-        3
+        4
     );
     // A notification may still select an old, unstructured activity row. It cannot
     // turn that row into a policy decision or a second entry in History.
@@ -1213,7 +1307,7 @@ fn logs_and_history_show_activity_only_refusals_without_duplicate_run_rows() {
     assert!(!fallback.outcome.denied());
     assert_eq!(
         history_events(&selected, &scope, &State::default()).len(),
-        3
+        4
     );
 }
 

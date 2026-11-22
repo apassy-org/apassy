@@ -100,7 +100,8 @@ pub struct Line {
     pub at: u64,
     /// The same time as text, for example `2026-11-03T14:20:01Z`.
     pub time: String,
-    /// `run`, `browser_fill`, `connector`, or `mail_task_review`.
+    /// The request kind, such as `run`, `browser_fill`, `connector`,
+    /// `mail_task_access`, `mail_task_review`, or `mail_send`.
     pub request: String,
     pub agent: String,
     pub items: Vec<Item>,

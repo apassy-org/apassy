@@ -360,7 +360,7 @@ fn activity_only_refusal(row: &crate::desktop::owner_store::AgentActivityRow) ->
     }
     matches!(
         row.operation.as_str(),
-        "request access" | "request scoped access"
+        "request access" | "request scoped access" | "mail task access"
     ) || matches!(
         row.reason.as_str(),
         "The token is not valid or the agent is revoked."

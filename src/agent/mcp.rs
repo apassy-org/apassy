@@ -321,7 +321,7 @@ fn initialize_result(params: &Value) -> Value {
     });
     let instructions = result["instructions"].as_str().unwrap_or_default();
     result["instructions"] = json!(format!(
-        "To log in on a website, use apassy_fill_in_browser. Never copy secrets to the clipboard or type them. {instructions}"
+        "To log in on a website, use apassy_fill_in_browser. Never copy secrets to the clipboard or type them. For SMTP mail to real recipients, use apassy_prepare_mail_task, wait for the existing task in apassy_mail_task_status, then use apassy_send_task_mail for each approved recipient. {instructions}"
     ));
     result
 }
@@ -1436,7 +1436,15 @@ pub(crate) fn broker_error(code: &str) -> Value {
     let (code, message) = match code {
         "mail_task_unavailable" => (
             code,
-            "The mail task is unavailable, changed, denied, expired, or outside its approved scope. Check apassy_mail_task_status and ask the owner to review a fresh scope before sending.",
+            "Check apassy_mail_task_status. If pending, wait for the existing review. If denied or revoked, stop. A changed or expired task requires fresh owner review before sending.",
+        ),
+        "invalid_mail_task" => (
+            code,
+            "Review the mail task fields. Specify distinct mailbox addresses, one plain-text message and a lifetime of 1 to 30 minutes.",
+        ),
+        "mail_audit_unavailable" | "mail_content_unavailable" => (
+            code,
+            "The broker could not verify or record this mail authorization. Nothing was submitted. Review the task in Apassy.",
         ),
         "mail_task_in_flight" => (
             code,
@@ -2158,20 +2166,27 @@ mod tests {
         )
         .expect("reply");
         assert_eq!(reply["result"]["protocolVersion"], "2025-03-26");
+        assert!(
+            reply["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(TOOL_PREPARE_MAIL_TASK)
+        );
         let reply = handle_message(
             &config(),
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         )
         .expect("reply");
-        assert_eq!(reply["result"]["tools"].as_array().map(Vec::len), Some(13));
-        for name in [TOOL_ACCESS_STATUS, TOOL_ACCESS_CANCEL] {
-            assert!(
-                reply["result"]["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|tool| tool["name"] == name)
-            );
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 16);
+        for name in [
+            TOOL_ACCESS_STATUS,
+            TOOL_ACCESS_CANCEL,
+            TOOL_PREPARE_MAIL_TASK,
+            TOOL_MAIL_TASK_STATUS,
+            TOOL_SEND_TASK_MAIL,
+        ] {
+            assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
         }
         assert!(
             handle_message(

@@ -396,7 +396,7 @@ fn preparing_and_activating_a_task_do_not_preapprove_a_message() {
     assert!(f.ctx.approvals.deny(pending.id));
     let response: WireResponse = sending.join().unwrap();
     assert!(!response.ok, "{response:?}");
-    assert_eq!(response.error.unwrap().code, "owner_denied");
+    assert_eq!(response.error.unwrap().code, "approval_denied");
     let retry = handle(&f.ctx, &f.send(&task));
     assert_eq!(retry.error.unwrap().code, "mail_not_submitted");
     assert!(f.ctx.approvals.pending().is_empty());
@@ -514,4 +514,17 @@ fn approved_production_task_evaluates_three_recipients_and_blocks_a_fourth_befor
     assert_eq!(status["not_submitted"], 3);
     assert_eq!(status["remaining"], 0);
     assert_eq!(status["sent"], 0);
+    let guard = f.ctx.vault.lock().unwrap();
+    let activity = guard.as_ref().unwrap().recent_activity(50).unwrap();
+    let refused: Vec<_> = activity
+        .iter()
+        .filter(|row| row.operation == "mail task access")
+        .collect();
+    assert_eq!(refused.len(), 2, "inactive task and fourth recipient");
+    assert!(
+        refused
+            .iter()
+            .all(|row| row.decision == apassy::vault::ActivityDecision::Deny)
+    );
+    assert!(!format!("{activity:?}").contains("example.invalid"));
 }

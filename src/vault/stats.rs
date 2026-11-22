@@ -187,7 +187,14 @@ impl LogRow {
         use crate::decision_log::DecisionOutcome;
         let decision = DecisionOutcome::of_decision(self.allowed, &self.decided_by, &self.why.code);
         match self.use_outcome {
-            Some(DecisionOutcome::Refused) if decision == DecisionOutcome::Invalidated => decision,
+            Some(DecisionOutcome::Refused)
+                if matches!(
+                    decision,
+                    DecisionOutcome::Invalidated | DecisionOutcome::QuestionWaiting
+                ) =>
+            {
+                decision
+            }
             Some(outcome) if outcome != DecisionOutcome::Unknown => outcome,
             _ => decision,
         }

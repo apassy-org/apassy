@@ -29,7 +29,7 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
     let tasks = match approvals.mail_tasks().list_for_owner(&epoch) {
         Ok(tasks) => tasks,
         Err(err) => {
-            kit::tone_note(ui, &err.to_string(), Tone::Warning);
+            kit::tone_note(ui, err.to_string(), Tone::Warning);
             return;
         }
     };
@@ -53,7 +53,7 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .max_height((ui.available_height() * 0.45).clamp(100.0, 320.0))
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for task in tasks {
+            for task in &tasks {
                 ui.push_id(&task.id, |ui| {
                     ui.group(|ui| {
                         let pending = task.state == MailTaskState::Pending;
@@ -73,7 +73,7 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
                             task.remaining_seconds
                         ));
                         egui::CollapsingHeader::new("Exact task details")
-                            .show(ui, |ui| details(ui, &task));
+                            .show(ui, |ui| details(ui, task));
                         ui.horizontal_wrapped(|ui| {
                             if pending {
                                 if kit::button(
@@ -83,14 +83,14 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
                                 )
                                 .clicked()
                                 {
-                                    choice = Some(Choice::Review(task.clone()));
+                                    choice = Some(Choice::Review(task));
                                 }
                                 if kit::button(ui, "Deny task", Style::Bordered).clicked() {
-                                    choice = Some(Choice::Deny(task.id.clone()));
+                                    choice = Some(Choice::Deny(&task.id));
                                 }
                             } else if kit::button(ui, "Revoke task now", Style::Bordered).clicked()
                             {
-                                choice = Some(Choice::Revoke(task.id.clone()));
+                                choice = Some(Choice::Revoke(&task.id));
                             }
                         });
                     });
@@ -98,11 +98,12 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
             }
         });
     match choice {
-        Some(Choice::Review(task)) => {
-            app.ask_owner(OwnerRequest::ActivateMailTask { task }, Some(ui.ctx()))
-        }
-        Some(Choice::Deny(id)) => app.end_mail_task(&id, false, ui.ctx()),
-        Some(Choice::Revoke(id)) => app.end_mail_task(&id, true, ui.ctx()),
+        Some(Choice::Review(task)) => app.ask_owner(
+            OwnerRequest::ActivateMailTask { task: task.clone() },
+            Some(ui.ctx()),
+        ),
+        Some(Choice::Deny(id)) => app.end_mail_task(id, false, ui.ctx()),
+        Some(Choice::Revoke(id)) => app.end_mail_task(id, true, ui.ctx()),
         None => {}
     }
     // Countdown and expiry remain visible without another user input.
@@ -110,10 +111,10 @@ pub(super) fn show(app: &mut DesktopApp, ui: &mut egui::Ui) {
         .request_repaint_after(std::time::Duration::from_secs(1));
 }
 
-enum Choice {
-    Review(MailTaskSnapshot),
-    Deny(String),
-    Revoke(String),
+enum Choice<'a> {
+    Review(&'a MailTaskSnapshot),
+    Deny(&'a str),
+    Revoke(&'a str),
 }
 
 /// No markdown, linkification, truncation or recipient preview: every byte that

@@ -918,7 +918,7 @@ fn bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available() {
     host.send(json!({"jsonrpc":"2.0", "id":6, "method":"tools/list"}));
     let listed = host.reply(6);
     let tools = listed["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 16);
     assert!(
         tools
             .iter()

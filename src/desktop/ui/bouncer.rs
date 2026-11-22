@@ -704,6 +704,7 @@ pub(crate) enum LogOutcome {
     NoAnswer,
     TimedOut,
     Invalidated,
+    AnotherQuestionPending,
     /// An activity row has no structured reason or actor for its failure.
     NotAllowed,
     Failed,
@@ -724,7 +725,8 @@ impl LogOutcome {
             Self::DeniedByBouncer => "Refused by policy".to_owned(),
             Self::NoAnswer => "No answer".to_owned(),
             Self::TimedOut => "Timed out".to_owned(),
-            Self::Invalidated => "Request cancelled".to_owned(),
+            Self::Invalidated => "Request invalidated".to_owned(),
+            Self::AnotherQuestionPending => "Another question was pending".to_owned(),
             Self::NotAllowed => "Not allowed".to_owned(),
             Self::Failed => "Request failed".to_owned(),
             Self::WaitsForYou => "Waits for you".to_owned(),
@@ -765,7 +767,7 @@ impl LogOutcome {
             DecisionOutcome::TimedOut => Self::TimedOut,
             DecisionOutcome::Invalidated => Self::Invalidated,
             DecisionOutcome::Unanswered | DecisionOutcome::Unknown => Self::NoAnswer,
-            DecisionOutcome::QuestionWaiting => Self::WaitsForYou,
+            DecisionOutcome::QuestionWaiting => Self::AnotherQuestionPending,
             DecisionOutcome::Denied if decided_by == "owner" => {
                 elsewhere.map_or(Self::DeniedByYou, Self::DeniedOn)
             }
