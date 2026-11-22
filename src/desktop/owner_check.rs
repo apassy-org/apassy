@@ -80,6 +80,11 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// The note of every owner check on Linux, one line: the passphrase confirms, and the
+/// system authentication needs the polkit policy of the package.
+pub(crate) const LINUX_PASSPHRASE_NOTE: &str =
+    "Type your vault passphrase. System authentication needs a polkit policy.";
+
 /// Text from a page or another program for the dialog and the vault: no control
 /// character and no bidirectional format character (they could hide the site), trimmed,
 /// at most 64 characters.
@@ -91,8 +96,9 @@ pub(crate) fn page_text(text: &str) -> String {
     dialog_cut(clean.trim())
 }
 
-/// The text of the owner check of a public link: what it shows (the first three names),
-/// how long it lasts, who opens it, and "show once".
+/// The text of the owner check of a public link, one line where it fits: what it shows
+/// (of a folder, the first three names), how long it lasts, who opens it, and "show
+/// once": "Make a public link to “Anthropic API” for 7 days, for anyone who has it?"
 pub(crate) fn public_link_text(
     name: &str,
     secrets: &[String],
@@ -116,9 +122,9 @@ pub(crate) fn public_link_text(
         format!(" It holds {}.", names.join(", "))
     };
     let who = match addresses.len() {
-        0 => "Anyone with the link can open it.".to_owned(),
+        0 => "anyone who has it".to_owned(),
         _ => format!(
-            "Only {} can open it, with a code by e-mail.",
+            "{} only, with a code by e-mail",
             addresses
                 .iter()
                 .map(|a| page_text(a))
@@ -127,9 +133,9 @@ pub(crate) fn public_link_text(
         ),
     };
     format!(
-        "Make a public link to \u{201c}{}\u{201d} for {lasts}?{what} {who}{}",
+        "Make a {}public link to \u{201c}{}\u{201d} for {lasts}, for {who}?{what}",
+        if one_time { "show-once " } else { "" },
         page_text(name),
-        if one_time { " It shows once." } else { "" }
     )
 }
 
@@ -2830,7 +2836,7 @@ impl OwnerFlows {
     /// Text about Touch ID for the owner check. `None` when Touch ID can run.
     pub(crate) fn touch_id_note(&self) -> Option<String> {
         if cfg!(target_os = "linux") {
-            return Some("Confirm with your vault passphrase. System authentication is optional and requires an installed polkit policy.".to_owned());
+            return Some(LINUX_PASSPHRASE_NOTE.to_owned());
         }
         if self.helper.is_none() {
             return Some(
