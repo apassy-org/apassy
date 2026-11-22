@@ -494,7 +494,7 @@ jobs:
         run: |
           test "$(uname -m)" = "$ARCH"
           apt-get update
-          apt-get install -y --no-install-recommends binutils file python3
+          apt-get install -y --no-install-recommends binutils file python3 libdeflate-tools
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-vault-bullseye

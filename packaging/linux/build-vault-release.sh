@@ -48,6 +48,7 @@ commit=${APASSY_RELEASE_COMMIT:-$(git -C "$root" rev-parse HEAD)}
 export APASSY_RELEASE_COMMIT=$commit
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct "$commit")}
 export SOURCE_DATE_EPOCH
+command -v libdeflate-gzip >/dev/null || fail 'missing release tool: libdeflate-gzip (libdeflate-tools)'
 
 cd "$root"
 cargo build --release --locked -p apassy-app -p apassy \
@@ -67,7 +68,7 @@ for executable in "$bin/apassy" "$bin/apassy-browser-host"; do
     { echo "== $name"; readelf --version-info "$executable"; } >> "$out/glibc-symbols-$arch.txt"
 done
 "$here/build-vault.sh" --binary "$bin/apassy" --host "$bin/apassy-browser-host" \
-    --arch "$arch" --out "$out" --max-glibc "$baseline"
+    --arch "$arch" --out "$out" --max-glibc "$baseline" --release-compression
 # Workers static assets serve files up to 25 MiB; /dl/ of the relay Worker is one.
 limit=$((25 * 1024 * 1024))
 while read -r _ name; do
