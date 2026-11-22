@@ -180,7 +180,9 @@ impl fmt::Display for LinkError {
                 short(text)
             ),
             Self::LinkLimit => {
-                f.write_str("This account has its most live links. Revoke one first.")
+                f.write_str(
+                    "This account has its most live links. Revoke one in Settings › Connect › Public Links.",
+                )
             }
             Self::CreateLimit => f.write_str("This account has made its most links for today."),
             Self::MailUnavailable => f.write_str(
@@ -691,6 +693,21 @@ fn read_item(vault: &Vault, id: u64, path: Vec<String>) -> Result<SnapshotItem, 
 /// A folder with its subfolders: each credential once, with its path below the folder,
 /// in the order of the paths and then the names. Archived and received credentials stay
 /// out.
+/// How many secrets a link to the folder `uuid` holds: the credentials of the folder and
+/// its subfolders that a link may hold (not archived, not received).
+pub fn folder_secret_count(vault: &Vault, uuid: &str) -> Result<usize, LinkError> {
+    let mut count = 0;
+    for id in vault
+        .items_in_folder(Some(uuid), true)
+        .map_err(vault_error)?
+    {
+        if shareable(vault, id).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn read_folder(vault: &Vault, uuid: &str) -> Result<Snapshot, LinkError> {
     let folders = vault.folders().map_err(vault_error)?;
     let by_uuid: BTreeMap<&str, &Folder> = folders.iter().map(|f| (f.uuid.as_str(), f)).collect();

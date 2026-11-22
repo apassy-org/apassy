@@ -36,6 +36,8 @@ pub(crate) const TOP_LEVEL: &str = "Top level";
 pub(crate) const MOVE_TO_FOLDER: &str = "Move to Folder…";
 pub(crate) const ADD_TO_FOLDER: &str = "Add to Folder…";
 pub(crate) const REMOVE_FROM_FOLDER: &str = "Remove from This Folder";
+/// The lead of Move to Folder.
+const MOVE_LEAD: &str = "Sharing, rules, and history do not change.";
 /// The lead of Add to Folder.
 const ADD_LEAD_ONE: &str = "Its other folders stay.";
 const ADD_LEAD_MANY: &str = "Their other folders stay.";
@@ -91,6 +93,7 @@ pub(crate) const TEXTS: &[&str] = &[
     MOVE_TO_FOLDER,
     ADD_TO_FOLDER,
     REMOVE_FROM_FOLDER,
+    MOVE_LEAD,
     ADD_LEAD_ONE,
     ADD_LEAD_MANY,
     FOLDERS_LABEL,
@@ -318,6 +321,20 @@ impl FolderTree {
             .iter()
             .filter(|id| self.folders_of(**id).iter().any(|f| subtree.contains(f)))
             .count()
+    }
+
+    /// "Stays in Work › Acme.": the other folders of a credential that "Move to Folder…"
+    /// keeps, when the move replaces only `from` (the folder of a folder list). `None`
+    /// when nothing stays.
+    pub(crate) fn stays_in(&self, item_id: u64, from: Option<&str>) -> Option<String> {
+        let from = from?;
+        let others: Vec<String> = self
+            .folders_of(item_id)
+            .iter()
+            .filter(|folder| folder.as_str() != from)
+            .map(|folder| self.path_label(Some(folder)))
+            .collect();
+        (!others.is_empty()).then(|| format!("Stays in {}.", others.join(", ")))
     }
 
     /// A folder that the credential is not in: "Add to Folder…" has a choice.
@@ -901,15 +918,16 @@ pub(super) fn move_sheet(app: &mut DesktopApp, ctx: &egui::Context, item_id: u64
     // it replaces every folder.
     let from = tree.list_folder(&app.place, item_id).map(str::to_owned);
     let all = tree.folders_of(item_id).to_vec();
+    // Only the folder of the list is checked: the line says where else it stays.
+    let lead = match tree.stays_in(item_id, from.as_deref()) {
+        Some(stays) => format!("{MOVE_LEAD} {stays}"),
+        None => MOVE_LEAD.to_owned(),
+    };
     let mut choice = app.ui.move_target.clone();
     let mut confirm = false;
     let mut cancel = false;
     let response = kit::sheet(ctx, "move-to-folder", 440.0, |ui| {
-        kit::sheet_title(
-            ui,
-            &format!("Move “{}”", details.name),
-            Some("Sharing, rules, and history do not change."),
-        );
+        kit::sheet_title(ui, &format!("Move “{}”", details.name), Some(&lead));
         kit::sheet_body(ui, |ui| {
             kit::section(ui, None, None, |s| {
                 // A folder is not inside "No folder": the top folders line up with it.
@@ -1170,5 +1188,13 @@ mod label_tests {
         assert_eq!(tree.directly_in(&Place::CREDENTIALS, 1), None);
         assert!(tree.can_add(1), "Bills is left");
         assert!(tree.can_add(2));
+        // Move to Folder from a list names the folders that stay; from "All
+        // credentials" (every folder is replaced) and for one folder nothing stays.
+        assert_eq!(
+            tree.stays_in(1, Some("h")).as_deref(),
+            Some("Stays in Work › Acme, Work.")
+        );
+        assert_eq!(tree.stays_in(1, None), None);
+        assert_eq!(tree.stays_in(2, Some("w")), None);
     }
 }

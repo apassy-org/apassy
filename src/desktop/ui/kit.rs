@@ -1311,6 +1311,19 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> Response {
+    segmented_with_off(ui, salt, value, options, &[])
+}
+
+/// [`segmented`] with some options off: `off[i]` true draws option `i` dimmed, and no
+/// click or key selects it. The selected option and the others stay as they are.
+pub(crate) fn segmented_with_off<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut T,
+    options: &[(T, &str)],
+    off: &[bool],
+) -> Response {
+    let is_off = |index: usize| off.get(index).copied().unwrap_or(false);
     let galleys: Vec<_> = options
         .iter()
         .map(|(_, label)| galley(ui, text(*label, Font::Callout)))
@@ -1372,6 +1385,7 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     }
     if let Some(index) = choose
         && selected != Some(index)
+        && !is_off(index)
     {
         *value = options[index].0;
         response.mark_changed();
@@ -1395,7 +1409,10 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
         return response;
     }
     let selected = options.iter().position(|(option, _)| option == value);
-    let hovered = response.hover_pos().and_then(segment_at);
+    let hovered = response
+        .hover_pos()
+        .and_then(segment_at)
+        .filter(|index| !is_off(*index));
     let painter = ui.painter();
     painter.rect_filled(rect, 7, palette().segment_track);
     for (index, galley) in galleys.into_iter().enumerate() {
@@ -1419,7 +1436,7 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
                 Stroke::new(1.0, palette().segment_divider),
             );
         }
-        let color = if enabled {
+        let color = if enabled && !is_off(index) {
             palette().label
         } else {
             palette().tertiary

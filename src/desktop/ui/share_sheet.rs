@@ -75,10 +75,8 @@ pub(crate) const NO_ACCOUNT: &str =
     "Public links need an Apassy Connect account. Create one in Settings › Connect.";
 pub(crate) const SIGNED_OUT: &str = "Sign in to Apassy Connect in Settings › Connect first.";
 pub(crate) const SETTINGS_GROUP: &str = "Public Links";
-pub(crate) const UNKNOWN_LINK: &str = "Link not in this vault";
-pub(crate) const REVOKE_UNKNOWN: &str = "Revoke this link?";
-pub(crate) const REVOKE_UNKNOWN_NOTE: &str =
-    "It may belong to another vault or device. Someone may still use it.";
+pub(crate) const REVOKE_UNKNOWN: &str =
+    "Revoke this link? Another vault or device may still use it.";
 pub(crate) const NO_EMAIL: &str = "This relay cannot send e-mail codes.";
 pub(crate) const OPENED_ONCE: &str = "Opened";
 pub(crate) const NOT_LISTED: &str = "Not at Connect";
@@ -120,9 +118,7 @@ pub(crate) const TEXTS: &[&str] = &[
     NO_ACCOUNT,
     SIGNED_OUT,
     SETTINGS_GROUP,
-    UNKNOWN_LINK,
     REVOKE_UNKNOWN,
-    REVOKE_UNKNOWN_NOTE,
     NO_EMAIL,
     OPENED_ONCE,
     NOT_LISTED,
@@ -137,6 +133,24 @@ pub(crate) fn made_by(name: &str) -> String {
 /// "Expires 28 Nov 2026".
 pub(crate) fn expires_on(at: u64) -> String {
     format!("Expires {}", super::connect::day(at))
+}
+
+/// "Made 21 Nov 2026".
+pub(crate) fn made_on(at: u64) -> String {
+    format!("Made {}", super::connect::day(at))
+}
+
+/// The lead of the sheet: of a folder, with how many secrets a link holds.
+pub(crate) fn lead(secrets: Option<usize>) -> String {
+    match secrets {
+        Some(1) => {
+            "A copy of 1 secret that opens in a browser. Later changes do not reach it.".to_owned()
+        }
+        Some(n) if n > 0 => {
+            format!("A copy of {n} secrets that opens in a browser. Later changes do not reach it.")
+        }
+        _ => LEAD.to_owned(),
+    }
 }
 
 /// "Links not in this vault (3)".
@@ -162,25 +176,13 @@ pub(crate) fn audience(addresses: &[String]) -> String {
     }
 }
 
-/// "Link ready. Anyone with the link can open it until 28 Nov 2026."
-pub(crate) fn ready_note(addresses: &[String], expires_at: u64) -> String {
-    let who = if addresses.is_empty() {
-        "Anyone with the link".to_owned()
-    } else {
-        audience(addresses)
-    };
-    format!(
-        "{who} can open it until {}.",
-        super::connect::day(expires_at)
-    )
-}
-
-/// The text of a link error for the sheet.
+/// The text of a link error for the sheet. The limit counts the live links of the whole
+/// account, also those of another vault or device, which Settings › Connect lists.
 pub(crate) fn error_text(error: &LinkError, limit: Option<u64>) -> String {
     match (error, limit) {
-        (LinkError::LinkLimit, Some(limit)) => {
-            format!("This account has {limit} live links, the most it can have. Revoke one first.")
-        }
+        (LinkError::LinkLimit, Some(limit)) => format!(
+            "This account has {limit} live links, the most it can have. Revoke one in Settings › Connect › Public Links."
+        ),
         _ => error.to_string(),
     }
 }
@@ -247,10 +249,13 @@ impl Form {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SheetView {
     pub(crate) name: String,
+    /// How many secrets a link to the folder holds; `None` for one secret.
+    pub(crate) secrets: Option<usize>,
     pub(crate) ready: Ready,
     pub(crate) links: Vec<LinkRow>,
     pub(crate) form: Option<Form>,
-    /// The note of a link that was just made.
+    /// The vault row of the link that was just made: the "Link ready" box copies it, so
+    /// its row has no Copy of its own.
     pub(crate) made: Option<String>,
     /// "Copy Link" of the link that was just made takes the focus, until it holds it.
     pub(crate) focus_copy: bool,
@@ -258,7 +263,7 @@ pub(crate) struct SheetView {
     pub(crate) error: Option<String>,
     pub(crate) retry: bool,
     /// Why "Create Link" is off before any owner check: the relay has no links routes, or
-    /// the account has its most live links.
+    /// the account has its most live links. Shown as an error.
     pub(crate) blocked: Option<String>,
     /// The relay sends no code mail: "Only these e-mail addresses" is off.
     pub(crate) no_email: bool,
@@ -283,39 +288,58 @@ pub(crate) enum LinkAction {
     Done,
 }
 
-fn link_rows(ui: &mut Ui, links: &[LinkRow], action: &mut Option<LinkAction>) {
+/// The rows of `links`. The row of `made` (a link that was just made) has no Copy: the
+/// "Link ready" box copies it. The row of `confirm` (a link that the vault does not hold)
+/// asks there whether to revoke it: Cancel and a red Revoke take the place of its
+/// Revoke, and the question goes under it, so every row stays where it is.
+fn link_rows(
+    ui: &mut Ui,
+    links: &[LinkRow],
+    made: Option<&str>,
+    confirm: Option<&str>,
+    action: &mut Option<LinkAction>,
+) {
     rows::group_box(ui, |g| {
         for link in links {
             g.row(|ui| {
+                let asking = link.uuid.is_empty() && confirm == Some(link.link_id.as_str());
                 let copy = format!("Copy the link {}", link.title);
                 let revoke = format!("Revoke the link {}", link.title);
-                // The rightmost button first, and the first that takes the focus: Copy.
-                // Revoke never comes first, so a focus that the sheet moves to its first
-                // control (after the owner check, or when a focused button goes) never
-                // lands on it, and Return never revokes.
+                let cancel = format!("Do not revoke the link {}", link.title);
+                // The rightmost button first, and the first that takes the focus: Copy, or
+                // Cancel of the question. Revoke never comes first, so a focus that the
+                // sheet moves to its first control (after the owner check, or when a
+                // focused button goes) never lands on it, and Return never revokes.
                 let mut buttons: Vec<(&str, &str, Style)> = Vec::new();
-                if link.can_copy {
-                    buttons.push((COPY, copy.as_str(), Style::Bordered));
-                }
-                if link.can_revoke {
-                    buttons.push((REVOKE, revoke.as_str(), Style::Bordered));
+                if asking {
+                    buttons.push((CANCEL, cancel.as_str(), Style::Bordered));
+                    buttons.push((REVOKE, revoke.as_str(), Style::DestructiveProminent));
+                } else {
+                    if link.can_copy && made != Some(link.uuid.as_str()) {
+                        buttons.push((COPY, copy.as_str(), Style::Bordered));
+                    }
+                    if link.can_revoke {
+                        buttons.push((REVOKE, revoke.as_str(), Style::Bordered));
+                    }
                 }
                 let title = rows::label_text(&link.title);
                 if let Some(index) =
                     rows::text_buttons_detailed(ui, title, Some(&link.detail), &buttons)
                 {
-                    *action = Some(if buttons[index].0 == REVOKE && link.uuid.is_empty() {
-                        LinkAction::AskRevoke(link.link_id.clone())
-                    } else if buttons[index].0 == REVOKE {
-                        LinkAction::Revoke {
+                    *action = Some(match buttons[index].0 {
+                        CANCEL => LinkAction::CancelRevoke,
+                        COPY => LinkAction::Copy(link.uuid.clone()),
+                        _ if asking || !link.uuid.is_empty() => LinkAction::Revoke {
                             uuid: link.uuid.clone(),
                             link_id: link.link_id.clone(),
-                        }
-                    } else {
-                        LinkAction::Copy(link.uuid.clone())
+                        },
+                        _ => LinkAction::AskRevoke(link.link_id.clone()),
                     });
                 }
                 ui.add(egui::Label::new(rows::note(&link.detail)).wrap());
+                if asking {
+                    kit::tone_note_icon(ui, REVOKE_UNKNOWN, Tone::Warning, Font::Callout);
+                }
             });
         }
     });
@@ -348,14 +372,15 @@ fn form_rows(ui: &mut Ui, form: &mut Form, no_email: bool) {
         g.row(|ui| {
             ui.label(rows::label_text(WHO));
             ui.add_space(4.0);
-            ui.add_enabled_ui(!no_email, |ui| {
-                kit::segmented(
-                    ui,
-                    "link-who",
-                    &mut form.emails,
-                    &[(false, ANYONE), (true, EMAILS)],
-                );
-            });
+            // Without code mail only "Only these e-mail addresses" is off: "Anyone with
+            // the link" stays the shown choice.
+            kit::segmented_with_off(
+                ui,
+                "link-who",
+                &mut form.emails,
+                &[(false, ANYONE), (true, EMAILS)],
+                &[false, no_email],
+            );
             if no_email {
                 ui.add(egui::Label::new(rows::note(NO_EMAIL)).wrap());
             }
@@ -369,6 +394,25 @@ fn form_rows(ui: &mut Ui, form: &mut Form, no_email: bool) {
     });
 }
 
+/// The label of a part of the sheet: as a group label of Settings, but flush with the
+/// title and with no space above, since the lead is right over it.
+fn part_label(ui: &mut Ui, title: &str) {
+    ui.add(
+        egui::Label::new(
+            kit::text(title, Font::Callout)
+                .variation(b"wght", 600.0)
+                .color(kit::palette().secondary),
+        )
+        .selectable(false),
+    );
+    ui.add_space(6.0);
+}
+
+/// A note of a part, flush with the title.
+fn part_note(ui: &mut Ui, text: &str) {
+    kit::paragraph(ui, text, Font::Callout, kit::palette().secondary);
+}
+
 /// The body of the sheet: the title, the Public Link part, and the buttons. With
 /// `view.focus_copy`, "Copy Link" takes the focus; once it holds the focus from the frame
 /// before, `view.focus_copy` turns off.
@@ -377,32 +421,28 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
     kit::sheet_title(
         ui,
         &format!("Share \u{201c}{}\u{201d}", view.name),
-        Some(LEAD),
+        Some(&lead(view.secrets)),
     );
-    rows::group_label(ui, PART);
+    // The part's label and its notes line up with the title, right under the lead.
+    part_label(ui, PART);
     match view.ready {
-        Ready::NoAccount => rows::footnote(ui, NO_ACCOUNT),
-        Ready::SignedOut => rows::footnote(ui, SIGNED_OUT),
+        Ready::NoAccount => part_note(ui, NO_ACCOUNT),
+        Ready::SignedOut => part_note(ui, SIGNED_OUT),
         Ready::Yes => {}
-    }
-    if let Some(blocked) = &view.blocked
-        && view.ready == Ready::Yes
-    {
-        rows::footnote(ui, blocked.as_str());
     }
     let no_email = view.no_email;
     ui.add_enabled_ui(!view.busy, |ui| {
         if view.links.is_empty() && view.form.is_none() && view.made.is_none() {
             if view.ready == Ready::Yes && view.blocked.is_none() {
-                rows::footnote(ui, NONE_YET);
+                part_note(ui, NONE_YET);
             }
         } else if !view.links.is_empty() {
-            link_rows(ui, &view.links, &mut action);
+            link_rows(ui, &view.links, view.made.as_deref(), None, &mut action);
         }
-        if let Some(made) = &view.made {
+        if view.made.is_some() {
             ui.add_space(8.0);
             let focus = view.focus_copy;
-            let (copy, held) = kit::notice(ui, Tone::Good, READY, Some(made.as_str()), |ui| {
+            let (copy, held) = kit::notice(ui, Tone::Good, READY, None, |ui| {
                 let button = kit::small_button(ui, COPY_LINK, Style::Prominent);
                 // Return on the new link copies it.
                 let held = button.has_focus();
@@ -423,9 +463,22 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
             form_rows(ui, form, no_email);
         }
     });
-    if let Some(error) = &view.error {
+    // Why no link can be made, and the error of the last step: in the error style of
+    // every sheet, once each.
+    let mut errors: Vec<&str> = Vec::new();
+    if view.ready == Ready::Yes
+        && let Some(blocked) = view.blocked.as_deref()
+    {
+        errors.push(blocked);
+    }
+    if let Some(error) = view.error.as_deref()
+        && !errors.contains(&error)
+    {
+        errors.push(error);
+    }
+    for error in errors {
         ui.add_space(4.0);
-        kit::paragraph(ui, error.as_str(), Font::Callout, Tone::Critical.text());
+        kit::paragraph(ui, error, Font::Callout, Tone::Critical.text());
     }
     ui.add_space(8.0);
     let mut leading = None;
@@ -459,7 +512,13 @@ pub(crate) fn draw_sheet(ui: &mut Ui, view: &mut SheetView) -> Option<LinkAction
                     trailing = Some(LinkAction::CancelForm);
                 }
             } else {
-                if kit::button(ui, DONE, Style::Prominent).clicked() {
+                // One prominent button: "Copy Link" of a link that was just made, else Done.
+                let done = if view.made.is_some() {
+                    Style::Bordered
+                } else {
+                    Style::Prominent
+                };
+                if kit::button(ui, DONE, done).clicked() {
                     trailing = Some(LinkAction::Done);
                 }
                 // An account without a plan makes links too: the button shows for every
@@ -506,7 +565,7 @@ pub(crate) fn draw_settings(ui: &mut Ui, view: &mut SettingsView) -> Option<Link
     }
     ui.add_enabled_ui(!view.busy, |ui| {
         if !view.links.is_empty() {
-            link_rows(ui, &view.links, &mut action);
+            link_rows(ui, &view.links, None, None, &mut action);
         }
         if view.unknown.is_empty() {
             return;
@@ -516,29 +575,14 @@ pub(crate) fn draw_settings(ui: &mut Ui, view: &mut SettingsView) -> Option<Link
         if !view.open {
             return;
         }
-        if let Some(link_id) = view.confirm.clone() {
-            ui.add_space(4.0);
-            kit::notice(
-                ui,
-                Tone::Warning,
-                REVOKE_UNKNOWN,
-                Some(REVOKE_UNKNOWN_NOTE),
-                |ui| {
-                    ui.horizontal(|ui| {
-                        if kit::small_button(ui, CANCEL, Style::Bordered).clicked() {
-                            action = Some(LinkAction::CancelRevoke);
-                        }
-                        if kit::small_button(ui, REVOKE, Style::DestructiveProminent).clicked() {
-                            action = Some(LinkAction::Revoke {
-                                uuid: String::new(),
-                                link_id,
-                            });
-                        }
-                    });
-                },
-            );
-        }
-        link_rows(ui, &view.unknown, &mut action);
+        // A Revoke asks in the row of its link.
+        link_rows(
+            ui,
+            &view.unknown,
+            None,
+            view.confirm.as_deref(),
+            &mut action,
+        );
     });
     action
 }
@@ -616,7 +660,8 @@ pub(crate) fn rows_of(
 
 /// The links that Connect lists for the account and the rows of the open vault do not
 /// hold: links of another vault or device of the account, or one whose row was never
-/// written. Revoke asks first; nothing copies them.
+/// written. Revoke asks first; nothing copies them. Connect knows no name of them, so a
+/// row says who opens it, and when it was made, ends, and opened.
 pub(crate) fn unknown_rows(links: &[PublicLink], list: Option<&LinkList>) -> Vec<LinkRow> {
     let Some(list) = list else {
         return Vec::new();
@@ -624,15 +669,39 @@ pub(crate) fn unknown_rows(links: &[PublicLink], list: Option<&LinkList>) -> Vec
     list.links
         .iter()
         .filter(|view| !links.iter().any(|link| link.link_id == view.link_id))
-        .map(|view| LinkRow {
-            uuid: String::new(),
-            link_id: view.link_id.clone(),
-            title: UNKNOWN_LINK.to_owned(),
-            detail: format!("{} · {}", expires_on(view.expires_at), opened(view.opens)),
-            can_copy: false,
-            can_revoke: true,
+        .map(|view| {
+            let mut parts = vec![
+                made_on(view.created_at),
+                expires_on(view.expires_at),
+                if view.state == "opened" {
+                    OPENED_ONCE.to_owned()
+                } else {
+                    opened(view.opens)
+                },
+            ];
+            if view.one_time && view.state != "opened" {
+                parts.push(SHOW_ONCE.to_owned());
+            }
+            LinkRow {
+                uuid: String::new(),
+                link_id: view.link_id.clone(),
+                title: access_of(view),
+                detail: parts.join(" · "),
+                can_copy: false,
+                can_revoke: true,
+            }
         })
         .collect()
+}
+
+/// Who opens a link that Connect lists: anyone, or a count of addresses (Connect keeps
+/// only their hashes).
+fn access_of(view: &LinkView) -> String {
+    match (view.access.as_str(), view.addresses) {
+        ("emails", 1) => "1 e-mail address".to_owned(),
+        ("emails", n) => format!("{n} e-mail addresses"),
+        _ => ANYONE.to_owned(),
+    }
 }
 
 // ---- The state. ----
@@ -656,10 +725,10 @@ enum Retry {
     Revoke { uuid: String, link_id: String },
 }
 
-/// The link that was just made: its note and its link text.
+/// The link that was just made: its vault row and its link text.
 struct Made {
     target: LinkTarget,
-    note: String,
+    uuid: String,
     link: Zeroizing<String>,
     /// "Copy Link" still has to take the focus.
     focus: bool,
@@ -689,6 +758,8 @@ pub(crate) struct LinksUi {
     unknown_open: bool,
     /// Settings › Connect: the link id whose Revoke waits for its confirmation.
     confirm: Option<String>,
+    /// How many secrets a link to the folder of the open sheet holds, read when it opens.
+    secrets: Option<(LinkTarget, usize)>,
 }
 
 impl LinksUi {
@@ -802,6 +873,15 @@ fn target_name(app: &DesktopApp, target: &LinkTarget) -> String {
     }
 }
 
+/// A relay without the links routes can neither copy a link that opens nor revoke one:
+/// the rows show no button.
+fn no_buttons(rows: &mut [LinkRow]) {
+    for row in rows {
+        row.can_copy = false;
+        row.can_revoke = false;
+    }
+}
+
 /// The view of the sheet of `target`.
 pub(crate) fn sheet_view(app: &DesktopApp, target: &LinkTarget) -> SheetView {
     let links = &app.ui.connect.links;
@@ -811,23 +891,32 @@ pub(crate) fn sheet_view(app: &DesktopApp, target: &LinkTarget) -> SheetView {
         .into_iter()
         .filter(|link| Some(&link.root) == root.as_ref())
         .collect();
+    let mut rows = rows_of(
+        &of_root,
+        links.list.as_ref(),
+        own.as_deref(),
+        &names(app),
+        false,
+        now(),
+    );
+    if links.no_links {
+        no_buttons(&mut rows);
+    }
     SheetView {
         name: target_name(app, target),
+        secrets: links
+            .secrets
+            .as_ref()
+            .filter(|(of, _)| of == target)
+            .map(|(_, count)| *count),
         ready: ready(app),
-        links: rows_of(
-            &of_root,
-            links.list.as_ref(),
-            own.as_deref(),
-            &names(app),
-            false,
-            now(),
-        ),
+        links: rows,
         form: links.form.clone(),
         made: links
             .made
             .as_ref()
             .filter(|made| &made.target == target)
-            .map(|made| made.note.clone()),
+            .map(|made| made.uuid.clone()),
         focus_copy: links
             .made
             .as_ref()
@@ -847,8 +936,12 @@ pub(crate) fn settings_view(app: &DesktopApp) -> SettingsView {
     let state = &app.ui.connect.links;
     let list = state.list.as_ref();
     let unknown = unknown_rows(&links, list);
+    let mut rows = rows_of(&links, list, own.as_deref(), &names(app), true, now());
+    if state.no_links {
+        no_buttons(&mut rows);
+    }
     SettingsView {
-        links: rows_of(&links, list, own.as_deref(), &names(app), true, now()),
+        links: rows,
         open: state.unknown_open,
         confirm: state
             .confirm
@@ -875,6 +968,15 @@ pub(crate) fn sheet(app: &mut DesktopApp, ctx: &egui::Context, target: LinkTarge
         // A new sheet asks Connect again, also a relay that had no links routes.
         links.listed_at = None;
         links.no_links = false;
+        let count = match &target {
+            LinkTarget::Folder(uuid) => app
+                .owner_ui
+                .session
+                .with_vault(|vault| crate::connect::link::folder_secret_count(vault, uuid).ok())
+                .flatten(),
+            LinkTarget::Item(_) => None,
+        };
+        app.ui.connect.links.secrets = count.map(|count| (target.clone(), count));
     }
     step(app, ctx);
     let mut view = sheet_view(app, &target);
@@ -1264,7 +1366,7 @@ fn apply(app: &mut DesktopApp, outcome: Outcome) {
                     .unwrap_or(LinkTarget::Folder(String::new()));
                 links.made = Some(Made {
                     target,
-                    note: ready_note(&kept.row.addresses, kept.row.expires_at),
+                    uuid: kept.row.uuid.clone(),
                     link: kept.link(),
                     focus: true,
                 });

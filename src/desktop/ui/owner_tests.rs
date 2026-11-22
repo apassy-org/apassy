@@ -371,7 +371,7 @@ fn reveal_waits_for_the_owner_check_and_falls_back_to_the_passphrase() {
     let text = app_frame(&ctx, &mut app);
     assert!(text.contains("Confirm that it is you"), "{text}");
     let auth_note = if cfg!(target_os = "linux") {
-        "Confirm with your vault passphrase. System authentication is optional and requires an installed polkit policy."
+        crate::desktop::owner_check::LINUX_PASSPHRASE_NOTE
     } else {
         "Touch ID is not available: the Touch ID keyboard is not connected or not paired"
     };
