@@ -465,6 +465,10 @@ pub struct PasskeyRequest {
 /// action, so the app does exactly what the owner confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerRequest {
+    /// The immutable local proposal shown in Decisions, never an agent/remote ticket.
+    ActivateMailTask {
+        task: crate::broker::mail_tasks::MailTaskSnapshot,
+    },
     BrowserDebugging {
         request_label: String,
         identity: crate::browser::trust::InstanceIdentity,
@@ -1242,6 +1246,7 @@ impl OwnerRequest {
     /// The action that the proof must name.
     pub fn action(&self) -> OwnerAction {
         match self {
+            Self::ActivateMailTask { task } => task.owner_action(),
             Self::RemoveOlderIphone { device, team } => OwnerAction::RemoveOlderIphone {
                 device: device.clone(),
                 team: team.clone(),
@@ -1762,6 +1767,7 @@ impl OwnerRequest {
     /// One sentence for the owner check dialog. It has no secret value.
     pub fn describe(&self) -> String {
         match self {
+            Self::ActivateMailTask { .. } => "Let Bouncer decide each send for the exact mail task below? It may allow, ask, or deny each recipient. This does not approve sending, save a grant, or permit attachments. Confirm on this computer for this task only.".into(),
             Self::RemoveOlderIphone { device, .. } => format!("Remove the older paired {} '{}'? It will no longer receive or answer this vault's requests.", if device.kind == crate::vault::TrustedDeviceKind::Watch { "Apple Watch" } else { "iPhone" }, page_text(&device.name)),
             Self::AllowAccessOnce{..} => "Allow one scoped use attempt before the original request expires. The bouncer still checks the command and may ask you. This saves no grant.".into(),
             Self::BackupVault { path } => format!("Write an encrypted vault backup to {}? The vault locks afterwards.",page_text(&path.display().to_string())),
@@ -3181,6 +3187,7 @@ impl DesktopApp {
         let approvals = self.approvals();
         let session = &mut self.owner_ui.session;
         match request {
+            OwnerRequest::ActivateMailTask { task } => self.complete_mail_task(task, proof),
             OwnerRequest::BrowserDebugging { identity, scope, binding, .. } => {
                 let action = OwnerAction::BrowserDebugging { identity: identity.clone(), scope, binding: binding.clone() };
                 if !session.epoch().is_some_and(|epoch| proof.check(&action, &epoch).is_ok()) { self.set_err("The owner check changed."); return; }

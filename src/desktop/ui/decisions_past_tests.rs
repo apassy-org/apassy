@@ -94,6 +94,34 @@ impl Decision<'_> {
 }
 
 fn record(fx: &mut Fixture, decision: Decision<'_>) -> u64 {
+    let outcome = match (decision.decision, decision.decided_by) {
+        (LoggedDecision::Allow, _) => UseOutcome::Allowed,
+        (_, DecidedBy::Owner) => UseOutcome::Denied,
+        (_, DecidedBy::NoAnswer) if decision.why.code == "approval_invalidated" => {
+            UseOutcome::Refused
+        }
+        (_, DecidedBy::NoAnswer) => UseOutcome::TimedOut,
+        _ => UseOutcome::Refused,
+    };
+    let by = if outcome == UseOutcome::Refused {
+        UseDecidedBy::Rule
+    } else {
+        match decision.decided_by {
+            DecidedBy::Owner | DecidedBy::NoAnswer => UseDecidedBy::Owner,
+            DecidedBy::Answer => UseDecidedBy::Answer,
+            DecidedBy::Pattern => UseDecidedBy::Pattern,
+            DecidedBy::Rule => UseDecidedBy::Rule,
+            DecidedBy::Model => UseDecidedBy::Bouncer,
+        }
+    };
+    record_with_use(fx, decision, Some((outcome, by)))
+}
+
+fn record_with_use(
+    fx: &mut Fixture,
+    decision: Decision<'_>,
+    use_result: Option<(UseOutcome, UseDecidedBy)>,
+) -> u64 {
     let agent = fx.agent;
     fx.app
         .owner_ui
@@ -127,23 +155,25 @@ fn record(fx: &mut Fixture, decision: Decision<'_>) -> u64 {
             }
             .with_why(&decision.why);
             let id = vault.record_decision(&entry).expect("decision");
-            for item in &decision.items {
-                vault
-                    .record_item_use(&NewItemUse {
-                        item_id: *item,
-                        agent_id: Some(agent),
-                        agent_name: "Claude Code".to_owned(),
-                        project_key: KEY.to_owned(),
-                        project_label: "apassy".to_owned(),
-                        action: ActionKind::Change,
-                        command_summary: "run sentry-cli releases".to_owned(),
-                        hosts: vec!["sentry.io".to_owned()],
-                        outcome: UseOutcome::TimedOut,
-                        decided_by: UseDecidedBy::Owner,
-                        answered_on: String::new(),
-                        decision_log_id: Some(id),
-                    })
-                    .expect("use");
+            if let Some((outcome, decided_by)) = use_result {
+                for item in &decision.items {
+                    vault
+                        .record_item_use(&NewItemUse {
+                            item_id: *item,
+                            agent_id: Some(agent),
+                            agent_name: "Claude Code".to_owned(),
+                            project_key: KEY.to_owned(),
+                            project_label: "apassy".to_owned(),
+                            action: ActionKind::Change,
+                            command_summary: "run sentry-cli releases".to_owned(),
+                            hosts: vec!["sentry.io".to_owned()],
+                            outcome,
+                            decided_by,
+                            answered_on: String::new(),
+                            decision_log_id: Some(id),
+                        })
+                        .expect("use");
+                }
             }
             id
         })
@@ -1035,4 +1065,509 @@ fn allow_opens_the_owner_check_while_the_owner_window_is_open() {
     let check = fx.app.owner.check.as_ref().expect("the owner check opens");
     assert!(matches!(check.request, OwnerRequest::RememberAnswer { .. }));
     fx.app.close_owner_check(None);
+}
+
+#[test]
+fn logs_and_history_keep_rejections_distinct_from_unanswered_questions() {
+    use crate::desktop::ui::bouncer::{ActivityScope, LogFilter, LogKindFilter, LogSource};
+    use crate::desktop::ui::decisions_bouncer::{HistoryFilter, State, history_events};
+    use crate::desktop::ui::{bouncer_load, logs};
+
+    let mut fx = fixture();
+    let item = fx.item;
+    let mut ids = Vec::new();
+    for (by, code, words) in [
+        (DecidedBy::Owner, "approval_denied", "Denied by you"),
+        (DecidedBy::Rule, "not_visible", "Refused by policy"),
+        (DecidedBy::NoAnswer, "approval_timeout", "Timed out"),
+        (
+            DecidedBy::NoAnswer,
+            "approval_invalidated",
+            "Request invalidated",
+        ),
+        (DecidedBy::NoAnswer, "", "No answer"),
+    ] {
+        let mut decision = Decision::unanswered(item);
+        decision.decided_by = by;
+        decision.asked = by != DecidedBy::Rule;
+        decision.why.code = code.to_owned();
+        let id = if code.is_empty() {
+            // A legacy no-answer record without a linked concrete use cannot tell
+            // us whether it timed out or was invalidated.
+            record_with_use(&mut fx, decision, None)
+        } else {
+            record(&mut fx, decision)
+        };
+        ids.push((id, words));
+    }
+    // A final access check may refuse an earlier allowed decision. Preserve the
+    // production binding to that actual use; changing precedence would hide it.
+    let mut allowed = Decision::unanswered(item);
+    allowed.decision = LoggedDecision::Allow;
+    allowed.decided_by = DecidedBy::Model;
+    allowed.asked = false;
+    allowed.why = DecisionWhy {
+        reason: "ModelAllowed".to_owned(),
+        ..DecisionWhy::default()
+    };
+    let final_refusal = record_with_use(
+        &mut fx,
+        allowed,
+        Some((UseOutcome::Refused, UseDecidedBy::Rule)),
+    );
+    ids.push((final_refusal, "Refused by policy"));
+    fx.app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            use crate::decision_log::DecisionOutcome;
+            let rows = vault.bouncer_log(None, 200, None).unwrap();
+            let expected = [
+                DecisionOutcome::Denied,
+                DecisionOutcome::Refused,
+                DecisionOutcome::TimedOut,
+                DecisionOutcome::Invalidated,
+                DecisionOutcome::Unanswered,
+                DecisionOutcome::Refused,
+            ];
+            for ((id, _), expected) in ids.iter().zip(expected) {
+                let row = rows.iter().find(|row| row.decision_log_id == *id).unwrap();
+                assert_eq!(
+                    row.outcome_kind(),
+                    expected,
+                    "stored decision/use binding for {id}"
+                );
+            }
+            let final_row = rows
+                .iter()
+                .find(|row| row.decision_log_id == final_refusal)
+                .unwrap();
+            assert!(
+                final_row.allowed,
+                "the earlier bouncer decision remains allowed"
+            );
+            assert_eq!(final_row.use_outcome, Some(DecisionOutcome::Refused));
+            assert!(
+                rows.iter()
+                    .find(|row| row.decision_log_id == ids[4].0)
+                    .unwrap()
+                    .use_outcome
+                    .is_none()
+            );
+        })
+        .unwrap();
+    let data = bouncer_load::load(&fx.app, &[], None, 1);
+    for (id, words) in &ids {
+        let event = data
+            .events
+            .iter()
+            .find(|event| event.source == LogSource::Decision(*id))
+            .unwrap();
+        assert_eq!(event.outcome.text(), *words);
+    }
+    let scope = ActivityScope::default();
+    let denied = history_events(
+        &data,
+        &scope,
+        &State {
+            filter: HistoryFilter::Denied,
+            ..State::default()
+        },
+    );
+    assert_eq!(denied.len(), 3);
+    assert!(denied.iter().all(|event| matches!(&event.source, LogSource::Decision(id) if *id == ids[0].0 || *id == ids[1].0 || *id == final_refusal)));
+    let logs = logs::LogsView::of(
+        &data,
+        &scope,
+        &LogFilter {
+            kind: LogKindFilter::Denied,
+            ..LogFilter::default()
+        },
+        crate::broker::learning::now(),
+        0,
+    );
+    assert_eq!(
+        logs.groups
+            .iter()
+            .map(|(_, rows)| rows.len())
+            .sum::<usize>(),
+        3
+    );
+    assert_eq!(
+        history_events(
+            &data,
+            &scope,
+            &State {
+                filter: HistoryFilter::AskedYou,
+                ..State::default()
+            }
+        )
+        .len(),
+        4
+    );
+}
+
+#[test]
+fn logs_and_history_show_activity_only_refusals_without_duplicate_run_rows() {
+    use crate::desktop::ui::bouncer::{ActivityScope, LogFilter, LogKind, LogSource};
+    use crate::desktop::ui::decisions_bouncer::{State, history_events};
+    use crate::desktop::ui::{bouncer_load, logs};
+    use crate::vault::{ActivityDecision, NewActivity};
+
+    let mut fx = fixture();
+    let item = fx.item;
+    let mut decision = Decision::unanswered(item);
+    decision.decided_by = DecidedBy::Owner;
+    decision.why.code = "approval_denied".to_owned();
+    record(&mut fx, decision);
+    fx.app.owner_ui.session.with_vault(|vault| {
+        for (operation, reason) in [
+            ("run sentry-cli releases", "The owner denied this run."),
+            ("run sentry-cli releases", "The token is not valid or the agent is revoked."),
+            ("request access", "The owner did not let this agent see this credential, or it is archived or gone."),
+            ("mail task access", "An approved mail task matching this request is unavailable."),
+        ] {
+            vault.record_activity(&NewActivity {
+                agent_id: Some(fx.agent), agent_name: "Claude Code".to_owned(), item_id: Some(item),
+                operation: operation.to_owned(), decision: ActivityDecision::Deny, reason: reason.to_owned(),
+            }).expect("synthetic activity");
+        }
+    }).expect("open");
+    let data = bouncer_load::load(&fx.app, &[], None, 1);
+    let scope = ActivityScope::default();
+    let history = history_events(&data, &scope, &State::default());
+    assert_eq!(
+        history.len(),
+        4,
+        "one decision, three independent request refusals"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| event.kind == LogKind::Request)
+            .count(),
+        3
+    );
+    assert!(
+        history
+            .iter()
+            .filter(|event| matches!(event.source, LogSource::Activity(_)))
+            .all(|event| event.expandable() && event.command.contains('\n'))
+    );
+    let request = history
+        .iter()
+        .find(|event| event.kind == LogKind::Request)
+        .unwrap();
+    let detail = painted(|ui| {
+        crate::desktop::ui::decisions_bouncer::history_detail(
+            ui,
+            request,
+            crate::broker::learning::now(),
+            false,
+            |_| {},
+            |_| {},
+        )
+    });
+    assert!(detail.contains("Request"));
+    assert!(detail.contains("Refused by policy"));
+    assert!(detail.contains(request.command.lines().next().unwrap()));
+    let logs = logs::LogsView::of(
+        &data,
+        &scope,
+        &LogFilter::default(),
+        crate::broker::learning::now(),
+        0,
+    );
+    assert_eq!(
+        logs.groups
+            .iter()
+            .map(|(_, rows)| rows.len())
+            .sum::<usize>(),
+        4
+    );
+    // A notification may still select an old, unstructured activity row. It cannot
+    // turn that row into a policy decision or a second entry in History.
+    let activity = fx
+        .app
+        .owner_ui
+        .session
+        .activity(10)
+        .expect("activity")
+        .into_iter()
+        .find(|row| row.reason == "The owner denied this run.")
+        .unwrap();
+    crate::desktop::ui::logs::open_activity(&mut fx.app, activity.id);
+    let selected = bouncer_load::load(&fx.app, &[], None, 1);
+    let fallback = selected
+        .events
+        .iter()
+        .find(|event| event.source == LogSource::Activity(activity.id))
+        .unwrap();
+    assert_eq!(fallback.outcome.text(), "Not allowed");
+    assert!(!fallback.outcome.denied());
+    assert_eq!(
+        history_events(&selected, &scope, &State::default()).len(),
+        4
+    );
+}
+
+#[test]
+fn stored_legacy_access_denial_appears_once_without_activity_or_decision_rows() {
+    use crate::desktop::ui::bouncer::{
+        ActivityScope, LogFilter, LogKind, LogKindFilter, LogSource,
+    };
+    use crate::desktop::ui::decisions_bouncer::{HistoryFilter, State, history_events};
+    use crate::desktop::ui::{bouncer_load, logs};
+    let mut fx = fixture();
+    let id = fx
+        .app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            vault
+                .set_env_binding(fx.item, "SYNTH_SENTRY_KEY", "token")
+                .unwrap();
+            vault
+                .request_access(
+                    fx.agent,
+                    fx.item,
+                    "SENSITIVE-ACCESS-REASON",
+                    "/sensitive/cwd",
+                )
+                .unwrap()
+                .0
+        })
+        .unwrap();
+    fx.app
+        .owner_ui
+        .session
+        .deny_access_request(id)
+        .expect("real legacy Deny entry point");
+    let at = fx
+        .app
+        .owner_ui
+        .session
+        .with_vault(|vault| {
+            assert!(vault.bouncer_log(None, 200, None).unwrap().is_empty());
+            assert!(vault.recent_activity(200).unwrap().is_empty());
+            vault.denied_access_requests(None, 200).unwrap()[0].at
+        })
+        .unwrap();
+    fx.app.owner_ui.session.lock().unwrap();
+    fx.app.owner_ui.session.unlock(PASS).unwrap();
+    let data = bouncer_load::load(&fx.app, &[], None, 1);
+    let scope = ActivityScope::default();
+    let events = history_events(
+        &data,
+        &scope,
+        &State {
+            filter: HistoryFilter::Denied,
+            ..State::default()
+        },
+    );
+    assert_eq!(events.len(), 1);
+    let event = events[0];
+    assert_eq!(event.source, LogSource::AccessRequest(id));
+    assert_eq!(event.kind, LogKind::Request);
+    assert_eq!(event.at, at);
+    assert_eq!(
+        event.outcome.text(),
+        "Denied",
+        "legacy unsigned state cannot establish its actor"
+    );
+    assert_eq!(event.agent.as_deref(), Some("Claude Code"));
+    assert_eq!(event.credential.as_deref(), Some("Guarded key"));
+    assert!(!event.command.contains("SENSITIVE-ACCESS-REASON"));
+    assert!(!event.command.contains("/sensitive/cwd"));
+    let view = logs::LogsView::of(
+        &data,
+        &scope,
+        &LogFilter {
+            kind: LogKindFilter::Denied,
+            ..LogFilter::default()
+        },
+        crate::broker::learning::now(),
+        0,
+    );
+    assert_eq!(
+        view.groups
+            .iter()
+            .map(|(_, rows)| rows.len())
+            .sum::<usize>(),
+        1
+    );
+    let loaded_again = bouncer_load::load(&fx.app, &[], None, 1);
+    assert_eq!(
+        history_events(&loaded_again, &scope, &State::default()).len(),
+        1
+    );
+}
+
+#[test]
+fn scoped_local_and_signed_iphone_access_denials_load_once_with_their_receipt_actor() {
+    use crate::desktop::ui::bouncer::{ActivityScope, LogFilter, LogKindFilter, LogSource};
+    use crate::desktop::ui::decisions_bouncer::{HistoryFilter, State, history_events};
+    use crate::desktop::ui::{bouncer_load, logs};
+    use crate::questions::access_request::{self as wire, Choice};
+    use crate::sync::{DeviceKey, encode_b64u};
+    use crate::vault::{RelayDevice, TrustedDeviceKind};
+    const TEAM: &str = "t_7k2m5q4x3c";
+    for remote in [false, true] {
+        let mut fx = fixture();
+        std::fs::create_dir(fx._dir.path().join(".git")).unwrap();
+        let sign = DeviceKey::generate().unwrap();
+        let answer = DeviceKey::generate().unwrap();
+        let iphone = crate::relay::membership::new_device_uuid().unwrap();
+        let id = fx
+            .app
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                vault
+                    .set_env_binding(fx.item, "SYNTH_SENTRY_KEY", "token")
+                    .unwrap();
+                if remote {
+                    let mac = DeviceKey::generate().unwrap();
+                    vault
+                        .set_relay_device(&RelayDevice {
+                            relay_url: "https://relay.example.test".to_owned(),
+                            team_id: TEAM.to_owned(),
+                            device_id: 2,
+                            public_key: mac.public_key().to_vec(),
+                            key_pkcs8: mac.pkcs8().unwrap().clone(),
+                            created_at: 0,
+                            account_key: false,
+                        })
+                        .unwrap();
+                    crate::relay::membership::enable_questions(vault, "Synthetic Mac").unwrap();
+                    vault
+                        .register_trusted_device(
+                            &iphone,
+                            "Synthetic iPhone",
+                            TrustedDeviceKind::Iphone,
+                            sign.public_key(),
+                            Some(answer.public_key()),
+                        )
+                        .unwrap();
+                    vault.set_trusted_device_relay_id(&iphone, TEAM, 7).unwrap();
+                }
+                let agent = vault
+                    .list_agents()
+                    .unwrap()
+                    .into_iter()
+                    .find(|agent| agent.id == fx.agent)
+                    .unwrap();
+                let response = crate::broker::access_once::create(
+                    vault,
+                    &agent,
+                    fx.item,
+                    "SENSITIVE-SCOPED-REASON",
+                    fx._dir.path().to_str(),
+                    &wire::Scope {
+                        action: wire::Action::Read,
+                        hosts: vec!["api.example.test".to_owned()],
+                    },
+                );
+                assert!(response.ok, "{response:?}");
+                response.result.unwrap()["request_id"].as_u64().unwrap()
+            })
+            .unwrap();
+        let project = fx
+            .app
+            .owner_ui
+            .session
+            .with_vault(|vault| {
+                vault
+                    .scoped_access_request(id)
+                    .unwrap()
+                    .card
+                    .card
+                    .project
+                    .unwrap()
+                    .label
+            })
+            .unwrap();
+        if remote {
+            fx.app
+                .owner_ui
+                .session
+                .with_vault(|vault| {
+                    let card = vault.scoped_access_request(id).unwrap().card;
+                    let mut denied = wire::Answer::prepare(
+                        &card,
+                        &iphone,
+                        Choice::Deny,
+                        crate::vault::access_once::now(),
+                    )
+                    .unwrap();
+                    denied.signature =
+                        encode_b64u(&sign.sign(&denied.message(&card).unwrap()).unwrap());
+                    crate::broker::access_once::RemoteAccessAnswer::verify(vault, id, denied, 7)
+                        .unwrap()
+                        .commit(vault)
+                        .unwrap();
+                })
+                .unwrap();
+        } else {
+            fx.app
+                .owner_ui
+                .session
+                .deny_access_request(id)
+                .expect("real local scoped Deny entry point");
+        }
+        fx.app.owner_ui.session.lock().unwrap();
+        fx.app.owner_ui.session.unlock(PASS).unwrap();
+        let data = bouncer_load::load(&fx.app, &[], None, 1);
+        let scope = ActivityScope::default();
+        let denied = history_events(
+            &data,
+            &scope,
+            &State {
+                filter: HistoryFilter::Denied,
+                ..State::default()
+            },
+        );
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].source, LogSource::AccessRequest(id));
+        assert_eq!(denied[0].project, project);
+        assert_eq!(
+            denied[0].outcome.text(),
+            if remote {
+                "Denied on Synthetic iPhone"
+            } else {
+                "Denied by you"
+            }
+        );
+        assert!(!denied[0].command.contains("SENSITIVE-SCOPED-REASON"));
+        assert_eq!(
+            history_events(
+                &data,
+                &scope,
+                &State {
+                    filter: HistoryFilter::AskedYou,
+                    ..State::default()
+                }
+            )
+            .len(),
+            1
+        );
+        let shown = logs::LogsView::of(
+            &data,
+            &scope,
+            &LogFilter {
+                kind: LogKindFilter::Denied,
+                ..LogFilter::default()
+            },
+            crate::broker::learning::now(),
+            0,
+        );
+        assert_eq!(
+            shown
+                .groups
+                .iter()
+                .map(|(_, rows)| rows.len())
+                .sum::<usize>(),
+            1
+        );
+    }
 }

@@ -647,6 +647,9 @@ pub(crate) enum Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LogKind {
     Run,
+    /// An agent request refused before it had a decision-log entry.
+    Request,
+    MailTask,
     Connect,
     Disconnect,
     RemoteAccessOn,
@@ -657,6 +660,8 @@ impl LogKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Run => "Run",
+            Self::Request => "Request",
+            Self::MailTask => "Mail task",
             Self::Connect => "Connect",
             Self::Disconnect => "Disconnect",
             Self::RemoteAccessOn => "Remote access on",
@@ -665,7 +670,10 @@ impl LogKind {
     }
 
     pub(crate) fn is_connection(self) -> bool {
-        !matches!(self, Self::Run)
+        matches!(
+            self,
+            Self::Connect | Self::Disconnect | Self::RemoteAccessOn | Self::RemoteAccessOff
+        )
     }
 
     /// The kind of an activity line of the node (U2b writes them), or `None` for any
@@ -690,8 +698,16 @@ pub(crate) enum LogOutcome {
     AllowedOn(String),
     DeniedByYou,
     DeniedOn(String),
+    /// An old access request has a denial but no reliable actor.
+    Denied,
     DeniedByBouncer,
     NoAnswer,
+    TimedOut,
+    Invalidated,
+    AnotherQuestionPending,
+    /// An activity row has no structured reason or actor for its failure.
+    NotAllowed,
+    Failed,
     WaitsForYou,
     /// A change that you made: remote access, a disconnect.
     ByYou,
@@ -705,8 +721,14 @@ impl LogOutcome {
             Self::AllowedOn(device) => format!("Allowed on {device}"),
             Self::DeniedByYou => "Denied by you".to_owned(),
             Self::DeniedOn(device) => format!("Denied on {device}"),
-            Self::DeniedByBouncer => "Denied by bouncer".to_owned(),
+            Self::Denied => "Denied".to_owned(),
+            Self::DeniedByBouncer => "Refused by policy".to_owned(),
             Self::NoAnswer => "No answer".to_owned(),
+            Self::TimedOut => "Timed out".to_owned(),
+            Self::Invalidated => "Request invalidated".to_owned(),
+            Self::AnotherQuestionPending => "Another question was pending".to_owned(),
+            Self::NotAllowed => "Not allowed".to_owned(),
+            Self::Failed => "Request failed".to_owned(),
             Self::WaitsForYou => "Waits for you".to_owned(),
             Self::ByYou => "By you".to_owned(),
         }
@@ -715,7 +737,7 @@ impl LogOutcome {
     pub(crate) fn denied(&self) -> bool {
         matches!(
             self,
-            Self::DeniedByYou | Self::DeniedOn(_) | Self::DeniedByBouncer | Self::NoAnswer
+            Self::DeniedByYou | Self::DeniedOn(_) | Self::DeniedByBouncer | Self::Denied
         )
     }
 
@@ -723,14 +745,38 @@ impl LogOutcome {
     /// (`rule`, `model`, `pattern`, `answer`, `bouncer`, `owner`, `no_answer`), and the
     /// device that answered ("" or this Mac: you, on this Mac).
     pub(crate) fn of_decision(allowed: bool, decided_by: &str, answered_on: &str) -> Self {
+        let outcome = if decided_by == "timed_out" {
+            crate::decision_log::DecisionOutcome::TimedOut
+        } else {
+            crate::decision_log::DecisionOutcome::of_decision(allowed, decided_by, "")
+        };
+        Self::of_outcome(outcome, decided_by, answered_on)
+    }
+
+    /// Keep stored and feed outcomes distinct from who answered. Older no-answer
+    /// records remain neutral because they do not identify a timeout or cancellation.
+    pub(crate) fn of_outcome(
+        outcome: crate::decision_log::DecisionOutcome,
+        decided_by: &str,
+        answered_on: &str,
+    ) -> Self {
+        use crate::decision_log::DecisionOutcome;
         let device = answered_on.trim();
         let elsewhere = (!device.is_empty()).then(|| clip(device));
-        match (allowed, decided_by) {
-            (_, "no_answer" | "timed_out") => Self::NoAnswer,
-            (true, "owner") => elsewhere.map_or(Self::AllowedByYou, Self::AllowedOn),
-            (false, "owner") => elsewhere.map_or(Self::DeniedByYou, Self::DeniedOn),
-            (true, _) => Self::AllowedByBouncer,
-            (false, _) => Self::DeniedByBouncer,
+        match outcome {
+            DecisionOutcome::TimedOut => Self::TimedOut,
+            DecisionOutcome::Invalidated => Self::Invalidated,
+            DecisionOutcome::Unanswered | DecisionOutcome::Unknown => Self::NoAnswer,
+            DecisionOutcome::QuestionWaiting => Self::AnotherQuestionPending,
+            DecisionOutcome::Denied if decided_by == "owner" => {
+                elsewhere.map_or(Self::DeniedByYou, Self::DeniedOn)
+            }
+            DecisionOutcome::Denied => Self::DeniedByBouncer,
+            DecisionOutcome::Refused => Self::DeniedByBouncer,
+            DecisionOutcome::Allowed if decided_by == "owner" => {
+                elsewhere.map_or(Self::AllowedByYou, Self::AllowedOn)
+            }
+            DecisionOutcome::Allowed => Self::AllowedByBouncer,
         }
     }
 }
@@ -742,6 +788,8 @@ pub(crate) enum LogSource {
     Decision(u64),
     /// An activity line of this Mac (a notification names it).
     Activity(u64),
+    /// A durable access request outcome, distinct from activity and decision IDs.
+    AccessRequest(u64),
     /// A run of this Mac that waits for you now.
     Waiting(u64),
     /// A connect request that waits for you now (U2b).
@@ -769,7 +817,7 @@ pub(crate) struct LogEvent {
     /// The run of the node of a cloud run of this Mac: its expansion shows the proxied
     /// requests from the relay audit.
     pub(crate) relay_run: Option<u64>,
-    /// The command summary, when the source keeps one (feeds do; a log row may not).
+    /// The command summary, or operation and reason for an activity-only request.
     pub(crate) command: String,
 }
 
@@ -801,7 +849,8 @@ impl LogEvent {
     /// The row opens: a cloud run of this Mac shows its proxied requests, any run its
     /// command.
     pub(crate) fn expandable(&self) -> bool {
-        self.kind == LogKind::Run && (self.relay_run.is_some() || !self.command.is_empty())
+        matches!(self.kind, LogKind::Run | LogKind::Request)
+            && (self.relay_run.is_some() || !self.command.is_empty())
     }
 }
 

@@ -379,12 +379,15 @@ fn the_outcome_words_are_those_of_the_mockup() {
     assert_eq!(of(true, "owner", "iPhone").text(), "Allowed on iPhone");
     assert_eq!(of(false, "owner", "").text(), "Denied by you");
     assert_eq!(of(false, "owner", "iPhone").text(), "Denied on iPhone");
-    assert_eq!(of(false, "rule", "").text(), "Denied by bouncer");
+    assert_eq!(of(false, "rule", "").text(), "Refused by policy");
     assert_eq!(of(false, "no_answer", "").text(), "No answer");
-    assert_eq!(of(false, "timed_out", "").text(), "No answer");
+    assert_eq!(of(false, "timed_out", "").text(), "Timed out");
     assert!(of(false, "rule", "").denied());
     assert!(!of(true, "owner", "").denied());
     assert!(!LogOutcome::WaitsForYou.denied());
+    assert!(!LogOutcome::NoAnswer.denied());
+    assert!(!LogOutcome::TimedOut.denied());
+    assert!(!LogOutcome::Invalidated.denied());
 }
 
 #[test]

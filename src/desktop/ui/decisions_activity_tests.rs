@@ -63,6 +63,90 @@ fn ready_mac(feed: Feed) -> RemoteMac {
     }
 }
 
+#[test]
+fn feed_history_preserves_owner_denial_policy_refusal_and_timeout() {
+    use crate::desktop::ui::bouncer::{LogFilter, LogKindFilter, LogOutcome};
+    use crate::desktop::ui::decisions_bouncer::HistoryFilter;
+    use crate::desktop::ui::{bouncer_load, logs};
+
+    let dir = TempDir::new().expect("temp dir");
+    let mut feed = example_feed();
+    let template = feed.agents[0].recent[0].clone();
+    feed.agents[0].recent.clear();
+    for (outcome, decided_by) in [
+        ("denied", "owner"),
+        ("denied", "bouncer"), // Legacy feeds used denied for an automatic refusal.
+        ("refused", "rule"),
+        ("timed_out", "owner"),
+    ] {
+        feed.agents[0].recent.push(FeedUse {
+            outcome: outcome.to_owned(),
+            decided_by: decided_by.to_owned(),
+            ..template.clone()
+        });
+    }
+    let app = vault_app(&dir, feed);
+    let data = bouncer_load::load(&app, &[], None, 1);
+    let scope = ActivityScope {
+        device: DeviceScope::Other(REMOTE_DEVICE.to_owned()),
+        project: None,
+    };
+    let all = decisions_bouncer::history_events(&data, &scope, &HistoryState::default());
+    assert_eq!(all.len(), 4);
+    assert_eq!(
+        all.iter()
+            .map(|event| event.key())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        4
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|event| matches!(event.outcome, LogOutcome::DeniedOn(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|event| event.outcome == LogOutcome::DeniedByBouncer)
+            .count(),
+        2
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|event| event.outcome == LogOutcome::TimedOut)
+            .count(),
+        1
+    );
+    let denied = decisions_bouncer::history_events(
+        &data,
+        &scope,
+        &HistoryState {
+            filter: HistoryFilter::Denied,
+            ..HistoryState::default()
+        },
+    );
+    assert_eq!(denied.len(), 3);
+    let shown = logs::LogsView::of(
+        &data,
+        &scope,
+        &LogFilter {
+            kind: LogKindFilter::Denied,
+            ..LogFilter::default()
+        },
+        now(),
+        0,
+    );
+    assert_eq!(
+        shown
+            .groups
+            .iter()
+            .map(|(_, rows)| rows.len())
+            .sum::<usize>(),
+        3
+    );
+}
+
 /// An agent of this Mac with one use, allowed by the owner, in project `local-proj`.
 fn local_use(app: &mut DesktopApp, item_id: u64) {
     let (agent, _) = app

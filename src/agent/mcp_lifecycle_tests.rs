@@ -17,6 +17,233 @@ const UNRELATED: &str = "FAKE-unrelated-output-canary-88902";
 /// How often the adapter of a test connection repeats its progress note.
 const CADENCE: Duration = Duration::from_millis(25);
 
+fn mail_params(prepare: bool) -> Value {
+    if prepare {
+        json!({"name":TOOL_PREPARE_MAIL_TASK,"arguments":{
+            "item_id":7,"recipients":["one@example.test"],"subject":"Synthetic subject",
+            "body":"Synthetic body","ttl_minutes":15,"purpose":"Synthetic mail task",
+            "cwd":"/synthetic/project","idempotency_key":"synthetic-mail-prepare"
+        },"_meta":{"progressToken":"synthetic-mail"}})
+    } else {
+        json!({"name":TOOL_SEND_TASK_MAIL,"arguments":{
+            "task_id":"synthetic-task","recipient":"one@example.test",
+            "cwd":"/synthetic/project","user_request":"Send the approved message",
+            "idempotency_key":"synthetic-mail-send"
+        },"_meta":{"progressToken":"synthetic-mail"}})
+    }
+}
+
+#[test]
+fn mail_only_process_binding_is_outer_wire_context_and_never_tool_output() {
+    use crate::agent::wire::{WireRequest, is_mail_process_session};
+    use std::os::unix::net::UnixListener;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("mail-process-stub.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let stub = std::thread::spawn(move || {
+        let mut binding = None;
+        for index in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            io::BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: WireRequest = serde_json::from_str(&line).unwrap();
+            if index < 3 {
+                let session = request.host_session.as_deref().unwrap();
+                assert!(is_mail_process_session(session));
+                if let Some(previous) = binding.as_deref() {
+                    assert_eq!(session, previous);
+                } else {
+                    binding = Some(session.to_owned());
+                }
+                assert!(
+                    !serde_json::to_string(&request.action)
+                        .unwrap()
+                        .contains(session)
+                );
+            } else {
+                assert!(matches!(
+                    request.action,
+                    Action::ListAccess | Action::OperationStatus { .. }
+                ));
+                assert!(
+                    request.host_session.is_none(),
+                    "ordinary requests keep original context"
+                );
+            }
+            serde_json::to_writer(
+                &mut stream,
+                &WireResponse::success(json!({"state":"synthetic"})),
+            )
+            .unwrap();
+            stream.write_all(b"\n").unwrap();
+        }
+        binding.unwrap()
+    });
+    let config = AdapterConfig {
+        socket,
+        token: Some("synthetic-token".into()),
+        host_session: None,
+    };
+    let mut responses = Vec::new();
+    for params in [
+        mail_params(true),
+        mail_params(false),
+        json!({"name":TOOL_MAIL_TASK_STATUS,"arguments":{"task_id":"synthetic-task","cwd":"/synthetic/project"}}),
+        json!({"name":TOOL_LIST_ACCESS}),
+        json!({"name":TOOL_LIST_ACCESS,"arguments":{"operation_id":"0123456789abcdef0123456789abcdef"}}),
+    ] {
+        let result = call_tool(&config, &params);
+        assert_eq!(result["isError"], false);
+        responses.push(result);
+    }
+    let binding = stub.join().unwrap();
+    assert!(
+        !serde_json::to_string(&responses)
+            .unwrap()
+            .contains(&binding)
+    );
+}
+
+#[test]
+fn mail_mcp_forwards_only_typed_local_tracked_actions_and_retains_receipt() {
+    use crate::agent::wire::WireRequest;
+    use std::os::unix::net::UnixListener;
+    for prepare in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mail-stub.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let stub = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            io::BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: WireRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(
+                request.host_session.as_deref(),
+                Some("synthetic-mail-session")
+            );
+            let Action::Tracked {
+                operation_id,
+                idempotency_key,
+                action,
+            } = &request.action
+            else {
+                panic!("mail mutation must be tracked")
+            };
+            assert!(valid_operation_id(operation_id));
+            assert_eq!(
+                idempotency_key.as_deref(),
+                Some(if prepare {
+                    "synthetic-mail-prepare"
+                } else {
+                    "synthetic-mail-send"
+                })
+            );
+            let mut expected = mail_params(prepare)["arguments"].clone();
+            expected.as_object_mut().unwrap().remove("idempotency_key");
+            expected["kind"] = json!(if prepare {
+                "prepare_mail_task"
+            } else {
+                "send_task_mail"
+            });
+            assert_eq!(serde_json::to_value(action).unwrap(), expected);
+            let result =
+                json!({"task_id":"synthetic-task","state":if prepare {"pending"} else {"sent"}});
+            let mut response = WireResponse::success(result);
+            response.operation_id = Some(operation_id.clone());
+            serde_json::to_writer(&mut stream, &response).unwrap();
+            stream.write_all(b"\n").unwrap();
+        });
+        let mut host = Host::new(AdapterConfig {
+            socket,
+            token: Some("synthetic-mail-token".into()),
+            host_session: Some("synthetic-mail-session".into()),
+        });
+        host.call(1, mail_params(prepare));
+        let operation = host.operation();
+        let response = host.reply(1);
+        assert_eq!(response["isError"], false);
+        assert_eq!(response["structuredContent"]["operation_id"], operation);
+        assert_eq!(
+            response["structuredContent"]["result"]["task_id"],
+            "synthetic-task"
+        );
+        stub.join().unwrap();
+    }
+}
+
+#[test]
+fn mail_mcp_preserves_pending_prepare_on_loss_and_routes_explicit_cancellation() {
+    use crate::agent::wire::WireRequest;
+    use std::os::unix::net::UnixListener;
+    for (prepare, explicit) in [(true, false), (true, true), (false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mail-cancel-stub.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (arrived, received) = std::sync::mpsc::channel();
+        let stub = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            io::BufReader::new(&stream).read_line(&mut line).unwrap();
+            let request: WireRequest = serde_json::from_str(&line).unwrap();
+            let Action::Tracked { operation_id, .. } = &request.action else {
+                panic!("untracked mail")
+            };
+            arrived.send(operation_id.clone()).unwrap();
+            // A dropped response must leave an asynchronous prepare intact.
+            let original = explicit.then_some(stream);
+            listener.set_nonblocking(true).unwrap();
+            let deadline =
+                Instant::now() + Duration::from_millis(if explicit { 3000 } else { 300 });
+            while Instant::now() < deadline {
+                if let Ok((mut cancellation, _)) = listener.accept() {
+                    let mut line = String::new();
+                    io::BufReader::new(&cancellation)
+                        .read_line(&mut line)
+                        .unwrap();
+                    let cancellation_request: WireRequest = serde_json::from_str(&line).unwrap();
+                    assert_eq!(
+                        cancellation_request.action,
+                        Action::CancelOperation {
+                            operation_id: operation_id.clone()
+                        }
+                    );
+                    let response = WireResponse::success(json!({
+                        "may_have_run":false,"cancellation_requested":true,"state":"completed"
+                    }));
+                    serde_json::to_writer(&mut cancellation, &response).unwrap();
+                    cancellation.write_all(b"\n").unwrap();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(original);
+            false
+        });
+        let mut host = Host::new(AdapterConfig {
+            socket,
+            token: Some("synthetic-mail-token".into()),
+            host_session: None,
+        });
+        host.call(1, mail_params(prepare));
+        let operation = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        if explicit {
+            host.cancel(1);
+        }
+        let response = host.reply(1);
+        assert_eq!(response["isError"], true);
+        assert_eq!(response["structuredContent"]["operation_id"], operation);
+        assert_eq!(
+            response["structuredContent"]["code"],
+            if explicit {
+                "cancelled"
+            } else {
+                "protocol_error"
+            }
+        );
+        assert_eq!(stub.join().unwrap(), explicit);
+    }
+}
+
 struct Fixture {
     dir: TempDir,
     vault: SharedVault,
@@ -691,7 +918,7 @@ fn bounded_dispatch_reserves_a_read_slot_and_keeps_descriptions_available() {
     host.send(json!({"jsonrpc":"2.0", "id":6, "method":"tools/list"}));
     let listed = host.reply(6);
     let tools = listed["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 16);
     assert!(
         tools
             .iter()

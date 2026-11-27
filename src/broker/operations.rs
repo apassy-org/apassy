@@ -32,6 +32,8 @@ struct State {
     finished: Option<Instant>,
     // An asynchronous scoped request can outlive this operation's response.
     access_request: Option<u64>,
+    mail_task: Option<String>,
+    mail_task_withdrawn: bool,
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +111,31 @@ pub(super) fn bind_access_request(
             vault.cancel_scoped_access_request(agent, id)?;
         }
         Ok(cancelled)
+    })
+}
+
+/// Bind this preparation receipt to just the proposal it created. The caller
+/// holds the unlocked vault through creation and binding, as for access requests.
+pub(super) fn bind_mail_task(
+    registry: &super::mail_tasks::MailTaskRegistry,
+    agent: u64,
+    epoch: [u8; 32],
+    id: &str,
+) -> bool {
+    CURRENT.with(|current| {
+        let current = current.borrow();
+        let Some(control) = current.as_ref() else {
+            return false;
+        };
+        let mut state = lock(&control.state);
+        state.mail_task = Some(id.to_owned());
+        if state.cancelled || state.invalidated {
+            state.mail_task_withdrawn =
+                registry.cancel_pending_operation(id, agent, &epoch).is_ok();
+            return true;
+        }
+        state.effect_started = true;
+        false
     })
 }
 
@@ -221,7 +248,12 @@ impl Operations {
                 *lock(&self.session) = Some(vault.epoch());
                 let records = Arc::downgrade(&self.records);
                 let session = Arc::downgrade(&self.session);
+                let approvals = Arc::downgrade(&ctx.approvals);
+                let epoch = vault.epoch();
                 vault.on_session_end(move || {
+                    if let Some(queue) = approvals.upgrade() {
+                        queue.mail_tasks().clear_session(&epoch);
+                    }
                     if let Some(session) = session.upgrade() {
                         *lock(&session) = None;
                     }
@@ -273,7 +305,9 @@ impl Operations {
                 drop(records);
                 let mut state = lock(&control.state);
                 if matches!(request.action, Action::CancelOperation { .. })
-                    && (state.outcome.is_none() || state.access_request.is_some())
+                    && (state.outcome.is_none()
+                        || state.access_request.is_some()
+                        || state.mail_task.is_some())
                 {
                     state.cancelled = true;
                     // Wait only for withdrawal of a pending question. Inference may
@@ -290,6 +324,11 @@ impl Operations {
                 let access = matches!(request.action, Action::CancelOperation { .. })
                     .then_some(state.access_request)
                     .flatten();
+                let mail_task = if matches!(request.action, Action::CancelOperation { .. }) {
+                    state.mail_task.clone()
+                } else {
+                    None
+                };
                 // Never take the vault while holding control.state: creation
                 // binds its request under the opposite lock order.
                 drop(state);
@@ -310,6 +349,31 @@ impl Operations {
                                 "."
                             ),
                         );
+                    }
+                }
+                if let Some(task_id) = mail_task {
+                    let guard = decide::lock(&ctx.vault);
+                    if !guard
+                        .as_ref()
+                        .is_some_and(|v| !v.is_locked() && v.epoch() == scope.0)
+                    {
+                        return decide::locked_response();
+                    }
+                    if ctx
+                        .approvals
+                        .mail_tasks()
+                        .cancel_pending_operation(&task_id, scope.1, &scope.0)
+                        .is_err()
+                    {
+                        return WireResponse::failure(
+                            "mail_task_unavailable",
+                            "This proposal could not be withdrawn. Check the task status in Apassy.",
+                        );
+                    }
+                    let mut state = lock(&control.state);
+                    state.mail_task_withdrawn = true;
+                    if state.finished.is_some() {
+                        state.outcome = Some(summary(&cancelled_response()));
                     }
                 }
                 return receipt(id, &lock(&control.state));
@@ -441,7 +505,7 @@ impl Operations {
         // Short mutations have no blocking approval/execution stage. Mark them
         // conservatively before entering their existing authorization path.
         let mut response = if !action.waits()
-            && !matches!(action, Action::Call { .. })
+            && !matches!(action, Action::Call { .. } | Action::PrepareMailTask { .. })
             && !start_effect()
         {
             cancelled_response()
@@ -456,11 +520,14 @@ impl Operations {
         };
         CURRENT.with(|current| *current.borrow_mut() = None);
         let mut state = lock(&control.state);
-        if state.cancelled && !state.invalidated && !state.effect_started {
+        if state.cancelled
+            && !state.invalidated
+            && (!state.effect_started || state.mail_task_withdrawn)
+        {
             response = cancelled_response();
         }
         if !state.invalidated {
-            state.outcome = Some(summary(&response));
+            state.outcome = Some(operation_summary(action, &response));
         }
         state.finished = Some(Instant::now());
         state.waiting = false;
@@ -547,6 +614,40 @@ fn summary(response: &WireResponse) -> Value {
         .as_ref()
         .map(|e| crate::agent::mcp::broker_error(&e.code)["structuredContent"]["code"].clone());
     json!({ "ok": response.ok, "result": result, "code": code, "output_retained": false })
+}
+
+/// Only these two broker-owned actions return a task ID. Allowlist the fixed
+/// response fields here so arbitrary connector output can never enter a receipt.
+fn operation_summary(action: &Action, response: &WireResponse) -> Value {
+    let mut outcome = summary(response);
+    if !matches!(
+        action,
+        Action::PrepareMailTask { .. } | Action::SendTaskMail { .. }
+    ) {
+        return outcome;
+    }
+    let Some(result) = response.result.as_ref().filter(|_| response.ok) else {
+        return outcome;
+    };
+    if let Some(id) = result["task_id"]
+        .as_str()
+        .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        outcome["result"]["task_id"] = json!(id);
+    }
+    match action {
+        Action::PrepareMailTask { .. } if result["state"] == "pending" => {
+            outcome["result"]["state"] = json!("pending");
+        }
+        Action::SendTaskMail { .. } if result["status"] == "sent" => {
+            outcome["result"]["status"] = json!("sent");
+            if let Some(replayed) = result["replayed"].as_bool() {
+                outcome["result"]["replayed"] = json!(replayed);
+            }
+        }
+        _ => {}
+    }
+    outcome
 }
 
 #[cfg(test)]
@@ -754,6 +855,53 @@ mod tests {
         let failure = summary(&WireResponse::failure(secret, secret));
         assert!(!failure.to_string().contains(secret));
         assert_eq!(failure["code"], "broker_error");
+    }
+
+    #[test]
+    fn mail_receipts_recover_the_opaque_id_and_disposition_without_message_data() {
+        let id = "d82353c517e94389903de4aae6ee1d69";
+        let private = "synthetic-private-content";
+        let prepare = Action::PrepareMailTask {
+            item_id: 4,
+            recipients: vec!["person@example.test".into()],
+            subject: private.into(),
+            body: private.into(),
+            ttl_minutes: 5,
+            purpose: private.into(),
+            cwd: "/synthetic".into(),
+        };
+        let response = WireResponse::success(json!({
+            "task_id": id, "body": private, "recipient": "person@example.test", "state": "pending",
+        }));
+        assert_eq!(
+            operation_summary(&prepare, &response)["result"],
+            json!({"task_id": id, "state": "pending"})
+        );
+        assert_eq!(
+            operation_summary(&Action::ListAccess, &response)["result"],
+            json!({})
+        );
+        let send = Action::SendTaskMail {
+            task_id: id.into(),
+            recipient: "person@example.test".into(),
+            cwd: "/synthetic".into(),
+            user_request: private.into(),
+        };
+        let sent = WireResponse::success(json!({
+            "task_id": id, "status": "sent", "replayed": true, "body": private,
+        }));
+        assert_eq!(
+            operation_summary(&send, &sent)["result"],
+            json!({"task_id": id, "status":"sent","replayed":true})
+        );
+        let bad = WireResponse::success(
+            json!({"task_id": private, "status": private, "replayed":private}),
+        );
+        assert_eq!(operation_summary(&send, &bad)["result"], json!({}));
+        let uncertain = WireResponse::failure("mail_submission_unknown", private);
+        let stored = operation_summary(&send, &uncertain);
+        assert_eq!(stored["code"], "mail_submission_unknown");
+        assert!(!stored.to_string().contains(private));
     }
 
     #[test]

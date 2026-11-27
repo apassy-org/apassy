@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Package a Linux vault desktop build and its browser host (ADR 0045).
-# Usage: build-vault.sh --binary PATH --host PATH --arch x86_64|aarch64 --out DIR [--max-glibc 2.31]
+# Usage: build-vault.sh --binary PATH --host PATH --arch x86_64|aarch64 --out DIR [--max-glibc 2.31] [--release-compression]
 #
 # The version is the shared release version (release-versions.json); the app crate and
 # `apassy --version` must agree with it. --max-glibc refuses binaries that need a newer
@@ -10,6 +10,7 @@ fail() { printf 'build-vault.sh: %s\n' "$*" >&2; exit 1; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
 binary='' host='' arch='' out='' max_glibc=''
+compression=gzip
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --binary) binary=${2:?}; shift 2 ;;
@@ -17,11 +18,12 @@ while [ "$#" -gt 0 ]; do
         --arch) arch=${2:?}; shift 2 ;;
         --out) out=${2:?}; shift 2 ;;
         --max-glibc) max_glibc=${2:?}; shift 2 ;;
+        --release-compression) compression=--libdeflate; shift ;;
         *) fail "unknown argument: $1" ;;
     esac
 done
 if [ -z "$binary" ] || [ -z "$host" ] || [ -z "$arch" ] || [ -z "$out" ]; then
-    fail 'usage: build-vault.sh --binary PATH --host PATH --arch x86_64|aarch64 --out DIR [--max-glibc 2.31]'
+    fail 'usage: build-vault.sh --binary PATH --host PATH --arch x86_64|aarch64 --out DIR [--max-glibc 2.31] [--release-compression]'
 fi
 case "$arch" in
     x86_64) deb_arch=amd64; machine='Advanced Micro Devices X86-64' ;;
@@ -111,7 +113,7 @@ install -m 0644 "$here/NOTICE" "$here/VAULT.md" "$stage/usr/share/doc/apassy-vau
 cp -R "$root/licenses" "$stage/usr/share/doc/apassy-vault/licenses"
 install -m 0755 "$here/install-vault.sh" "$stage/install-vault.sh"
 [ -z "$(find "$stage" ! -type d ! -type f -print -quit)" ] || fail 'package contains links or special files'
-sh "$here/tarball.sh" "$stage" "$out/$name.tar.gz"
+sh "$here/tarball.sh" "$stage" "$out/$name.tar.gz" "$compression"
 deb_root="$work/deb"
 mkdir -p "$deb_root/DEBIAN"
 cp -R "$stage/usr" "$deb_root/"

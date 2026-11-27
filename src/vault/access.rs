@@ -120,6 +120,22 @@ pub struct AccessRequest {
     pub state: RequestState,
 }
 
+/// A denied access request for owner history. It deliberately carries no request
+/// reason, working directory, scope hosts, receipt identity, or credential value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessDenial {
+    pub id: u64,
+    pub at: u64,
+    pub agent_id: u64,
+    pub agent_name: String,
+    pub item_name: String,
+    pub project: String,
+    /// Only a stored scoped denial receipt establishes an explicit owner answer.
+    /// Legacy state also includes automatic denials and has no reliable actor.
+    pub owner_answered: bool,
+    pub answered_on: String,
+}
+
 /// Printable text without control characters, cut at `max` bytes.
 fn clean(text: &str, max: usize) -> String {
     let clean: String = text
@@ -402,6 +418,89 @@ impl Vault {
         limit: usize,
     ) -> VaultResult<Vec<AccessRequest>> {
         self.query_requests(None, open_only, limit)
+    }
+
+    /// One bounded page of durable access denials, including old unsigned requests.
+    /// Cursor: `(decided_at, request_id)` of the previous page's last row. This reads
+    /// existing terminal records; it never appends a second decision or activity.
+    pub fn denied_access_requests(
+        &self,
+        before: Option<(u64, u64)>,
+        limit: usize,
+    ) -> VaultResult<Vec<AccessDenial>> {
+        use crate::questions::access_request::{DeviceKind, Outcome, Receipt, ReceiptChoice};
+        let (at, id) = before.map_or(Ok((None, None)), |(at, id)| {
+            Ok::<_, super::VaultError>((Some(to_sql_time(at)?), Some(to_sql_id(id)?)))
+        })?;
+        let limit = i64::try_from(limit.min(super::BOUNCER_LOG_PAGE))
+            .map_err(|_| err(VaultErrorKind::InvalidInput))?;
+        let mut stmt = self
+            .conn_ref()?
+            .prepare(
+                "SELECT r.id, r.decided_at, r.agent_id, a.name, i.title, v.receipt,
+                    CASE WHEN json_valid(CAST(v.card AS TEXT))
+                         THEN json_extract(CAST(v.card AS TEXT), '$.project.label') END
+             FROM access_request r
+             LEFT JOIN agent a ON a.id = r.agent_id
+             LEFT JOIN item i ON i.id = r.item_id
+             LEFT JOIN access_request_v1 v ON v.id = r.id
+             WHERE r.state = 'denied' AND r.decided_at IS NOT NULL
+               AND (?1 IS NULL OR r.decided_at < ?1 OR (r.decided_at = ?1 AND r.id < ?2))
+             ORDER BY r.decided_at DESC, r.id DESC LIMIT ?3",
+            )
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        let rows = stmt
+            .query_map((at, id, limit), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .map_err(|_| err(VaultErrorKind::Storage))?;
+        rows.map(|row| {
+            let (id, at, agent, name, item, receipt, project) =
+                row.map_err(|_| err(VaultErrorKind::Storage))?;
+            let receipt = receipt
+                .as_deref()
+                .and_then(|body| serde_json::from_slice::<Receipt>(body).ok())
+                .filter(|receipt| {
+                    receipt.outcome == Outcome::Denied
+                        && receipt.kind == Some(ReceiptChoice::Deny)
+                        && receipt.answered_by.is_some()
+                        && receipt.device_kind.is_some()
+                });
+            let answered_on =
+                receipt
+                    .as_ref()
+                    .map_or_else(String::new, |receipt| match receipt.device_kind {
+                        Some(DeviceKind::Mac) => String::new(),
+                        Some(DeviceKind::Iphone) => receipt
+                            .device_name
+                            .clone()
+                            .unwrap_or_else(|| "iPhone".to_owned()),
+                        Some(DeviceKind::Watch) => receipt
+                            .device_name
+                            .clone()
+                            .unwrap_or_else(|| "Apple Watch".to_owned()),
+                        None => String::new(),
+                    });
+            Ok(AccessDenial {
+                id: to_public_id(id)?,
+                at: from_sql_time(at)?,
+                agent_id: to_public_id(agent)?,
+                agent_name: name.unwrap_or_else(|| "An agent".to_owned()),
+                item_name: item.unwrap_or_else(|| "A deleted credential".to_owned()),
+                project: project.unwrap_or_default(),
+                owner_answered: receipt.is_some(),
+                answered_on,
+            })
+        })
+        .collect()
     }
 
     /// The requests of one agent, newest first.

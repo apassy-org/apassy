@@ -666,6 +666,7 @@ type Notifier = Box<dyn Fn() + Send + Sync>;
 pub struct ApprovalQueue {
     state: Mutex<QueueState>,
     changed: Condvar,
+    mail_tasks: super::mail_tasks::MailTaskRegistry,
     /// Called when a run starts to wait. The desktop app uses it to repaint at once.
     notifier: Mutex<Option<Notifier>>,
 }
@@ -698,12 +699,17 @@ impl ApprovalQueue {
                 ..QueueState::default()
             }),
             changed: Condvar::new(),
+            mail_tasks: super::mail_tasks::MailTaskRegistry::new(),
             notifier: Mutex::new(None),
         }
     }
 
     fn state(&self) -> MutexGuard<'_, QueueState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn mail_tasks(&self) -> &super::mail_tasks::MailTaskRegistry {
+        &self.mail_tasks
     }
 
     /// Set the function that runs when a new run waits.
@@ -1244,6 +1250,7 @@ impl ApprovalQueue {
     /// desktop app calls this when the owner locks the vault. The broker calls it
     /// when it stops.
     pub fn invalidate_all(&self) {
+        let _ = self.mail_tasks.invalidate_all();
         let mut state = self.state();
         state.generation = state.generation.wrapping_add(1);
         let ids: Vec<u64> = state.pending.iter().map(|run| run.id).collect();

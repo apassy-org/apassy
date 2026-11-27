@@ -364,7 +364,7 @@ jobs:
         run: |
           test "$(uname -m)" = "$ARCH"
           apt-get update
-          apt-get install -y --no-install-recommends binutils file python3
+          apt-get install -y --no-install-recommends binutils file python3 libdeflate-tools
       - name: Build and package the vault
         run: |
           # The container runs as root on a checkout of the runner's user.

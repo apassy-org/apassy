@@ -1902,6 +1902,21 @@ fn decisions_log(cli: &Cli, mut args: Args) -> Outcome {
                     "remembered": summary.remembered,
                     "asked": summary.asked,
                     "refused": summary.refused,
+                    "allowed": summary.allowed,
+                    "denied": summary.denied,
+                    "timed_out": summary.timed_out,
+                    "invalidated": summary.invalidated,
+                    "unanswered": summary.unanswered,
+                    "question_waiting": summary.question_waiting,
+                    "unknown_outcome": summary.unknown_outcome,
+                    "by_connector": summary.by_connector,
+                    "other_routes": summary.other_routes,
+                    "mail": {
+                        "task_reviews": summary.mail_reviews,
+                        "send_decisions": summary.mail_sends,
+                        "by_bouncer": summary.mail_by_bouncer,
+                        "asked": summary.mail_asked,
+                    },
                     "asked_reasons": summary.reasons.iter().map(|(reason, count)| serde_json::json!({
                         "reason": reason,
                         "count": count,
@@ -1921,9 +1936,30 @@ fn decisions_log(cli: &Cli, mut args: Args) -> Outcome {
         return Ok(());
     }
     println!(
-        "Last {LOG_SUMMARY_DAYS} days: {} requests. The bouncer decided {}, remembered answers and patterns {}, you were asked {}, refused {}.",
-        summary.requests, summary.by_bouncer, summary.remembered, summary.asked, summary.refused
+        "Last {LOG_SUMMARY_DAYS} days: {} requests. The bouncer decided {}, remembered answers and patterns {}, you were asked {}, connector rules {}.",
+        summary.requests,
+        summary.by_bouncer,
+        summary.remembered,
+        summary.asked,
+        summary.by_connector
     );
+    println!(
+        "Results: {} allowed, {} denied, {} refused, {} timed out, {} invalidated, {} unanswered, {} question waiting, {} unknown.",
+        summary.allowed,
+        summary.denied,
+        summary.refused,
+        summary.timed_out,
+        summary.invalidated,
+        summary.unanswered,
+        summary.question_waiting,
+        summary.unknown_outcome
+    );
+    if summary.mail_reviews > 0 || summary.mail_sends > 0 {
+        println!(
+            "Mail tasks reviewed by the owner: {}. Of {} send decisions, Bouncer made {} and {} asked the owner.",
+            summary.mail_reviews, summary.mail_sends, summary.mail_by_bouncer, summary.mail_asked
+        );
+    }
     if !summary.reasons.is_empty() {
         println!();
         println!("Why Apassy asked you:");
@@ -1962,6 +1998,19 @@ struct LogSummary {
     remembered: u64,
     asked: u64,
     refused: u64,
+    allowed: u64,
+    denied: u64,
+    timed_out: u64,
+    invalidated: u64,
+    unanswered: u64,
+    question_waiting: u64,
+    unknown_outcome: u64,
+    by_connector: u64,
+    other_routes: u64,
+    mail_reviews: u64,
+    mail_sends: u64,
+    mail_by_bouncer: u64,
+    mail_asked: u64,
     /// The reason kinds of the questions, most first.
     reasons: Vec<(String, u64)>,
 }
@@ -1972,14 +2021,36 @@ impl LogSummary {
         let mut reasons = std::collections::BTreeMap::<String, u64>::new();
         for line in lines {
             summary.requests += 1;
+            match line.request.as_str() {
+                "mail_task_review" => summary.mail_reviews += 1,
+                "mail_send" => {
+                    summary.mail_sends += 1;
+                    summary.mail_by_bouncer += u64::from(line.route == "Bouncer");
+                    summary.mail_asked += u64::from(line.asked());
+                }
+                _ => {}
+            }
             match line.route.as_str() {
                 "Owner" => {
                     summary.asked += 1;
                     *reasons.entry(line.reason.clone()).or_default() += 1;
                 }
                 "Answer" | "Pattern" => summary.remembered += 1,
-                "Refused" => summary.refused += 1,
-                _ => summary.by_bouncer += 1,
+                "Bouncer" => summary.by_bouncer += 1,
+                "Connector" => summary.by_connector += 1,
+                "Refused" => {}
+                _ => summary.other_routes += 1,
+            }
+            use crate::decision_log::DecisionOutcome;
+            match line.outcome_kind() {
+                DecisionOutcome::Allowed => summary.allowed += 1,
+                DecisionOutcome::Denied => summary.denied += 1,
+                DecisionOutcome::Refused => summary.refused += 1,
+                DecisionOutcome::TimedOut => summary.timed_out += 1,
+                DecisionOutcome::Invalidated => summary.invalidated += 1,
+                DecisionOutcome::Unanswered => summary.unanswered += 1,
+                DecisionOutcome::QuestionWaiting => summary.question_waiting += 1,
+                DecisionOutcome::Unknown => summary.unknown_outcome += 1,
             }
         }
         summary.reasons = reasons.into_iter().collect();
@@ -2023,7 +2094,13 @@ fn print_log_line(line: &crate::decision_log::Line) {
     };
     let mut result = format!("  {route}");
     if !line.outcome.is_empty() && line.route == "Owner" {
-        let _ = write!(result, ", {}", line.outcome.replace('_', " "));
+        let outcome = line.outcome_kind();
+        let text = if outcome == crate::decision_log::DecisionOutcome::Unknown {
+            line.outcome.as_str()
+        } else {
+            outcome.as_str()
+        };
+        let _ = write!(result, ", {}", text.replace('_', " "));
     }
     if !line.answered_on.is_empty() {
         let _ = write!(result, " on {}", line.answered_on);
@@ -2192,6 +2269,90 @@ fn code_text(data: &Data) -> Option<zeroize::Zeroizing<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_summary_counts_routes_and_results_independently_including_legacy_results() {
+        let lines: Vec<_> = [
+            ("Bouncer", "allowed"),
+            ("Connector", "allowed"),
+            ("Answer", "allowed"),
+            ("Pattern", "allowed"),
+            ("Owner", "denied"),
+            ("Owner", "approval_denied"),
+            ("Owner", "timed_out"),
+            ("Owner", "approval_timeout"),
+            ("Owner", "approval_invalidated"),
+            ("Owner", "unanswered"),
+            ("Owner", "question_waiting"),
+            ("Refused", "refused"),
+            ("new_route", "future_outcome"),
+        ]
+        .into_iter()
+        .map(|(route, outcome)| crate::decision_log::Line {
+            route: route.into(),
+            outcome: outcome.into(),
+            reason: "Synthetic".into(),
+            ..crate::decision_log::Line::default()
+        })
+        .collect();
+        let summary = LogSummary::of(lines.iter());
+        assert_eq!(summary.requests, 13);
+        assert_eq!(
+            (
+                summary.by_bouncer,
+                summary.by_connector,
+                summary.remembered,
+                summary.asked,
+                summary.other_routes
+            ),
+            (1, 1, 2, 7, 1)
+        );
+        assert_eq!(
+            (
+                summary.allowed,
+                summary.denied,
+                summary.refused,
+                summary.timed_out
+            ),
+            (4, 2, 1, 2)
+        );
+        assert_eq!(
+            (
+                summary.invalidated,
+                summary.unanswered,
+                summary.question_waiting,
+                summary.unknown_outcome
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(summary.reasons, vec![("Synthetic".into(), 7)]);
+    }
+
+    #[test]
+    fn owner_task_review_stays_separate_from_model_and_unanswered_send_decisions() {
+        let lines = [
+            ("mail_task_review", "Owner", "allowed"),
+            ("mail_send", "Bouncer", "allowed"),
+            ("mail_send", "Owner", "timed_out"),
+            ("mail_send", "Refused", "invalidated"),
+        ]
+        .map(|(request, route, outcome)| crate::decision_log::Line {
+            request: request.into(),
+            route: route.into(),
+            outcome: outcome.into(),
+            ..Default::default()
+        });
+        let summary = LogSummary::of(lines.iter());
+        assert_eq!(
+            (
+                summary.mail_reviews,
+                summary.mail_sends,
+                summary.mail_by_bouncer,
+                summary.mail_asked
+            ),
+            (1, 3, 1, 1)
+        );
+    }
 
     #[test]
     fn shell_lines_set_and_clear_the_session() {

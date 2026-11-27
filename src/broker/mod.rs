@@ -21,6 +21,9 @@ pub mod finetune;
 pub mod heads_place;
 pub mod http;
 pub mod learning;
+mod mail_dispatch;
+mod mail_policy;
+pub mod mail_tasks;
 pub mod model_server;
 pub mod next_time;
 mod operations;
@@ -37,6 +40,7 @@ mod run;
 pub mod server;
 pub mod shadow;
 pub mod shell_risk;
+mod task_smtp;
 
 use std::sync::{Arc, Mutex};
 

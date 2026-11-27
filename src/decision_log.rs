@@ -100,7 +100,8 @@ pub struct Line {
     pub at: u64,
     /// The same time as text, for example `2026-11-03T14:20:01Z`.
     pub time: String,
-    /// `run`, `browser_fill`, or `connector`.
+    /// The request kind, such as `run`, `browser_fill`, `connector`,
+    /// `mail_task_access`, `mail_task_review`, or `mail_send`.
     pub request: String,
     pub agent: String,
     pub items: Vec<Item>,
@@ -153,10 +154,91 @@ pub struct Item {
     pub name: String,
 }
 
+/// The result of a request, independently of the route that decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionOutcome {
+    Allowed,
+    Denied,
+    Refused,
+    TimedOut,
+    Invalidated,
+    /// An older record says no answer, without saying why.
+    Unanswered,
+    QuestionWaiting,
+    Unknown,
+}
+
+impl DecisionOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Refused => "refused",
+            Self::TimedOut => "timed_out",
+            Self::Invalidated => "invalidated",
+            Self::Unanswered => "unanswered",
+            Self::QuestionWaiting => "question_waiting",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Older connector lines wrote response codes in the outcome field.
+    pub fn from_text(text: &str) -> Self {
+        match text {
+            "allowed" | "approved" | "approved_and_remembered" | "approved_and_granted" => {
+                Self::Allowed
+            }
+            "denied" | "approval_denied" => Self::Denied,
+            "refused" => Self::Refused,
+            "timed_out" | "approval_timeout" => Self::TimedOut,
+            "invalidated" | "approval_invalidated" => Self::Invalidated,
+            "unanswered" | "no_answer" => Self::Unanswered,
+            "question_waiting" => Self::QuestionWaiting,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Vault decisions predate distinct results. Keep an ambiguous old no-answer
+    /// record neutral instead of inferring a timeout or an invalidation.
+    pub fn of_decision(allowed: bool, decided_by: &str, code: &str) -> Self {
+        if allowed {
+            return Self::Allowed;
+        }
+        match Self::from_text(code) {
+            Self::Denied => return Self::Denied,
+            Self::TimedOut => return Self::TimedOut,
+            Self::Invalidated => return Self::Invalidated,
+            Self::QuestionWaiting => return Self::QuestionWaiting,
+            _ => {}
+        }
+        match decided_by {
+            "owner" => Self::Denied,
+            "no_answer" => Self::Unanswered,
+            _ => Self::Refused,
+        }
+    }
+}
+
 impl Line {
     /// The route asked the owner.
     pub fn asked(&self) -> bool {
         self.route == "Owner"
+    }
+
+    pub fn outcome_kind(&self) -> DecisionOutcome {
+        let outcome = DecisionOutcome::from_text(&self.outcome);
+        if outcome != DecisionOutcome::Unknown {
+            return outcome;
+        }
+        let coded = DecisionOutcome::from_text(&self.code);
+        if coded != DecisionOutcome::Unknown {
+            return coded;
+        }
+        if self.route == "Refused" {
+            DecisionOutcome::Refused
+        } else {
+            DecisionOutcome::Unknown
+        }
     }
 
     /// The same line with each text and list cut to its limit.
@@ -362,6 +444,54 @@ fn cut(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outcomes_keep_denials_separate_from_unanswered_and_refused_requests() {
+        use DecisionOutcome::*;
+        for (text, expected) in [
+            ("denied", Denied),
+            ("approval_denied", Denied),
+            ("approval_timeout", TimedOut),
+            ("timed_out", TimedOut),
+            ("approval_invalidated", Invalidated),
+            ("no_answer", Unanswered),
+            ("question_waiting", QuestionWaiting),
+            ("approved_and_remembered", Allowed),
+        ] {
+            let line = Line {
+                route: "Owner".into(),
+                outcome: text.into(),
+                ..Line::default()
+            };
+            assert_eq!(line.outcome_kind(), expected, "{text}");
+        }
+        assert_eq!(DecisionOutcome::of_decision(false, "owner", ""), Denied);
+        assert_eq!(
+            DecisionOutcome::of_decision(false, "rule", "not_granted"),
+            Refused
+        );
+        assert_eq!(
+            DecisionOutcome::of_decision(false, "no_answer", ""),
+            Unanswered
+        );
+        assert_eq!(
+            DecisionOutcome::of_decision(false, "no_answer", "approval_timeout"),
+            TimedOut
+        );
+        assert_eq!(
+            DecisionOutcome::of_decision(false, "no_answer", "approval_invalidated"),
+            Invalidated
+        );
+        assert_eq!(DecisionOutcome::of_decision(true, "owner", ""), Allowed);
+        assert_eq!(
+            Line {
+                route: "new_route".into(),
+                ..Line::default()
+            }
+            .outcome_kind(),
+            Unknown
+        );
+    }
 
     fn line(at: u64) -> Line {
         Line {

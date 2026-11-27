@@ -310,7 +310,8 @@ const POLICY_MODEL: &str = "; model ";
 pub struct DecisionWhy {
     /// The reason kind as `ReasonKind` prints with `{:?}`: `ForeignProject`.
     pub reason: String,
-    /// The wire code of a refusal by a check: `not_granted`.
+    /// The wire code for a refused check or an unsuccessful approval, such as
+    /// `not_granted`, `approval_denied`, or `approval_timeout`.
     pub code: String,
     /// The remembered answer that the question offered: `in_project:change` or
     /// `production:read`. Empty: none.
@@ -431,6 +432,14 @@ impl DecisionEntry {
     /// The owner denied this request.
     pub fn owner_denied(&self) -> bool {
         self.decided_by == DecidedBy::Owner && self.decision == LoggedDecision::Deny
+    }
+
+    pub fn outcome_kind(&self) -> crate::decision_log::DecisionOutcome {
+        crate::decision_log::DecisionOutcome::of_decision(
+            self.decision == LoggedDecision::Allow,
+            self.decided_by.stored(),
+            &self.why().code,
+        )
     }
 }
 

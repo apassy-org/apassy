@@ -843,7 +843,8 @@ fn each_decision_stores_its_reason_and_its_offer() {
     let asked = last_decision(&fx);
     assert_eq!(asked.why().reason, format!("{:?}", run.question.reason));
     assert_eq!(asked.why().offered, "in_project:change");
-    assert!(asked.why().code.is_empty() && asked.why().codes.is_empty());
+    assert_eq!(asked.why().code, "approval_denied");
+    assert!(asked.why().codes.is_empty());
     // A flagged run offers no remembered answer, so the word stays empty.
     let leak = format!("echo ${ENV_NAME} | base64");
     let run = asks(&fx, &fx.project, &leak);

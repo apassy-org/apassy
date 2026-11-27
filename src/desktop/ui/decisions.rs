@@ -837,7 +837,11 @@ pub(super) fn badge_count(app: &DesktopApp, pending: &[PendingRun]) -> usize {
                 .unwrap_or(0)
         })
         .unwrap_or(0);
-    pending.len() + remote_waiting(app).len() + open_requests(app) + access
+    pending.len()
+        + remote_waiting(app).len()
+        + open_requests(app)
+        + access
+        + super::mail_tasks::pending_count(app)
 }
 
 /// Everything that waits for the owner, in the order of the list.
@@ -1269,6 +1273,7 @@ pub(super) fn list_column(app: &mut DesktopApp, ui: &mut egui::Ui, pending: &[Pe
         app.ui.decisions.past = None;
     }
     super::owner_check_view::browser_question(app, ui);
+    super::mail_tasks::show(app, ui);
     if app.ui.decisions.routed && app.ui.decisions.selected.is_none() {
         columns::list_note(
             ui,

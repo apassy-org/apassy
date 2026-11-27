@@ -161,6 +161,9 @@ pub struct LogRow {
     pub request: String,
     pub asked: bool,
     pub allowed: bool,
+    /// The actual recorded use result, when present. A final access check can refuse
+    /// a request after the bouncer allowed it; `allowed` preserves that decision.
+    pub use_outcome: Option<crate::decision_log::DecisionOutcome>,
     /// `rule`, `model`, `pattern`, `owner` (asked you), `answer` (a remembered answer of
     /// yours, without a question), or `no_answer`.
     pub decided_by: String,
@@ -177,6 +180,25 @@ pub struct LogRow {
     pub flags: Vec<String>,
     /// The closed words of the decision (ADR 0046). Empty for an older row.
     pub why: DecisionWhy,
+}
+
+impl LogRow {
+    pub fn outcome_kind(&self) -> crate::decision_log::DecisionOutcome {
+        use crate::decision_log::DecisionOutcome;
+        let decision = DecisionOutcome::of_decision(self.allowed, &self.decided_by, &self.why.code);
+        match self.use_outcome {
+            Some(DecisionOutcome::Refused)
+                if matches!(
+                    decision,
+                    DecisionOutcome::Invalidated | DecisionOutcome::QuestionWaiting
+                ) =>
+            {
+                decision
+            }
+            Some(outcome) if outcome != DecisionOutcome::Unknown => outcome,
+            _ => decision,
+        }
+    }
 }
 
 /// The offset of the local time from UTC at `at`, in seconds, as macOS says it; 0 when
@@ -452,13 +474,20 @@ impl Vault {
                      SELECT d.id FROM decision_log d
                      WHERE (?1 IS NULL OR d.id < ?1)
                        AND (?3 IS NULL OR EXISTS (SELECT 1 FROM item_use p
-                            WHERE p.decision_log_id = d.id AND p.project_label = ?3))
+                            WHERE p.decision_log_id = d.id AND p.project_label = ?3)
+                            OR (d.policy LIKE '%; why MailTask%' AND
+                                (substr(d.project_dir, -length('/' || ?3)) = '/' || ?3
+                                 OR substr(d.project_dir, -length('/' || ?3 || '/.git')) = '/' || ?3 || '/.git')))
                      ORDER BY d.id DESC LIMIT ?2)
                  SELECT d.id, d.at, d.agent_id, d.agent_name, d.items, d.request, d.asked,
                         d.decision = 'allow', d.decided_by, d.wait_ms, d.declarations,
                         (SELECT r.relay_run_id FROM cloud_run r WHERE r.decision_log_id = d.id
                          ORDER BY r.at DESC LIMIT 1),
-                        u.project_label, u.answered_on, d.rule_flags, d.policy
+                        CASE WHEN u.project_label IS NULL AND d.policy LIKE '%; why MailTask%'
+                             THEN d.project_dir ELSE u.project_label END,
+                        u.answered_on, d.rule_flags, d.policy,
+                        (SELECT final.outcome FROM item_use final WHERE final.decision_log_id = d.id
+                         ORDER BY final.outcome = 'allowed', final.id DESC LIMIT 1)
                  FROM page JOIN decision_log d ON d.id = page.id
                  LEFT JOIN item_use u ON u.decision_log_id = d.id
                  ORDER BY d.id DESC, u.id ASC",
@@ -481,6 +510,7 @@ impl Vault {
             Option<String>,
             String,
             String,
+            Option<String>,
         );
         let rows = stmt
             .query_map(
@@ -503,6 +533,7 @@ impl Vault {
                         row.get(13)?,
                         row.get(14)?,
                         row.get(15)?,
+                        row.get(16)?,
                     ))
                 },
             )
@@ -526,6 +557,7 @@ impl Vault {
                 answered_on,
                 rule_flags,
                 policy,
+                use_outcome,
             ): Row = row.map_err(storage)?;
             let id = to_public_id(id)?;
             if let Some(last) = out.last_mut().filter(|last| last.decision_log_id == id) {
@@ -538,6 +570,20 @@ impl Vault {
                 continue;
             }
             let items: Vec<u64> = serde_json::from_str(&items).map_err(storage)?;
+            let why = DecisionWhy::of_policy(&policy);
+            let project = project_label.unwrap_or_default();
+            let project = if why.reason == "MailTask" {
+                let path = std::path::Path::new(&project);
+                let path = if path.file_name().is_some_and(|name| name == ".git") {
+                    path.parent().unwrap_or(path)
+                } else {
+                    path
+                };
+                path.file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+            } else {
+                project
+            };
             out.push(LogRow {
                 decision_log_id: id,
                 at: from_sql_time(at)?,
@@ -546,10 +592,12 @@ impl Vault {
                 item_id: items.first().copied(),
                 item_name: String::new(),
                 items,
-                project: project_label.unwrap_or_default(),
+                project,
                 request,
                 asked,
                 allowed,
+                use_outcome: use_outcome
+                    .map(|text| crate::decision_log::DecisionOutcome::from_text(&text)),
                 // A remembered answer is stored as `owner` without a question (schema 7).
                 decided_by: if decided_by == "owner" && !asked {
                     "answer".to_owned()
@@ -561,7 +609,7 @@ impl Vault {
                 relay_run: relay_run.map(to_public_id).transpose()?,
                 production: declares_production(&declarations),
                 flags: serde_json::from_str(&rule_flags).map_err(storage)?,
-                why: DecisionWhy::of_policy(&policy),
+                why,
             });
         }
         drop(stmt);
@@ -616,6 +664,40 @@ mod tests {
     const NOON: u64 = 1_793_707_200;
     const HOUR: u64 = 3_600;
     const D: u64 = 86_400;
+
+    #[test]
+    fn final_access_refusal_overrides_preliminary_allow_only_in_request_result() {
+        let mut fx = fixture();
+        let agent = fx.a;
+        let id = add(
+            &mut fx,
+            agent,
+            "Claude Code",
+            NOON - 10,
+            How::Model,
+            "final-check",
+            RequestKind::Run,
+        );
+        fx.vault.conn_ref().unwrap().execute(
+            "UPDATE item_use SET outcome = 'refused', decided_by = 'rule' WHERE decision_log_id = ?1",
+            [i64::try_from(id).unwrap()],
+        ).unwrap();
+        let rows = fx.vault.bouncer_log(None, 10, Some("final-check")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].allowed, "the bouncer decision remains an allowance");
+        assert_eq!(
+            rows[0].outcome_kind(),
+            crate::decision_log::DecisionOutcome::Refused
+        );
+        let stats = fx
+            .vault
+            .bouncer_stats_with_offset(NOON - 60, NOON, Some("final-check"), |_| 0)
+            .unwrap();
+        assert_eq!(
+            (stats.runs, stats.allowed_by_bouncer, stats.denied),
+            (1, 1, 0)
+        );
+    }
 
     fn api_key(title: &str) -> ItemDraft {
         ItemDraft {

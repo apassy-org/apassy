@@ -4,6 +4,93 @@ use crate::vault::bouncer_scopes::EvaluationConfirmation;
 use crate::vault::{Environment, Field, ItemDraft, Reversibility, RiskLevel, Scope, SecretValue};
 
 #[test]
+fn an_early_refusal_links_known_item_uses_to_its_decision_and_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("project");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db"), "synthetic-refusal-pass").unwrap();
+    vault.unlock("synthetic-refusal-pass").unwrap();
+    let item = vault
+        .add(ItemDraft {
+            title: "Synthetic refused key".into(),
+            kind: CredentialKind::ApiKey,
+            notes: String::new(),
+            tags: vec![],
+            fields: vec![Field {
+                name: "token".into(),
+                value: SecretValue::new("FAKE-refused-secret-012345".into()),
+                secret: true,
+            }],
+        })
+        .unwrap();
+    let (_, token) = vault.register_agent("Synthetic refused agent").unwrap();
+    // The agent cannot see this known item. An unknown item gets no item-use row.
+    let items = [item.id, item.id + 10_000];
+    let command = vec!["echo".into(), "FAKE-refused-secret-012345".into()];
+    let request = RunRequest {
+        access_request_id: None,
+        items: &items,
+        codes: &[],
+        command: &command,
+        cwd: cwd.to_str().unwrap(),
+        purpose: "Synthetic refusal check",
+        path: Some("/usr/bin:/bin"),
+        user_request: Some("Synthetic refusal check"),
+        host_session: None,
+    };
+    let ctx = BrokerContext {
+        vault: Arc::new(std::sync::Mutex::new(Some(vault))),
+        tls: super::super::http::TlsClient::platform().unwrap(),
+        approvals: Arc::new(super::super::approvals::ApprovalQueue::new()),
+        approval_timeout: std::time::Duration::from_secs(1),
+        run_timeout: std::time::Duration::from_secs(1),
+        bouncer: None,
+        model_gate: None,
+        prompts: Arc::new(super::super::prompts::PromptStore::new(vec![])),
+    };
+    let response = evaluate(&ctx, token.expose(), &request);
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "not_granted");
+    let guard = lock(&ctx.vault);
+    let vault = guard.as_ref().unwrap();
+    let decisions = vault.decision_log().unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(
+        decisions[0].entry.outcome_kind(),
+        crate::decision_log::DecisionOutcome::Refused
+    );
+    let uses = vault.uses_of_decision(decisions[0].id).unwrap();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].item_id, item.id);
+    assert_eq!(uses[0].outcome, UseOutcome::Refused);
+    assert_eq!(uses[0].project_label, "project");
+    assert!(
+        !uses[0]
+            .command_summary
+            .contains("FAKE-refused-secret-012345")
+    );
+    let rows = vault.bouncer_log(None, 10, Some("project")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].outcome_kind(),
+        crate::decision_log::DecisionOutcome::Refused
+    );
+    let now = learning::now();
+    let stats = vault
+        .bouncer_stats(now.saturating_sub(60), now + 1, Some("project"))
+        .unwrap();
+    assert_eq!(
+        (
+            stats.runs,
+            stats.denied,
+            stats.asked,
+            stats.allowed_by_bouncer
+        ),
+        (1, 1, 0, 0)
+    );
+}
+
+#[test]
 fn browser_login_does_not_claim_read_only_production_semantics() {
     let command = vec![
         "apassy-browser-fill".into(),
