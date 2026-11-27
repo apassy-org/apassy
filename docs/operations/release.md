@@ -428,12 +428,12 @@ not automatically publish (Release accepts push CI runs only). A main push with 
 produces the usual publishable push artifact.
 
 Measured on 2026-11-01 via `gh run view --json jobs`: push CI
-[41311544688](https://github.com/wydrox/apassy/actions/runs/41311544688) spent 7m00s
+[41311544688](https://github.com/apassy-org/apassy/actions/runs/41311544688) spent 7m00s
 in `macos`, 9m23s–10m01s in macOS test shards, 12m55s in the longest Linux shard,
 and 3m11s in `release-binaries`. Its eleven reusable jobs totalled 74m28s of runner
 time. With a matching tree, the critical path would be about 3m11s plus lookup
 and queue overhead instead of 12m57s: roughly 9m46s saved before Release.
-PR CI [41309938571](https://github.com/wydrox/apassy/actions/runs/41309938571)
+PR CI [41309938571](https://github.com/apassy-org/apassy/actions/runs/41309938571)
 also showed queue sensitivity: its macOS jobs started up to 9m27s after creation.
 These are estimates from existing jobs, not measurements of the new path; runner
 queues, mutable dependencies and advisory data can change. Reuse does not refresh
@@ -460,7 +460,7 @@ The site workflow also runs the eligibility helper before deployment. An ineligi
 ## Relay releases
 
 Use `crates/apassy-relay/docs/OPERATIONS.md` (ADR 0037; the production deployment
-files stay in the archived private `wydrox/apassy-relay`). Build images
+files stay in the archived private `apassy-org/apassy-relay`). Build images
 and CLI artifacts in GitHub CI; never build or run development/test containers
 on the production VPS. Production deployment requires separate owner approval of
 the exact image and backup. Historical schema-17 vault and schema-4 relay deploy
@@ -541,43 +541,51 @@ Always give the signer workflow and the
 source ref or commit. `--repo` alone also accepts a test build of a branch (`provider-check`),
 which is attested too.
 
+The repository moved from `wydrox/apassy` to `apassy-org/apassy` on 2026-11-27. Builds up to
+0.5.20 were attested before the move, and their attestations stay with the account `wydrox`:
+`--repo apassy-org/apassy` does not find them. For such a build, replace `--repo apassy-org/apassy`
+with `--owner wydrox`, and `apassy-org/apassy` in `--signer-workflow` with `wydrox/apassy`. For
+example, `gh attestation verify latest.json --owner wydrox --signer-workflow
+wydrox/apassy/.github/workflows/release.yml --source-ref refs/heads/main` verifies the
+`latest.json` of 0.5.20.
+
 ```sh
 # The Mac disk image, downloaded from https://apassy.wyderka.cc/download
-gh attestation verify Apassy-0.5.16.dmg --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/release.yml \
+gh attestation verify Apassy-0.5.16.dmg --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/release.yml \
   --source-ref refs/heads/main --deny-self-hosted-runners
 
 # latest.json and macos-binaries.json: the same command with that file.
 
 # Its SBOM: the same command with the SPDX predicate type. --format json prints the SBOM.
-gh attestation verify Apassy-0.5.16.dmg --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/release.yml \
+gh attestation verify Apassy-0.5.16.dmg --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/release.yml \
   --source-ref refs/heads/main --predicate-type https://spdx.dev/Document/v2.3
 
 # The extension zip of the GitHub release
-gh attestation verify apassy-extension-0.5.16.zip --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/extension-package.yml \
+gh attestation verify apassy-extension-0.5.16.zip --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/extension-package.yml \
   --source-ref refs/heads/main
 
 # The Linux node packages, the Linux CLI, and the relay image tarball: the commit is in
 # release-linux-<arch>.json, release-linux.json, and relay-image.release.json. The
 # source ref is the image-* tag.
-gh attestation verify apassy_0.5.17_amd64.deb --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+gh attestation verify apassy_0.5.17_amd64.deb --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
-gh attestation verify apassy-vault_0.5.20_amd64.deb --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+gh attestation verify apassy-vault_0.5.20_amd64.deb --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
-gh attestation verify apassy-team-linux-x86_64 --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+gh attestation verify apassy-team-linux-x86_64 --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
-gh attestation verify relay-image.tar.gz --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml \
+gh attestation verify relay-image.tar.gz --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/relay-image.yml \
   --source-digest COMMIT
 
 # The iPhone build record; then compare its commit and version with the release
-gh attestation verify apassy-ios-0.5.16-BUILD.json --repo wydrox/apassy \
-  --signer-workflow wydrox/apassy/.github/workflows/ios-build-record.yml \
+gh attestation verify apassy-ios-0.5.16-BUILD.json --repo apassy-org/apassy \
+  --signer-workflow apassy-org/apassy/.github/workflows/ios-build-record.yml \
   --source-ref refs/heads/main
 ```
 

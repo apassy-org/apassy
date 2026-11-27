@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/wydrox/apassy/actions/workflows/ci.yml"><img src="https://github.com/wydrox/apassy/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="https://github.com/wydrox/apassy/releases"><img src="https://img.shields.io/github/v/release/wydrox/apassy?label=release&color=0a77fe" alt="Latest release" /></a>
+  <a href="https://github.com/apassy-org/apassy/actions/workflows/ci.yml"><img src="https://github.com/apassy-org/apassy/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/apassy-org/apassy/releases"><img src="https://img.shields.io/github/v/release/apassy-org/apassy?label=release&color=0a77fe" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/macOS-15%2B%20%C2%B7%20Apple%20silicon-0e1820" alt="macOS 15 or later on Apple silicon" />
   <img src="https://img.shields.io/badge/Rust-1.97-0e1820" alt="Rust 1.97" />
 </p>
@@ -120,7 +120,7 @@ It needs macOS 15 on Apple silicon, Xcode or its Command Line Tools, [rustup](ht
 You need Xcode, Rust 1.97 (`rust-toolchain.toml` selects it), and an Apple Development signing identity.
 
 ```sh
-git clone https://github.com/wydrox/apassy && cd apassy
+git clone https://github.com/apassy-org/apassy && cd apassy
 scripts/build-app.sh                              # builds, signs, and checks target/Apassy.app
 cargo test --locked --all-features                # the test suite
 ```

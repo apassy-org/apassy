@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/wydrox/apassy/main/packs/schema/provider.schema.json",
+  "$id": "https://raw.githubusercontent.com/apassy-org/apassy/main/packs/schema/provider.schema.json",
   "title": "Apassy provider file, schema version 1",
   "description": "One API provider (Stripe, GitHub, ...) for the declaration suggestions and the known hosts of the bouncer, or the general signals file. The files are in packs/providers/. The file name is <id>.json. This schema checks the structure. The loader in src/vault/providers.rs is the authority: `apassy-packs validate <file>` runs it. See docs/operations/declarations.md.",
   "type": "object",

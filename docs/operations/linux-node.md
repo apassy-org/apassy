@@ -35,7 +35,7 @@ Exit codes: 0 success; 1 a check failed (`doctor`) or the node did not start; 2 
 - `curl -fsSL https://apassy-relay.wyderka.cc/install.sh | sh` checks the SHA-256 of the tarball for this machine against `SHA256SUMS` and installs `apassy` and `apassy-team` into `~/.local/bin` (`APASSY_INSTALL_DIR` changes it). It never runs as root unless `APASSY_INSTALL_AS_ROOT=1`.
 - The tarball holds `apassy`, `apassy-team` (a shell shim that runs `apassy team` from the same directory), `apassy-node.service` (the unit template), `LICENSE`, `NOTICE`, `README.md`, and `licenses/`.
 - The `.deb` installs `/usr/bin/apassy`, `/usr/bin/apassy-team`, `/usr/lib/systemd/user/apassy-node.service`, and `/usr/share/doc/apassy/`. It starts nothing: each user who runs a node runs `apassy up`.
-- Check a download: `sha256sum -c --ignore-missing SHA256SUMS`, and its build attestation: `gh attestation verify <file> --repo wydrox/apassy --signer-workflow wydrox/apassy/.github/workflows/relay-image.yml` ([release](release.md), "Attestations and SBOMs").
+- Check a download: `sha256sum -c --ignore-missing SHA256SUMS`, and its build attestation: `gh attestation verify <file> --repo apassy-org/apassy --signer-workflow apassy-org/apassy/.github/workflows/relay-image.yml` ([release](release.md), "Attestations and SBOMs"; builds up to 0.5.20: `--owner wydrox` and `wydrox/apassy` in the signer workflow).
 
 ## Use a separate user for the node
 
@@ -102,7 +102,7 @@ Back up the whole directory, the key with it: without the key the node cannot op
 ```ini
 [Unit]
 Description=Apassy node
-Documentation=https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md
+Documentation=https://github.com/apassy-org/apassy/blob/main/docs/operations/linux-node.md
 
 [Service]
 Type=simple

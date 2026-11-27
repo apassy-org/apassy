@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 license = "Apache-2.0"
-repository = "https://github.com/wydrox/apassy"
+repository = "https://github.com/apassy-org/apassy"
 description = "The team relay of Apassy: a team vault, a decision per run, and a reverse proxy that swaps placeholders"
 
 [dependencies]

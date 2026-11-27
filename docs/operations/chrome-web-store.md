@@ -42,7 +42,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 - **Summary:** from the manifest: "Fill, save, and create logins from the Apassy app on your computer. Apassy's settings control how often fills ask you to confirm." (platform-neutral since unit L7: the extension also serves the Linux app).
 - **Category:** Privacy & Security, or Productivity › Tools if the dashboard has no such category.
 - **Language:** English.
-- **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/wydrox/apassy/issues>.
+- **Homepage:** <https://apassy.wyderka.cc>. **Support:** <https://github.com/apassy-org/apassy/issues>.
 - **Images:** the 128 × 128 icon, the 440 × 280 promotional tile, and the screenshots (1280 × 800) in `design/store/chrome-web-store/`.
 - **Description** (the first upload was rejected on 2026-10-08 for "excessive keywords" because the text listed six browsers; name no browsers in it):
 
@@ -67,7 +67,7 @@ Done on 2026-10-08: the draft item is `bbnpgnjnfjlbgggmpnhejpmfjhmmhiih` of the 
 
   Site access is optional: field suggestions run on sites you enable, including supported same-origin frames; passkey scripts run in the top frame on granted sites. Toolbar actions remain available without permanent site access. Turning a feature off stops its scripts; browser extension settings let you revoke site access.
 
-  Open source: https://github.com/wydrox/apassy
+  Open source: https://github.com/apassy-org/apassy
   ```
 
 ## 4. Privacy tab

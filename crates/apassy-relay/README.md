@@ -4,7 +4,7 @@ The team relay of Apassy. It is a credential manager with a bouncer for AI agent
 
 A team keeps shared credentials on the relay, but the relay never stores a readable value. Each value is sealed on the owner's machine, and its key stays there. An agent asks for a run. The owner's machine (`apassy-team host`) decides, and for a run that it agrees to, it sends the relay the keys of that run's items, sealed to a one-time key of that run. The relay opens the values in memory for that session only. The agent gets placeholders and base URLs that point at the relay. The relay proxies the agent's requests to the real API host. It puts the real value only in an auth position, only for the hosts of that item. The agent never holds a real value.
 
-This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 0013 of the [core](https://github.com/wydrox/apassy), way B.
+This is an alpha. The design is in [docs/SPEC.md](docs/SPEC.md). It follows ADR 0013 of the [core](https://github.com/apassy-org/apassy), way B.
 
 ## What it does
 
@@ -42,7 +42,7 @@ operator reference is section 29 of [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## License
 
-The relay is Apache-2.0, like the rest of this repository (see the [LICENSE](../../LICENSE) at the root). Versions up to 0.5.13 were published under FSL-1.1-ALv2 in the private `wydrox/apassy-relay` repository; on 2026-11-02 the copyright holder relicensed the whole history under Apache-2.0 and moved it here ([ADR 0037](../../docs/adr/0037-own-relay-open-source.md)).
+The relay is Apache-2.0, like the rest of this repository (see the [LICENSE](../../LICENSE) at the root). Versions up to 0.5.13 were published under FSL-1.1-ALv2 in the private `apassy-org/apassy-relay` repository; on 2026-11-02 the copyright holder relicensed the whole history under Apache-2.0 and moved it here ([ADR 0037](../../docs/adr/0037-own-relay-open-source.md)).
 
 ## Quick start
 

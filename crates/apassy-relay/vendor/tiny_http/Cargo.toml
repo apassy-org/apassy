@@ -46,7 +46,7 @@ version = "0.4.4"
 # Apassy (APASSY-PATCH.md): the TLS features and their optional dependencies (openssl,
 # rustls 0.20, rustls-pemfile, zeroize) and the dev-dependencies are removed. The relay
 # serves plain HTTP behind its TLS front and never enables them, and as a member of the
-# wydrox/apassy workspace this crate would otherwise lock all of them. The feature names
+# apassy-org/apassy workspace this crate would otherwise lock all of them. The feature names
 # stay, empty, so the upstream `cfg(feature = ...)` code keeps compiling out.
 [features]
 default = []

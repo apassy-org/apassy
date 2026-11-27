@@ -116,4 +116,4 @@ Use one feature set for everyday commands, `--all-features`, the set that CI tes
 
 ## Where to ask
 
-GitHub Issues at <https://github.com/wydrox/apassy/issues>: bugs, questions, and proposals. Search first. For a weakness, use [SECURITY.md](SECURITY.md).
+GitHub Issues at <https://github.com/apassy-org/apassy/issues>: bugs, questions, and proposals. Search first. For a weakness, use [SECURITY.md](SECURITY.md).

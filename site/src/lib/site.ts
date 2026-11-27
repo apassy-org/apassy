@@ -1,6 +1,6 @@
 import changelog from "../../../CHANGELOG.md?raw";
 
-export const REPO = "https://github.com/wydrox/apassy";
+export const REPO = "https://github.com/apassy-org/apassy";
 /** The Worker redirects it to the versioned image, `/download/Apassy-<version>.dmg`. */
 export const DOWNLOAD = "/download";
 /** The browser extension in the Chrome Web Store (ADR 0021, D5). */

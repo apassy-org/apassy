@@ -3,7 +3,7 @@
 Date: 2026-11-10 (rewritten for ADR 0037 stage 7; the relay of 2026-10-01 is in "Until the cutover").
 Scope: what runs at `apassy-relay.wyderka.cc`, what it stores, and what it never holds. Decisions: [ADR 0037](../adr/0037-own-relay-open-source.md) stage 7, D2, D3, D7, D8, D14; [ADR 0019](../adr/0019-relay-teams-and-accounts.md). The owner's runbook, with the cutover and the rollback: [connect.md](connect.md).
 
-The relay is the crate `crates/apassy-relay` of this repository (Apache-2.0, ADR 0037 stage 1). Its specification is `crates/apassy-relay/docs/SPEC.md` and its operator reference `crates/apassy-relay/docs/OPERATIONS.md`. The production deployment files and the health monitor stay in the archived private repository `wydrox/apassy-relay`, with the server addresses.
+The relay is the crate `crates/apassy-relay` of this repository (Apache-2.0, ADR 0037 stage 1). Its specification is `crates/apassy-relay/docs/SPEC.md` and its operator reference `crates/apassy-relay/docs/OPERATIONS.md`. The production deployment files and the health monitor stay in the archived private repository `apassy-org/apassy-relay`, with the server addresses.
 
 **Status.** The code of Connect is built (plan s7, units C1 to C5, not yet released). The hosted service runs in `relay` mode until the owner runs the cutover of release R3 ([connect.md](connect.md), section 9); this page describes it after that step, and "Until the cutover" keeps the facts of the hosted relay before it.
 

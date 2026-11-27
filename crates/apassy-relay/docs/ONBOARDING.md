@@ -12,7 +12,7 @@ It also serves the downloads of this CLI.
 
 Team vaults work on a relay that you run yourself.
 They are on by default there (`APASSY_RELAY_TEAM_VAULTS=1`).
-To run a relay, follow [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md).
+To run a relay, follow [Running apassy-relay](https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md).
 Later, a team host runs on an Apassy node on your own machine (ADR 0037, stage 4).
 
 In the commands below, replace `RELAY_URL` with the address of your relay, for example `https://relay.example.com`.
@@ -41,7 +41,7 @@ It does not use `sudo`.
 ## Create a team (owner)
 
 Get a one-time team code from the operator of your relay.
-If you run the relay, make the code on its server with `apassy-relay admin team-code --hours 72 > team-code-file` (section 17 of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
+If you run the relay, make the code on its server with `apassy-relay admin team-code --hours 72 > team-code-file` (section 17 of [Running apassy-relay](https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
 The code starts with `apassy_tcd_`.
 Save the code in `team-code-file`.
 Replace `NAME` with the team name.
@@ -420,7 +420,7 @@ The operator cannot read stored item values without the item keys.
 Stored item values stay sealed with keys on the key-holder machine.
 The relay opens item values in memory for a run that the host permits.
 
-A TLS proxy in front of the relay sees traffic in clear. With the setup of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md), that is Cloudflare.
+A TLS proxy in front of the relay sees traffic in clear. With the setup of [Running apassy-relay](https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md), that is Cloudflare.
 Old settings can retain invalid legacy member tokens in plain text after enrollment.
 Device access tokens stay only in process memory.
 Item keys remain plain text in `keys.json`.
@@ -434,13 +434,13 @@ The operator cannot add an owner device through the relay.
 
 The key-holder host must be online for every run.
 This is an alpha with no SLA.
-Make backups of the relay with `apassy-relay admin backup` (section 13 of [Running apassy-relay](https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
+Make backups of the relay with `apassy-relay admin backup` (section 13 of [Running apassy-relay](https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md)).
 You must also make a backup of the host's `keys.json` file.
 
 ## Get help
 
 Contact the operator of your relay.
-Report a bug in Apassy at <https://github.com/wydrox/apassy/issues>.
+Report a bug in Apassy at <https://github.com/apassy-org/apassy/issues>.
 
 
 ## Script output and installer updates

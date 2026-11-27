@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.97"
 publish = false
 license = "Apache-2.0"
-repository = "https://github.com/wydrox/apassy"
+repository = "https://github.com/apassy-org/apassy"
 description = "The Apassy desktop, interactive owner command line, and node on macOS and Linux"
 
 [features]

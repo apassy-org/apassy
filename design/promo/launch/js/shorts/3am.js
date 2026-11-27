@@ -159,7 +159,7 @@ scene({
       this.tag.appendChild(document.createTextNode(' '));
       this.tagW.push(s);
     });
-    this.cta = el('div', 'cta', this.group, `${ic('arrowR', '', 2.2)}<span>github.com/wydrox/apassy</span>`);
+    this.cta = el('div', 'cta', this.group, `${ic('arrowR', '', 2.2)}<span>github.com/apassy-org/apassy</span>`);
     this.sub = el('div', 'ctasub', this.group, 'For macOS · Works with Claude Code and Codex');
   },
   render(lt) {

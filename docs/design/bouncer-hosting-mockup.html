@@ -547,7 +547,7 @@ svg{display:block}
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>The token is shown only here. Apassy keeps it in the vault on this Mac.</span></div><span class="pb">Paste a Token</span></div>
       </div>
       <div class="grp">
-        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/wydrox/apassy-brain:0.5.17</div>
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/apassy-org/apassy-brain:0.5.17</div>
           <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb"><svg><use href="#i-copy"/></svg>Copy Commands</span></div></div>
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.</span></div></div>
       </div>
@@ -567,7 +567,7 @@ svg{display:block}
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>The token is shown only here. Apassy keeps it in the vault on this Mac.</span></div><span class="pb">Paste a Token</span></div>
       </div>
       <div class="grp">
-        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/wydrox/apassy-brain:0.5.17</div>
+        <div class="fr top" style="flex-direction:column;align-items:stretch;gap:8px"><div class="cmdbox">install -d -m 0700 ~/apassy-brain<br>cat &gt; ~/apassy-brain/token<br>chmod 0644 ~/apassy-brain/token<br>docker run -d --name apassy-brain --restart unless-stopped -p 127.0.0.1:8770:8770 -v apassy-brain-data:/data -v ~/apassy-brain/token:/run/secrets/brain-token:ro -e LAYA_API_KEY_FILE=/run/secrets/brain-token ghcr.io/apassy-org/apassy-brain:0.5.17</div>
           <div style="display:flex;gap:6px;justify-content:flex-end"><span class="pb"><svg><use href="#i-copy"/></svg>Copy Commands</span></div></div>
         <div class="fr"><div class="tn" style="flex:1;color:var(--sec)"><span>Run these on your server. At the cat line, paste the token, press Return, then Control-D. The token never goes on a command line.</span></div></div>
       </div>

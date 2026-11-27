@@ -66,7 +66,7 @@
     <section aria-labelledby="which-relay">
       <h2 id="which-relay">Which relay</h2>
       <p>The hosted relay <code>https://apassy-relay.wyderka.cc</code> no longer serves team vaults (since Apassy 0.5.14). It refuses runs, remote MCP, the proxy, access requests, and new team-vault content with <code>410 team_vaults_retired</code>. It still serves the Apassy app: vault sync between your devices, approvals on the iPhone, the feed, and push. It also serves the downloads of this CLI.</p>
-      <p>Team vaults work on a relay that you run yourself. They are on by default there (<code>APASSY_RELAY_TEAM_VAULTS=1</code>). To run a relay, follow <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>. Later, a team host runs on an Apassy node on your own machine (ADR 0037, stage 4).</p>
+      <p>Team vaults work on a relay that you run yourself. They are on by default there (<code>APASSY_RELAY_TEAM_VAULTS=1</code>). To run a relay, follow <a href="https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>. Later, a team host runs on an Apassy node on your own machine (ADR 0037, stage 4).</p>
       <p>In the commands below, replace <code>RELAY_URL</code> with the address of your relay, for example <code>https://relay.example.com</code>.</p>
     </section>
     <section aria-labelledby="install">
@@ -79,7 +79,7 @@ sh install.sh</code></pre>
     </section>
     <section aria-labelledby="create-a-team-owner">
       <h2 id="create-a-team-owner">Create a team (owner)</h2>
-      <p>Get a one-time team code from the operator of your relay. If you run the relay, make the code on its server with <code>apassy-relay admin team-code --hours 72 &gt; team-code-file</code> (section 17 of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). The code starts with <code>apassy_tcd_</code>. Save the code in <code>team-code-file</code>. Replace <code>NAME</code> with the team name. Replace <code>OWNERNAME</code> with the owner&#x27;s name.</p>
+      <p>Get a one-time team code from the operator of your relay. If you run the relay, make the code on its server with <code>apassy-relay admin team-code --hours 72 &gt; team-code-file</code> (section 17 of <a href="https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). The code starts with <code>apassy_tcd_</code>. Save the code in <code>team-code-file</code>. Replace <code>NAME</code> with the team name. Replace <code>OWNERNAME</code> with the owner&#x27;s name.</p>
       <pre><code class="language-sh">apassy-team create --relay RELAY_URL --team &quot;NAME&quot; \
   --name OWNERNAME --device &quot;Owner laptop&quot; &lt; team-code-file
 apassy-team me</code></pre>
@@ -209,13 +209,13 @@ apassy-team host status</code></pre>
     <section aria-labelledby="what-the-alpha-does-not-protect">
       <h2 id="what-the-alpha-does-not-protect">What the alpha does not protect</h2>
       <p>The operator of your relay, or root on its server, can read each team&#x27;s metadata. This includes team, member, collection, and item names, hosts, commands, and audit records. The operator cannot read stored item values without the item keys. Stored item values stay sealed with keys on the key-holder machine. The relay opens item values in memory for a run that the host permits.</p>
-      <p>A TLS proxy in front of the relay sees traffic in clear. With the setup of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>, that is Cloudflare. Old settings can retain invalid legacy member tokens in plain text after enrollment. Device access tokens stay only in process memory. Item keys remain plain text in <code>keys.json</code>. With file storage, anyone who reads a device key file can use that device until revocation. Protect these files and the key-holder machine.</p>
+      <p>A TLS proxy in front of the relay sees traffic in clear. With the setup of <a href="https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>, that is Cloudflare. Old settings can retain invalid legacy member tokens in plain text after enrollment. Device access tokens stay only in process memory. Item keys remain plain text in <code>keys.json</code>. With file storage, anyone who reads a device key file can use that device until revocation. Protect these files and the key-holder machine.</p>
       <p>Safety words do not protect against the relay operator or a party in the network path. Always get the words from the person with the new device before confirmation. Keep two owners with separate devices to reduce the risk of losing all owner access. The operator cannot add an owner device through the relay.</p>
-      <p>The key-holder host must be online for every run. This is an alpha with no SLA. Make backups of the relay with <code>apassy-relay admin backup</code> (section 13 of <a href="https://github.com/wydrox/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). You must also make a backup of the host&#x27;s <code>keys.json</code> file.</p>
+      <p>The key-holder host must be online for every run. This is an alpha with no SLA. Make backups of the relay with <code>apassy-relay admin backup</code> (section 13 of <a href="https://github.com/apassy-org/apassy/blob/main/crates/apassy-relay/docs/OPERATIONS.md">Running apassy-relay</a>). You must also make a backup of the host&#x27;s <code>keys.json</code> file.</p>
     </section>
     <section aria-labelledby="get-help">
       <h2 id="get-help">Get help</h2>
-      <p>Contact the operator of your relay. Report a bug in Apassy at <a href="https://github.com/wydrox/apassy/issues">https://github.com/wydrox/apassy/issues</a>.</p>
+      <p>Contact the operator of your relay. Report a bug in Apassy at <a href="https://github.com/apassy-org/apassy/issues">https://github.com/apassy-org/apassy/issues</a>.</p>
     </section>
   </main>
 </body>

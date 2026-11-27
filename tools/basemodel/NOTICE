@@ -1,11 +1,11 @@
-Apassy bouncer brain image (ghcr.io/wydrox/apassy-brain)
+Apassy bouncer brain image (ghcr.io/apassy-org/apassy-brain)
 Copyright 2026 Rafal Wyderka and the Apassy contributors.
 
 This image contains software and model weights under the Apache License,
 Version 2.0. The license text is in /opt/apassy/licenses/LICENSE.
 
 1. Apassy server code: tools/basemodel/*.py and tools/finetune/local_train.py of
-   https://github.com/wydrox/apassy, Apache-2.0.
+   https://github.com/apassy-org/apassy, Apache-2.0.
 
 2. Laya base checkpoint: convaiinnovations/laya on Hugging Face, revision
    55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851 (files rl_agent_config.json,

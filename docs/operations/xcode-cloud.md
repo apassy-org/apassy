@@ -16,7 +16,7 @@ the pinned Rust 1.97.0 toolchain. Complete exported logs contained exactly one
 matching JSON receipt and the subsequent `BUILD SUCCEEDED` result. Compute-hour
 consumption was not exposed in the inspected native reports or logs.
 
-GitHub run [42020717024](https://github.com/wydrox/apassy/actions/runs/42020717024)
+GitHub run [42020717024](https://github.com/apassy-org/apassy/actions/runs/42020717024)
 ran the same helper successfully on that exact source SHA: 202.807 seconds,
 arm64, Xcode 16.4, macOS SDK 15.5 and watch SDK 11.5. Cloud included four extra
 bootstrap steps. SDK versions and cache conditions differ, so these raw durations

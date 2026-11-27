@@ -8,7 +8,7 @@
 #
 #   1. checks the Mac: macOS 15 or later on Apple silicon, git and Swift (Xcode or
 #      the Command Line Tools), rustup, and an "Apple Development" signing identity;
-#   2. clones the newest release of https://github.com/wydrox/apassy, or updates the
+#   2. clones the newest release of https://github.com/apassy-org/apassy, or updates the
 #      clone, in ~/Library/Caches/apassy/src;
 #   3. runs scripts/build-app.sh of that release: it builds the app, signs it with
 #      your identity, and runs its checks;
@@ -35,7 +35,7 @@
 #                         sandbox protects only /Applications/Apassy.app.
 set -euo pipefail
 
-REPO_URL="https://github.com/wydrox/apassy"
+REPO_URL="https://github.com/apassy-org/apassy"
 # The Linux downloads and their installer (crates/apassy-relay/deploy/worker/public/install.sh).
 RELAY_URL="https://apassy-relay.wyderka.cc"
 DOCS_URL="$REPO_URL/blob/main/docs/operations/daily-use.md"

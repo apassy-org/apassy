@@ -1,7 +1,7 @@
 //! Track proxy: the connection to an upstream host and its response head.
 //!
 //! The TLS client follows `TlsClient::build` of `src/broker/http.rs` and the
-//! `open_service` handshake of `src/broker/proxy/mod.rs` of wydrox/apassy at rev
+//! `open_service` handshake of `src/broker/proxy/mod.rs` of apassy-org/apassy at rev
 //! 77f6628 (Apache-2.0): rustls with ring, the platform verifier, and a finished
 //! handshake before the first request byte.
 //!
