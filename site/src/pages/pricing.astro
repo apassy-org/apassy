@@ -23,6 +23,7 @@ const free = [
   { what: "Approvals away from the Mac", how: "The iPhone and the Apple Watch reach your own Mac over your tailnet or your local network." },
   { what: "Shared vaults", how: "For a family or a team, on a host that you run, or as a synced file in a shared folder." },
   { what: "Agents on other machines", how: "Linked environments and a route to your own Mac for agents in the cloud." },
+  { what: "Public links", how: "Share a secret or a folder with a link from a relay that you run yourself. It has no limit on links." },
   { what: "Push notifications", how: "Through the push gateway of the Apassy project, for everyone, also when you host the rest yourself." },
 ];
 
@@ -30,6 +31,7 @@ const sees = [
   { fn: "Reachability without Tailscale: a byte relay, with TLS end to end between your devices, pinned to your Mac's own certificate", sees: "TLS records, sizes, and times" },
   { fn: "A public name of your Mac for agents in the cloud, through the same relay", sees: "TLS records, sizes, and times. As with a Tailscale Funnel name, whoever runs Connect or controls the DNS of the name could get a certificate for it and then read those agents' requests. Your own devices do not depend on this." },
   { fn: "An always-on sync home: a blind store for the encrypted copy of a vault", sees: "Ciphertext, sizes, and times" },
+  { fn: "Public links: the sealed copy of what you share", sees: "Ciphertext, sizes, times, and counts of opens. Never the key: it is only in the link. For a link of e-mail addresses, the reader's address while Connect mails the code." },
   { fn: "The hosted bouncer brain, only if you turn it on", sees: "The command and the task of each question to the brain. Never a credential value." },
   { fn: "Support", sees: "What you send" },
 ];
@@ -102,6 +104,10 @@ const sees = [
         <li>
           You buy Connect in Apassy on your Mac or Linux computer (Settings › Connect), through a web checkout. The iPhone
           shows your plan only. There are no in-app purchases.
+        </li>
+        <li>
+          Every Connect account can make public links, also an account without a plan: 25 live links, or 100 on Team.
+          Each link lives at most 30 days, 7 days by default. A relay that you run yourself has no limit.
         </li>
         <li>A Connect account never adds a device by itself. You confirm each new device on one that you already have.</li>
       </ul>
