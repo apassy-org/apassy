@@ -4,7 +4,7 @@ Apassy holds credentials and decides what an agent may do with them. A weakness 
 
 ## Report a vulnerability
 
-Use GitHub private vulnerability reporting: <https://github.com/wydrox/apassy/security/advisories/new>. Do not open a public issue, and do not describe the weakness in a pull request.
+Use GitHub private vulnerability reporting: <https://github.com/apassy-org/apassy/security/advisories/new>. Do not open a public issue, and do not describe the weakness in a pull request.
 
 Put in the report:
 

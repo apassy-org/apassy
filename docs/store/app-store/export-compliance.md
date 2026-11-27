@@ -119,7 +119,7 @@ Recommendations, not legal advice.
 - **Reporting:** since the BIS rule of March 2021, a mass-market end item under § 740.17(b)(1) no longer
   needs the annual self-classification report, except for some components and toolkits. Apassy is an
   end item. The owner confirms that this is still current.
-- **Open source:** the source of the whole app is public under Apache-2.0 (github.com/wydrox/apassy).
+- **Open source:** the source of the whole app is public under Apache-2.0 (github.com/apassy-org/apassy).
   Publicly available encryption source code with standard cryptography is not subject to the EAR
   (§ 742.15(b)), and since 2021 it needs no e-mail notification to BIS and NSA. Object code compiled
   from it is treated the same. The App Store binary is compiled from that source, but it is signed and

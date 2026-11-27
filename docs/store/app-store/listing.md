@@ -33,7 +33,7 @@ Count again with `python3 -c 'print(len(open(0).read().strip()))'` after an edit
 | In-App Purchases | None. Do not add any (see [review-notes.md](review-notes.md), "No In-App Purchase") |
 | Content rights | The app shows no third-party content. Answer "No" to "Does your app contain, show, or access third-party content?" |
 | Copyright | `2026 Rafal Wyderka` (the owner confirms the legal name or company) |
-| Support URL | `https://github.com/wydrox/apassy/issues` |
+| Support URL | `https://github.com/apassy-org/apassy/issues` |
 | Marketing URL | `https://apassy.wyderka.cc` |
 | Privacy policy URL | `https://apassy.wyderka.cc/privacy` (the iPhone, watch and relay sections are in `site/src/pages/privacy.astro` since 2026-11-03; check them live after the site deploy) |
 | Age rating | 4+ (answers below) |
@@ -88,7 +88,7 @@ Apple Watch
 Private by design
 - No Apassy account. No ads. No analytics. No tracking.
 - Your vault, your requests and your answers are encrypted on your devices before they go to the Apassy relay. The relay cannot read them.
-- The code is open source under the Apache-2.0 license: github.com/wydrox/apassy
+- The code is open source under the Apache-2.0 license: github.com/apassy-org/apassy
 
 You need Apassy for the Mac to make a vault and to connect agents. Get it at apassy.wyderka.cc.
 

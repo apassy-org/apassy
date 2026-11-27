@@ -79,7 +79,7 @@ There is no new user-agent, manifest-secret or 403 branch in the Worker.
 ## Local proof and next attempt
 
 Downloaded both CLI artifacts from successful GitHub
-[image run 41246581106](https://github.com/wydrox/apassy-relay/actions/runs/41246581106)
+[image run 41246581106](https://github.com/apassy-org/apassy-relay/actions/runs/41246581106)
 at the exact approved 9dd5172 source into a temporary directory. Verified each
 platform SHA256SUMS, metadata and the runbook's combined staging/preflight.
 Ran the pinned `npx wrangler dev --local` at that source: VPC was disabled, all

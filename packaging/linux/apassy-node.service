@@ -1,6 +1,6 @@
 [Unit]
 Description=Apassy node
-Documentation=https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md
+Documentation=https://github.com/apassy-org/apassy/blob/main/docs/operations/linux-node.md
 
 [Service]
 Type=simple

@@ -16,9 +16,11 @@ Status: the image, its workflow and the bench script exist (E2). The Apassy app 
 
 | Tag | Content |
 | --- | --- |
-| `ghcr.io/wydrox/apassy-brain:<version>` | CPU image, `linux/amd64` and `linux/arm64` (same as `:<version>-cpu`) |
-| `ghcr.io/wydrox/apassy-brain:<version>-cuda` | CUDA image, `linux/amd64` only. Built and tested on a CPU; not tested on a GPU |
+| `ghcr.io/apassy-org/apassy-brain:<version>` | CPU image, `linux/amd64` and `linux/arm64` (same as `:<version>-cpu`) |
+| `ghcr.io/apassy-org/apassy-brain:<version>-cuda` | CUDA image, `linux/amd64` only. Built and tested on a CPU; not tested on a GPU |
 | `:<version>-cpu-amd64`, `:<version>-cpu-arm64`, `:<version>-cuda-amd64`, `:sha-<12 hex>-<variant>-<arch>` | the single images |
+
+No image is published yet. GHCR makes a new package private, so after the first push an owner of the organization `apassy-org` makes `apassy-brain` public once (the package's settings, "Change visibility"). Until then `docker pull` without a login fails.
 
 `<version>` is the shared Apassy release version. The CPU archives `apassy-brain-<version>-cpu-<arch>.tar.gz` with a `.sha256` file are also assets of the GitHub release `<version>` (the CUDA archive is over the 2 GiB asset limit, so it is on GHCR only).
 
@@ -55,7 +57,7 @@ Requirements: Docker, 2 vCPU and 3 GB of memory (the first limits of ADR 0035 se
      -v apassy-brain-data:/data \
      -v ~/apassy-brain/token:/run/secrets/brain-token:ro \
      -e LAYA_API_KEY_FILE=/run/secrets/brain-token \
-     ghcr.io/wydrox/apassy-brain:<version>
+     ghcr.io/apassy-org/apassy-brain:<version>
    ```
 
    - Without a token the server does not start: it listens on `0.0.0.0` inside the container, and `serve.py` refuses a non-loopback address without `LAYA_API_KEY` (`bind_problem`). `LAYA_API_KEY_FILE` keeps the token out of `docker inspect`; `-e LAYA_API_KEY=…` also works.
@@ -81,7 +83,7 @@ Compose (the same settings):
 ```yaml
 services:
   brain:
-    image: ghcr.io/wydrox/apassy-brain:<version>
+    image: ghcr.io/apassy-org/apassy-brain:<version>
     restart: unless-stopped
     ports: ["127.0.0.1:8770:8770"]
     environment:
@@ -127,14 +129,14 @@ The server runs training jobs itself (`PUT /v1/train/<sha256>`, [fine-tune.md](f
 ```
 docker run --rm --cpus=2 --memory=4g --memory-swap=4g --cpu-shares=256 \
   -v "$PWD/export:/data/export:ro" -v apassy-brain-train:/data/out \
-  ghcr.io/wydrox/apassy-brain:<version> train --data /data/export --out /data/out/candidate --deadline 7200
+  ghcr.io/apassy-org/apassy-brain:<version> train --data /data/export --out /data/out/candidate --deadline 7200
 ```
 
 `train` runs `local_train.py` from the heads in the image at `nice 10`. The result is `candidate.safetensors`, `manifest.json` and `result.json`. Delete the export folder after the job: it has the commands and the user requests of the owner decisions. The new head set starts in shadow mode on the Mac; only the owner promotes it.
 
 ## 7. Update
 
-`docker pull ghcr.io/wydrox/apassy-brain:<new version>`, then remove and start the container with the same volume. The head sets in `/data/heads` stay. A head set whose manifest names another base revision or other base weights stops working (the server checks it at each load); Apassy uploads it again or asks the owner.
+`docker pull ghcr.io/apassy-org/apassy-brain:<new version>`, then remove and start the container with the same volume. The head sets in `/data/heads` stay. A head set whose manifest names another base revision or other base weights stops working (the server checks it at each load); Apassy uploads it again or asks the owner.
 
 ## 8. Deletion
 
@@ -153,7 +155,7 @@ docker run --rm --cpus=2 --memory=4g --memory-swap=4g --cpu-shares=256 \
    docker rm -f apassy-brain
    docker volume rm apassy-brain-data apassy-brain-train
    rm -f ~/apassy-brain/token && rmdir ~/apassy-brain
-   docker image rm ghcr.io/wydrox/apassy-brain:<version>
+   docker image rm ghcr.io/apassy-org/apassy-brain:<version>
    ```
 
 5. Check: `docker volume ls | grep apassy-brain` shows nothing.

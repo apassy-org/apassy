@@ -4,7 +4,7 @@
 #
 # - Push the tag bouncer-image-<version> (the shared version of release-versions.json)
 #   on the exact tested release commit: the run builds, tests and publishes
-#   ghcr.io/wydrox/apassy-brain:<version> (CPU, arm64 + amd64), :<version>-cuda, and
+#   ghcr.io/apassy-org/apassy-brain:<version> (CPU, arm64 + amd64), :<version>-cuda, and
 #   the two CPU archives as assets of the GitHub release <version> when it exists.
 # - Actions > Bouncer brain image > Run workflow builds and tests the same three
 #   images and keeps them as artifacts for 7 days. It publishes nothing.
@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/wydrox/apassy-brain
+  IMAGE: ghcr.io/apassy-org/apassy-brain
   BUCKET: apassy-downloads
 
 defaults:

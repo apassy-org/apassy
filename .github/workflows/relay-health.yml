@@ -1,5 +1,5 @@
 # Hourly check of the live hosted relay (copied from the archived repository
-# wydrox/apassy-relay, ADR 0037 stage 1, plan 0037 1E). It calls two public URLs only
+# apassy-org/apassy-relay, ADR 0037 stage 1, plan 0037 1E). It calls two public URLs only
 # and uses no secret and no token. A scheduled workflow runs from the default branch,
 # and a manual run from another branch is refused by the job condition.
 name: Relay health

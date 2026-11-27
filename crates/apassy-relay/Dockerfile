@@ -16,7 +16,7 @@ ARG APASSY_RELEASE_COMMIT=unknown
 LABEL org.opencontainers.image.title="apassy-relay" \
       org.opencontainers.image.version=$APASSY_RELEASE_VERSION \
       org.opencontainers.image.revision=$APASSY_RELEASE_COMMIT \
-      org.opencontainers.image.source="https://github.com/wydrox/apassy" \
+      org.opencontainers.image.source="https://github.com/apassy-org/apassy" \
       org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \

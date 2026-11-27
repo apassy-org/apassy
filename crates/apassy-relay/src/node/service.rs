@@ -57,7 +57,7 @@ pub fn generate_node_unit(
         None => String::new(),
     };
     Ok(format!(
-        "[Unit]\nDescription=Apassy node\nDocumentation=https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md\n\n[Service]\nType=simple\nExecStart={exe} serve{data}\nExecStop={exe} serve --stop{data}\n{credential}Restart=on-failure\nRestartSec=10\nTimeoutStopSec=20\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Apassy node\nDocumentation=https://github.com/apassy-org/apassy/blob/main/docs/operations/linux-node.md\n\n[Service]\nType=simple\nExecStart={exe} serve{data}\nExecStop={exe} serve --stop{data}\n{credential}Restart=on-failure\nRestartSec=10\nTimeoutStopSec=20\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n"
     ))
 }
 

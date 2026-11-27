@@ -7,7 +7,7 @@ import { T } from '../timeline.js';
 const S = T.outro;
 const PRE = 0.25; // the scene starts before its cut, so it is already moving at the cut
 const L = T.lockup - S; // the lockup lands on the last big hit
-const CTA = 'github.com/wydrox/apassy';
+const CTA = 'github.com/apassy-org/apassy';
 const SUB = 'For macOS · Works with Claude Code and Codex';
 const LH = pick(176, 172); // lockup height, px
 const CY = pick(420, 800); // the center of the mark on screen

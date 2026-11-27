@@ -15,7 +15,7 @@ self-signed certificate that they pin. Nothing listens on `0.0.0.0` or `::`.
   SHA-256 of the tarball and installs into `~/.local/bin`.
 
 Check the download against `SHA256SUMS` (`sha256sum -c --ignore-missing SHA256SUMS`) and
-its GitHub attestation (`gh attestation verify <file> --repo wydrox/apassy`).
+its GitHub attestation (`gh attestation verify <file> --repo apassy-org/apassy`; for builds up to 0.5.20, `--owner wydrox`).
 
 ## Start
 
@@ -28,4 +28,4 @@ its GitHub attestation (`gh attestation verify <file> --repo wydrox/apassy`).
 `apassy status`, `apassy doctor`, `apassy pair`, and `apassy uninstall` do the rest.
 `apassy-team` is `apassy team` for one more release.
 
-The guide: https://github.com/wydrox/apassy/blob/main/docs/operations/linux-node.md
+The guide: https://github.com/apassy-org/apassy/blob/main/docs/operations/linux-node.md

@@ -1,7 +1,7 @@
 # apassy-relay alpha: specification
 
 Date: 2026-09-30. Status: the plan for one day of work by three developers, changed the same day for host-held item keys (section 21).
-Design source: ADR 0013 of the core (way B only). Core crate: `wydrox/apassy` at rev `77f6628`.
+Design source: ADR 0013 of the core (way B only). Core crate: `apassy-org/apassy` at rev `77f6628`.
 
 ## 1. What the alpha does
 
@@ -69,7 +69,7 @@ upstream API hosts (api.stripe.com, api.openai.com, ...)
 
 ## 4. Crate layout and ownership
 
-One crate, `apassy-relay`, license `Apache-2.0`, a member of the `wydrox/apassy` workspace (ADR 0037). Rust 1.97.0, edition 2024, `#![forbid(unsafe_code)]`, clippy `all = "warn"`.
+One crate, `apassy-relay`, license `Apache-2.0`, a member of the `apassy-org/apassy` workspace (ADR 0037). Rust 1.97.0, edition 2024, `#![forbid(unsafe_code)]`, clippy `all = "warn"`.
 
 | Path | What | Owner |
 | --- | --- | --- |

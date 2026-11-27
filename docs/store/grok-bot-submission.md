@@ -48,7 +48,7 @@ plugin, Grok Bot can call an API with your key, but it never sees the key.
 - No Apassy server is on the path. The Bot connects to your own Mac through Tailscale Funnel. You can
   turn remote access off, or disconnect the Bot, at any time.
 
-You need a Mac with Apassy and Tailscale. Apache-2.0. Source: https://github.com/wydrox/apassy
+You need a Mac with Apassy and Tailscale. Apache-2.0. Source: https://github.com/apassy-org/apassy
 
 ## Logo
 

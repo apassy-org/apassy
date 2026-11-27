@@ -1,7 +1,7 @@
 //! Track proxy: the swap rules (auth positions only).
 //!
 //! A copy, with attribution, of the swap rules of `src/broker/proxy/swap.rs` of
-//! wydrox/apassy at rev 77f6628 (Apache-2.0), changed to work on a target and a list
+//! apassy-org/apassy at rev 77f6628 (Apache-2.0), changed to work on a target and a list
 //! of headers instead of a raw request head. The placeholder minting stays in the
 //! core (`apassy::broker::proxy::mint_placeholder`).
 //!

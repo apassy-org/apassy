@@ -16,7 +16,7 @@ SPEC.loader.exec_module(reuse)
 
 class ReuseTests(unittest.TestCase):
     def setUp(self):
-        self.repo = 'wydrox/apassy'
+        self.repo = 'apassy-org/apassy'
         self.tree, self.head, self.tested, self.main = ('a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
         self.run = dict(id=12, run_attempt=2, path=reuse.WORKFLOW, workflow_id=34,
                         event='pull_request', head_sha=self.head, status='completed', conclusion='success',

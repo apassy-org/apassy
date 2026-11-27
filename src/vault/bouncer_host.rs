@@ -35,7 +35,7 @@ pub const MAX_BEARER_BYTES: usize = 512;
 pub const GENERATED_BEARER_BYTES: usize = 32;
 /// The image of the self-host server (plan 0035 unit E2), tagged with the shared
 /// release version.
-pub const BRAIN_IMAGE: &str = "ghcr.io/wydrox/apassy-brain";
+pub const BRAIN_IMAGE: &str = "ghcr.io/apassy-org/apassy-brain";
 
 /// The two choices of ADR 0035 section 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

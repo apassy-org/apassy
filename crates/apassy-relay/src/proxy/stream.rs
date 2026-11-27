@@ -1,7 +1,7 @@
 //! Track proxy: byte-stream helpers.
 //!
 //! A copy, with attribution, of the `Conn` and `Scanner` of
-//! `src/broker/proxy/http1.rs` of wydrox/apassy at rev 77f6628 (Apache-2.0), changed
+//! `src/broker/proxy/http1.rs` of apassy-org/apassy at rev 77f6628 (Apache-2.0), changed
 //! for the relay. The shared `echo::Replacer` owns its pairs; `BodyReader` turns an
 //! upstream response into a `Read` that replaces each value with its placeholder.
 //! The bytes stay the same length, so a `Content-Length` stays true.

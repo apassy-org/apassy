@@ -113,7 +113,7 @@ LABEL org.opencontainers.image.title="apassy-brain" \
       org.opencontainers.image.description="Apassy bouncer brain server (bouncer-brain-v1), variant ${VARIANT}" \
       org.opencontainers.image.version=$APASSY_RELEASE_VERSION \
       org.opencontainers.image.revision=$APASSY_RELEASE_COMMIT \
-      org.opencontainers.image.source="https://github.com/wydrox/apassy" \
+      org.opencontainers.image.source="https://github.com/apassy-org/apassy" \
       org.opencontainers.image.licenses="Apache-2.0" \
       cc.wyderka.apassy.brain.variant=$VARIANT
 

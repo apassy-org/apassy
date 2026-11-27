@@ -50,7 +50,7 @@ PURCHASES
 The app has no purchase, no price, and no link or instruction to buy. All features in this app work without payment.
 
 ENCRYPTION
-The app includes its own standard encryption, in addition to Apple's: SQLCipher with OpenSSL for the vault, TLS with rustls, ChaCha20-Poly1305 and ECDSA P-256. Its purpose is the confidentiality of the owner's data. Only standard algorithms; no proprietary cryptography. The export compliance answers say standard encryption, mass market; App Store Connect needs no documentation for that outside France, so the Info.plist says ITSAppUsesNonExemptEncryption = NO. The app is not offered in France until the ANSSI declaration is filed. The source code is public under Apache-2.0: https://github.com/wydrox/apassy
+The app includes its own standard encryption, in addition to Apple's: SQLCipher with OpenSSL for the vault, TLS with rustls, ChaCha20-Poly1305 and ECDSA P-256. Its purpose is the confidentiality of the owner's data. Only standard algorithms; no proprietary cryptography. The export compliance answers say standard encryption, mass market; App Store Connect needs no documentation for that outside France, so the Info.plist says ITSAppUsesNonExemptEncryption = NO. The app is not offered in France until the ANSSI declaration is filed. The source code is public under Apache-2.0: https://github.com/apassy-org/apassy
 
 PRIVACY
 No tracking. The relay that carries sync and requests keeps device ids, device names, public keys and push tokens for app functionality; the App Privacy answers declare them as linked to the user. The vault, the requests and the answers are end-to-end encrypted. Privacy policy: https://apassy.wyderka.cc/privacy

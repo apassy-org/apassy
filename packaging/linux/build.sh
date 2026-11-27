@@ -135,7 +135,7 @@ rm "$doc/LICENSE"
     printf '%s\n' \
         'Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/' \
         'Upstream-Name: apassy' \
-        'Source: https://github.com/wydrox/apassy' \
+        'Source: https://github.com/apassy-org/apassy' \
         '' \
         'Files: *' \
         'Copyright: 2026 the Apassy authors' \
