@@ -41,3 +41,21 @@
   also run `cargo test --features vault --doc`. A test that uses a fixed port, a
   fixed path, or the Keychain must not run beside other tests: give it a free port
   and a temporary directory, or put it in the `serial` test group with the reason.
+
+# Local tests on the Mac mini
+
+- Use GitHub Actions for full test suites and release builds.
+  Use CI artifacts for local app checks when possible.
+- Limit local builds to focused tests, native UI checks, and device or simulator checks.
+  Run other local builds only when the user requests them.
+- When the tools support it, use a separate target directory for each local test session.
+- After each local test session, remove the build files that the session created.
+  This applies after failed tests too.
+  Keep required test evidence outside `target` before cleanup.
+- Before cleanup, make sure all related builds, tests, apps, and simulator runs have stopped.
+  Never remove a target directory that another session uses.
+- If the session created the whole target directory, remove it after the checks.
+  If the directory existed before the session, remove only build files from that session.
+  Do not remove source files, user data, or files from another session.
+- If cleanup is blocked, report the remaining path, size, and reason.
+  Report the test result and available disk space after cleanup.
